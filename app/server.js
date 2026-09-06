@@ -76,6 +76,8 @@ const {
 } = SearchProviders;
 // 模块 2-2：跨 provider 健康度路由（Serper→Brave→Bocha→Tavily 备用源切换）
 const ProviderHealth = require('./services/providers/health.js');
+// 双源融合（多源三角验证）算子：把「单源采信」升级为「多源可信」
+const SourceFusion = require('./lib/source-fusion.js');
 // ============ 数据自动化（A12 实施）：LLM 网关 / 三层缓存 / 任务队列 / 成本归因 ============
 // 模块 0-2：LLM 统一网关（45s 超时 / 重试×2 / 熔断 / 字段级降级）+ 1-1 成本归因
 const LLMGateway = require('./services/llm-gateway.js');
@@ -87,6 +89,8 @@ const Tasks = require('./services/tasks.js');
 const Cost = require('./services/cost.js');
 // 模块 2-1：定时增量雷达调度（日 4 趟，runSweep 由本文件注入）
 const Scheduler = require('./services/scheduler.js');
+// 2026-09-05 技术债 §6 ⬜：主动推送预警通道（站内信落盘 + Webhook；邮件规划中）
+const Alerts = require('./services/alerts.js');
 // =====================================================================
 
 // ---------- 生产止血：鉴权 / 限流 / 并发护栏 ----------
@@ -565,11 +569,17 @@ async function searchProvider(query, config, gl, kind) {
   if (!metering.withinQuota(tid, 'searchCalls')) {
     return { results: [], error: 'quota', note: 'SEARCH_QUOTA' };
   }
-  // 候选顺序：主 provider 在前，其余按健康度（不健康者垫底）
+  // 候选顺序：主 provider 在前，其余按健康度（不健康者垫底）；exhausted（额度类失败）源直接排除早退
+  // 2026-09-06 B-01：全源 402/429 时不再每 query 把配置源全打一遍——recordFail 已按错误标记 exhausted
   const main = providerMain(config);
   const rest = PROVIDER_ORDER.filter(p => p !== main)
     .sort((a, b) => (ProviderHealth.isHealthy(b) ? 1 : 0) - (ProviderHealth.isHealthy(a) ? 1 : 0));
-  const candidates = [main, ...rest].filter(p => providerConfigured(config, p));
+  const candidates = [main, ...rest].filter(p => providerConfigured(config, p) && !ProviderHealth.isExhausted(p));
+  // 所有配置源都已 exhausted（额度耗尽）→ 直接抛清晰 SEARCH_QUOTA，不再发起任何外部调用
+  if (!candidates.length) {
+    metering.recordCall(tid, 'searchCalls', 0);
+    throw new Error('SEARCH_QUOTA');
+  }
   let lastErr = null;
   const _s0 = Date.now();
   for (const name of candidates) {
@@ -596,6 +606,43 @@ async function searchProvider(query, config, gl, kind) {
   const billed = status != null ? metering.shouldBill(status) : false;
   metering.recordCall(tid, 'searchCalls', billed ? 1 : 0);
   throw lastErr;
+}
+
+// ============ 双源融合搜索（多源三角验证 seam）============
+// 主源仍走 searchProvider（含内部 failover + 计费 + 缓存），本函数在「主源已得结果」之上，
+// 并行再跑一个「健康且已配置」的备用源，比对域名交集 → 给 corroboration。
+// 成本纪律：仅当 config.search.fusion !== false 且存在 ≥2 个已配置健康源时才额外发一次备用源；
+// 当前只配 Serper（单源）时直接返回主结果，零额外开销，不会拖慢 discover。
+// 返回结构兼容 searchProvider（{results,error,note}），额外挂：
+//   _fusion: { sources, agree, sharedDomains }   供可观测性/审计
+//   _basis:  'verified'(≥2源一致) | 'claimed'(单源或源间无交集) | undefined(未启用融合)
+async function multiSourceSearch(query, config, gl, kind) {
+  const primary = await searchProvider(query, config, gl, kind);
+  const fusionOn = (config && config.search && config.search.fusion) !== false;
+  if (!fusionOn) return primary;
+
+  const main = providerMain(config);
+  const alt = PROVIDER_ORDER.filter(p => p !== main)
+    .sort((a, b) => (ProviderHealth.isHealthy(b) ? 1 : 0) - (ProviderHealth.isHealthy(a) ? 1 : 0))
+    .find(p => providerConfigured(config, p) && ProviderHealth.isHealthy(p));
+  if (!alt) return primary; // 单源，无法融合
+
+  let altResults = null;
+  try {
+    altResults = await providerCall(alt, query, config, gl);
+    ProviderHealth.recordOk(alt);
+  } catch (e) {
+    ProviderHealth.recordFail(alt, e);
+    return primary; // 备用源失败：不影响主结果，主源结论照常返回
+  }
+
+  const fz = SourceFusion.fuse([
+    { name: main, ok: true, results: (primary && primary.results) || [] },
+    { name: alt, ok: true, results: (altResults && altResults.results) || [] }
+  ]);
+  primary._fusion = { sources: fz.sources, agree: fz.agree, sharedDomains: fz.sharedDomains };
+  primary._basis = fz.basis;
+  return primary;
 }
 
 // ---- 定向探测健康度（失败可见性，§5-2）：不再静默吞掉探测失败 ----
@@ -1052,18 +1099,37 @@ function buildFanoutQueries(track, intent) {
 
 async function fanoutSearch(queries, config, gl) {
   // 模块 0-3：discover 扇出查询用 24h 缓存（同赛道跨租户/跨时段复用，命中免配额）
+  // 技术债 §7.4 修复（2026-09-05）：全失败不再静默丢弃 ——
+  //   · 配额类失败（402/429/exhausted/quota）→ 上浮清晰 SEARCH_QUOTA（前端 discover_error → 429 语义）
+  //   · 其他全失败 → 上浮首个原始错误（不再让 runDiscover 猜 SEARCH_FAILED）
+  //   · 部分失败 → 记 warn 日志可观测，保留成功结果（不阻塞发现）
   const results = await Promise.allSettled(queries.map(q => searchProvider(q, config, gl, 'serp-discover')));
   const ok = [];
-  let quota = false;
+  let quotaSignal = false;
+  let failCount = 0;
+  const failErrs = [];
   results.forEach(r => {
     if (r.status === 'fulfilled') {
-      // T1-1：searchProvider 在额度耗尽时返回 {error:'quota'}（非抛出，避免其它调用点崩）；此处汇聚信号并抛出，
-      // 让 /api/discover 路由能向用户返回 429 配额错误（而非静默返回空结果）。
-      if (r.value && r.value.error === 'quota') { quota = true; return; }
+      // T1-1：searchProvider 在额度耗尽时返回 {error:'quota'}（非抛出，避免其它调用点崩）；此处汇聚信号并抛出
+      if (r.value && r.value.error === 'quota') { quotaSignal = true; return; }
       ok.push(r.value);
+    } else {
+      failCount++;
+      const msg = String((r.reason && r.reason.message) || r.reason || '');
+      failErrs.push(msg);
+      if (/QUOTA|EXHAUSTED|_402|_429|_403/i.test(msg)) quotaSignal = true; // 配额/限流/key 失效类
     }
   });
-  if (quota) throw new Error('SEARCH_QUOTA');
+  // 错误上浮（§7.4）：0 成功时必须让调用方看到清晰原因，绝不静默返回空
+  if (!ok.length) {
+    if (quotaSignal) throw new Error('SEARCH_QUOTA');     // 配额耗尽 → 前端 discover_error(SEARCH_QUOTA)
+    if (failCount === queries.length && failErrs.length) throw new Error(failErrs[0]); // 全失败 → 上浮首个原始错误
+    throw new Error('SEARCH_FAILED');
+  }
+  // 部分失败：可观测（不静默），保留成功结果继续发现
+  if (failCount > 0) {
+    try { Logger.warn('fanout 部分查询失败', { ok: ok.length, failCount, total: queries.length, errs: failErrs.slice(0, 3) }); } catch (e) {}
+  }
   return ok;
 }
 
@@ -1720,6 +1786,8 @@ async function sweepProject(proj, config) {
   if (!state || !Array.isArray(state.competitors)) return { ok: false, reason: 'no_state' };
   const hasLlm = !!(config && config.llm && config.llm.apiKey);
   const beforeMoves = new Map(state.competitors.map(c => [c.id, JSON.stringify(c.recentMoves || [])]));
+  // 2026-09-05 预警推送：记录"谁变了、新增了什么动作"（不止计数），供站内信/Webhook
+  const newMoves = [];
   let probed = 0, changed = 0;
   for (const comp of state.competitors) {
     if (comp.status !== 'done' || comp.suppressed) continue;
@@ -1727,7 +1795,14 @@ async function sweepProject(proj, config) {
     try {
       const r = await deepDiveField(state, comp, 'recentMoves', config);
       probed++;
-      if (JSON.stringify(comp.recentMoves || []) !== beforeMoves.get(comp.id)) changed++;
+      if (JSON.stringify(comp.recentMoves || []) !== beforeMoves.get(comp.id)) {
+        changed++;
+        // diff：after 中不在 before 的条目 = 新增动作（按 JSON 归一化匹配）
+        let prev = [];
+        try { prev = JSON.parse(beforeMoves.get(comp.id) || '[]'); } catch (e) {}
+        const added = (comp.recentMoves || []).filter(x => !prev.some(y => JSON.stringify(y) === JSON.stringify(x)));
+        if (added.length) newMoves.push({ competitorId: comp.id, name: comp.name, moves: added });
+      }
     } catch (e) { /* 单家探测失败不阻断整轮 */ }
   }
   if (changed > 0) {
@@ -1736,6 +1811,19 @@ async function sweepProject(proj, config) {
       decorateState(state);
       M.logEvent({ changeType: 'sweep_changes', source: 'sweep', from: String(probed), to: String(changed), confidence: null });
     } catch (e) { /* 派生/记账失败不影响落盘 */ }
+    // 预警推送（技术债 §6 ⬜ 修复）：有新增动作 → 站内信落盘 + Webhook（若配置）
+    if (newMoves.length) {
+      const webhookUrl = (config.alerts && config.alerts.webhookUrl) || '';
+      try {
+        newMoves.forEach(nm => {
+          Alerts.push(state.tenantId || proj.tenantId, {
+            type: 'competitor-move', projectId: proj.id, track: state.track,
+            competitorId: nm.competitorId, competitorName: nm.name,
+            moves: nm.moves.slice(0, 3).map(m => (m && m.type ? m.type : '') + (m.what || m.title || m.url || '') || JSON.stringify(m).slice(0, 120)),
+          }, webhookUrl);
+        });
+      } catch (e) { /* 推送失败不影响落盘 */ }
+    }
   }
   saveState(state);
   // 更新 lastSweepAt（db 镜像表，scheduler/status 用）
@@ -1870,7 +1958,9 @@ async function deepResearchOne(comp, state, config) {
   let anchorDomain = domainOf(comp.url);
   if (!anchorDomain) {
     try {
-      const r0 = await searchProvider(`"${comp.name}" official website brand`, config, gl);
+      const r0 = await multiSourceSearch(`"${comp.name}" official website brand`, config, gl);
+      // 多源三角验证：≥2 源一致指向同一官网域名时，锚点 basis 升级为 verified（否则保持 inferred）
+      comp.anchorBasis = r0._basis === 'verified' ? 'verified' : 'inferred';
       const hit = (r0.results || []).find(x => belongsToBrand(x, comp.name, '') && sourceTier(x.url, '') !== 3 && !/reddit\.|wikipedia\.|facebook\.|instagram\.|tiktok\.|amazon\.|etsy\./i.test(x.url || ''));
       logAttempt(comp, 'anchor', `"${comp.name}" official website brand`, sProvider, !!hit, hit ? '命中官网候选' : '未命中官网候选');
       if (hit) { comp.url = hit.url; anchorDomain = domainOf(hit.url); }
@@ -2519,8 +2609,13 @@ async function deepDiveField(state, comp, fieldKey, config) {
   const sProv = (config.search && config.search.provider) || 'search';
   const query = plan.q(comp.name);
   let results = [];
-  try { results = (await searchProvider(query, config, gl)).results || []; }
+  let l2Fusion = null;
+  try { const raw = await multiSourceSearch(query, config, gl); results = raw.results || []; l2Fusion = raw._fusion || null; }
   catch (e) { logAttempt(comp, fieldKey, query, sProv, null, '检索失败：' + String(e.message || e)); return { ok: false, reason: 'search_failed' }; }
+  // 多源三角验证结论随字段挂载（B-06 已生效：rule-channels 命中时按 agree 升 verified）
+  comp._l2Fusion = l2Fusion;
+  // 双源一致判定：agree 且存在共享域名 → 该查询的搜索结果有双源证据
+  const fusedVerified = !!(l2Fusion && l2Fusion.agree && Array.isArray(l2Fusion.sharedDomains) && l2Fusion.sharedDomains.length);
   const srcs = results.slice(0, 5).filter(x => /^https?:/i.test(x.url || '')).map(x => ({ url: x.url, title: x.title, tier: sourceTier(x.url, domainOf(comp.url)), kind: 'l2-' + fieldKey, excerpt: String(x.content || '').slice(0, 200) }));
   const anchor = domainOf(comp.url);
 
@@ -2537,7 +2632,8 @@ async function deepDiveField(state, comp, fieldKey, config) {
     results.forEach(x => { for (const k of scopedChannels) { const p = ptns[k]; if (p && p.test(x.url || '') && belongsToBrand(x, comp.name, anchor)) found[k] = true; } });
     if (Object.keys(found).length) {
       comp.channels = comp.channels || {};
-      Object.keys(found).forEach(k => { comp.channels[k] = { present: true, confidence: 'medium', basis: 'inferred', note: 'L2 定向检索命中平台页', since: null }; });
+      // B-06（2026-09-06）：命中平台页 = 直接搜索证据；双源一致（agree+sharedDomains）→ basis 升 verified
+      Object.keys(found).forEach(k => { comp.channels[k] = { present: true, confidence: fusedVerified ? 'high' : 'medium', basis: fusedVerified ? 'verified' : 'inferred', note: fusedVerified ? '双源一致命中平台页' : 'L2 定向检索命中平台页', since: null }; });
       comp.fieldSources = comp.fieldSources || {};
       comp.fieldSources['channels'] = srcs;
       logAttempt(comp, 'channels', query, sProv, true, '命中 ' + Object.keys(found).join('/'));
@@ -3777,6 +3873,8 @@ async function handleRequest(req, res) {
       DomainRunner, DomainReg, MatEngine, M, QD, UN, VC, Agg, SW, TR,
       compareField, constructFeedbackReport, extractCandidateRules,
       Metrics, Logger, DATA,
+      // 2026-09-05 预警推送：站内信读取/已读（handlers 不直接 require，经 ctx）
+      Alerts,
       // 采集/研究组依赖
       sseClients, discoverGate, discoverFn: runDiscover, discoverLaunch, enrichOne, lookupBrand,
       // ▶ 加固（0812 体验报告）：暴露发现事件回放读取（无参→最近一次发现的事件）
@@ -3901,6 +3999,8 @@ function startServer(port) {
     const v = buildVersionInfo();
     console.log('知彼 Vantage已启动: http://localhost:' + p + '  (数据目录: ' + DATA + ')');
     console.log('[自检] 版本 v' + v.version + ' · commit ' + v.commit + ' · PID ' + v.pid + ' · 启动于 ' + v.startedAt + ' · node ' + v.node);
+    // 护栏状态可见性（技术债 §7.2）：默认演示态宽松，上线需显式开启——启动日志直陈当前状态防误判
+    console.log('[自检] 护栏状态: 配额 QUOTA_ENABLED=' + (process.env.ZB_QUOTA_ENABLED === '1' ? 'ON(限流生效)' : 'OFF(默认全量放行, 上线请设 ZB_QUOTA_ENABLED=1)') + ' · 日预算 ZB_DAILY_BUDGET_YUAN=' + (process.env.ZB_DAILY_BUDGET_YUAN || 'unset(不熔断)') + ' · 定时雷达 SCHEDULER_ENABLED=' + (process.env.SCHEDULER_ENABLED === '0' ? 'OFF' : 'ON'));
     // 模块 2-1：启动定时增量雷达（SCHEDULER_ENABLED=0 关闭）
     startScheduler();
     // 锁文件 PID 一致性校验（§5-1）：进程 PID 必须与落盘锁一致，否则说明旧实例未清理干净

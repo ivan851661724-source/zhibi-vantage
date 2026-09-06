@@ -55,4 +55,29 @@ async function schedulerStatus(ctx, req, res, url, p) {
   return ctx.sendJSON(res, 200, Scheduler.status());
 }
 
-module.exports = { tasks, costSummary, schedulerStatus };
+module.exports = { tasks, costSummary, schedulerStatus, alerts, alertsRead };
+
+// ---------- GET /api/alerts （tenant：站内信预警列表） ----------
+async function alerts(ctx, req, res, url, p) {
+  if (p !== '/api/alerts' || req.method !== 'GET') return false;
+  const ap = ctx.getAuthPayload(req);
+  if (!ap || ap.kind !== 'tenant') return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可查看。' });
+  const tid = ap.payload.tid;
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+  const items = ctx.Alerts ? ctx.Alerts.list(tid, limit) : [];
+  const unread = items.filter(x => !x.read).length;
+  return ctx.sendJSON(res, 200, { alerts: items, unread });
+}
+
+// ---------- POST /api/alerts/read （tenant：标记已读） ----------
+async function alertsRead(ctx, req, res, url, p) {
+  if (p !== '/api/alerts/read' || req.method !== 'POST') return false;
+  const ap = ctx.getAuthPayload(req);
+  if (!ap || ap.kind !== 'tenant') return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可操作。' });
+  const tid = ap.payload.tid;
+  const body = await ctx.readBody(req);
+  const ids = Array.isArray(body.ids) ? body.ids : [];
+  if (!ids.length) return ctx.sendJSON(res, 400, { error: 'EMPTY', message: '请指定 ids' });
+  const marked = ctx.Alerts ? ctx.Alerts.markRead(tid, ids) : 0;
+  return ctx.sendJSON(res, 200, { marked });
+}

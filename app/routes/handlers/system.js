@@ -42,4 +42,13 @@ async function healthz(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { metrics, healthz };
+module.exports = { metrics, healthz, publicConfig };
+
+// ---------- /api/public-config（GET，public）：前端启动期读取的公开开关 ----------
+// 当前仅演示模式闸门（F-04）：生产部署不设 ZB_DEMO_ALLOWED=1 时，?demo=1 直进被前端拦截。
+async function publicConfig(ctx, req, res, url, p) {
+  if (p !== '/api/public-config' || req.method !== 'GET') return false;
+  const demoAllowed = process.env.ZB_DEMO_ALLOWED === '1';
+  ctx.sendJSON(res, 200, { demoAllowed: demoAllowed });
+  return true;
+}

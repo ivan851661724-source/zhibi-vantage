@@ -18,6 +18,7 @@ services:
       PORT: "${PORT:-3300}"
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-1}"   # 每日定时雷达扫描（0 关闭）
       ZB_QUOTA_ENABLED: "${ZB_QUOTA_ENABLED:-0}"     # 配额硬拦截（默认关闭）
+      ZB_DEMO_ALLOWED: "${ZB_DEMO_ALLOWED:-0}"        # 演示模式闸门（生产请勿开启）
       # 安全建议：设置后 API 密钥将以加密形式落盘（务必妥善保存，丢失无法解密）
       # 生成方式：openssl rand -hex 32
       MT_MASTER_KEY: "${MT_MASTER_KEY:-}"

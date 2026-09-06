@@ -17,9 +17,10 @@ COPY app/lib ./lib
 COPY app/services ./services
 COPY app/routes ./routes
 COPY app/middleware ./middleware
+COPY app/scripts ./scripts
 
 # 预置配置种子（含 API 密钥；首次启动由 entrypoint 播种进数据卷，已存在则跳过）
-COPY config-seed/config.json /app/config-seed/config.json
+COPY config-seed /app/config-seed
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \

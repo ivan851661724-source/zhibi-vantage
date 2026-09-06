@@ -11,15 +11,9 @@
     "serperKeys": [],
     "braveKey": "",
     "bochaKey": "",
-    "tavilyKey": "",
-    "fusion": true
+    "tavilyKey": ""
   },
   "crunchbase": {
     "apiKey": ""
-  },
-  "alerts": {
-    "webhookUrl": ""
-  },
-  "ownBrands": [],
-  "_secretsEncrypted": false
+  }
 }

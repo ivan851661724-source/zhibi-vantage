@@ -68,4 +68,28 @@ async function userNotes(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { feedbackReport, ruleReview, userNotes };
+module.exports = { feedbackReport, ruleReview, userNotes, materialAction };
+
+// ---------- /api/material-action（POST：工作台三动作裁决 keep/ignore/later，落盘到服务端 state.decisions） ----------
+// 对应前端文档 §5「三动作：后端就绪后启用」。前端 wbSet 仍保留 localStorage 作为即时展示/离线兜底，
+// 本端点负责把裁决持久化到服务端，跨设备/重登录后可由 state.decisions 还原。
+async function materialAction(ctx, req, res, url, p) {
+  if (p !== '/api/material-action' || req.method !== 'POST') return false;
+  const body = await ctx.readBody(req);
+  const id = (body.id || '').trim();
+  const action = body.action; // 'keep' | 'ignore' | 'later' | '' | null（空=撤销裁决）
+  if (!id) { ctx.sendJSON(res, 400, { error: 'BAD_INPUT', message: '缺少材料 id' }); return true; }
+  const OK = { keep: 1, ignore: 1, later: 1 };
+  if (action != null && action !== '' && !OK[action]) {
+    ctx.sendJSON(res, 400, { error: 'BAD_ACTION', message: '动作仅支持 keep / ignore / later' });
+    return true;
+  }
+  const s = ctx.loadState();
+  if (!s) { ctx.sendJSON(res, 404, { error: 'NO_STATE' }); return true; }
+  s.decisions = s.decisions || {};
+  if (!action || action === '') delete s.decisions[id];
+  else s.decisions[id] = action;
+  ctx.saveState(s);
+  ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[id] || null, decisions: s.decisions });
+  return true;
+}

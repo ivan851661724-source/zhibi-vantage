@@ -26,6 +26,8 @@ function registerAll() {
   // —— 系统可观测（public） ——
   registry.register('GET', '/metrics', 'public', SystemH.metrics);
   registry.register('GET', '/healthz', 'public', SystemH.healthz);
+  // —— 前端启动期公开开关（F-04：演示模式闸门） ——
+  registry.register('GET', '/api/public-config', 'public', SystemH.publicConfig);
   // —— 只读/派生组 ——
   registry.register('GET', '/api/version', 'public', ReadH.version);
   registry.register('GET', '/api/state', 'tenant', ReadH.state);
@@ -48,6 +50,8 @@ function registerAll() {
   registry.register('GET', '/api/feedback-report', 'tenant', FeedbackH.feedbackReport);
   registry.register('POST', '/api/rule-review', 'tenant', FeedbackH.ruleReview);
   registry.register('ALL', '/api/user-notes', 'tenant', FeedbackH.userNotes);
+  // —— 工作台三动作裁决（收了/先放着/忽略）：落盘到服务端，跨设备还原 ——
+  registry.register('POST', '/api/material-action', 'tenant', FeedbackH.materialAction);
   // —— 采集/研究组 ——
   registry.register('GET', '/api/stream', 'tenant', CollectH.stream);
   registry.register('POST', '/api/voice', 'tenant', CollectH.voice);
@@ -78,6 +82,9 @@ function registerAll() {
   registry.register('GET', '/api/tasks', 'tenant', TelemetryH.tasks);
   registry.register('GET', '/api/cost/summary', 'tenant', TelemetryH.costSummary);
   registry.register('GET', '/api/scheduler/status', 'tenant', TelemetryH.schedulerStatus);
+  // —— 预警推送（2026-09-05 §6 ⬜）：站内信列表 / 已读 ——
+  registry.register('GET', '/api/alerts', 'tenant', TelemetryH.alerts);
+  registry.register('POST', '/api/alerts/read', 'tenant', TelemetryH.alertsRead);
 }
 
 registerAll();
