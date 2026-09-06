@@ -6,6 +6,8 @@
 // 注意：密钥输入框不回填（旧版行为：GET 只回传 has* 布尔与 ownBrands，密钥永不回传前端）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
+import { isDemoMode } from '@/lib/demo';
+import { DemoPageGuard } from '@/components/demo-page-guard';
 
 interface ConfigResp {
   hasKeys?: boolean;
@@ -43,6 +45,12 @@ const splitList = (raw: string): string[] =>
   raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
 
 export default function SettingsPage() {
+  // 演示模式：本页依赖 /api/config 真实会话，替换为提示屏（F-04 配套）
+  if (isDemoMode()) return <DemoPageGuard label="设置" />;
+  return <SettingsPageInner />;
+}
+
+function SettingsPageInner() {
   const [cfg, setCfg] = useState<ConfigResp | null>(null);
   const [provider, setProvider] = useState('tavily');
   const [ds, setDs] = useState('');

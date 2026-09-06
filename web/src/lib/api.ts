@@ -3,6 +3,8 @@
 // 行为对齐：app.js 的 api()/apiAdmin()（token 注入 / JSON 解析 / 错误上抛携带 status）。
 'use client';
 
+import { exitDemo } from '@/lib/demo';
+
 const TOKEN_KEY = 'zhibi_token';
 const LEGACY_TOKEN_KEY = 'ci_token'; // 兼容旧前端（行为等价，防老用户被登出）
 
@@ -31,6 +33,8 @@ export function clearToken(): void {
   } catch {
     /* 同上 */
   }
+  // 退出登录同时退出演示模式（?demo=1 的 sessionStorage 标记），防止下次进面板仍命中 mock 态
+  exitDemo();
 }
 
 /** 后端错误模型（docs/02 §1.3）：{ error: 机器码, message: 人类可读 } */
@@ -113,4 +117,34 @@ export function register(email: string, password: string, name: string): Promise
 
 export function getVersion(): Promise<{ version?: string } & Record<string, unknown>> {
   return apiGet<{ version?: string }>('/api/version');
+}
+
+/** 演示模式闸门（F-04）：ZB_DEMO_ALLOWED=1 的部署才放行 ?demo=1 直进 */
+export function getPublicConfig(): Promise<{ demoAllowed?: boolean } & Record<string, unknown>> {
+  return apiGet<{ demoAllowed?: boolean }>('/api/public-config');
+}
+
+// ---------- 预警（tenant，F-03 异动提醒中心） ----------
+
+export interface ServerAlert {
+  id?: string;
+  type?: string;
+  at?: string;
+  read?: boolean;
+  [k: string]: unknown;
+}
+
+export function getAlerts(limit = 50): Promise<{ alerts: ServerAlert[]; unread: number }> {
+  return apiGet<{ alerts: ServerAlert[]; unread: number }>('/api/alerts?limit=' + limit);
+}
+
+/** 标记已读（ids 为空时后端 400，调用方需自行保证非空） */
+export function markAlertsRead(ids: string[]): Promise<{ marked: number }> {
+  return apiPost<{ marked: number }>('/api/alerts/read', { ids });
+}
+
+// ---------- 工作台三动作（tenant：服务端持久化，跨设备还原） ----------
+
+export function materialAction(id: string, action: string): Promise<{ ok: boolean; decisions: Record<string, string> }> {
+  return apiPost<{ ok: boolean; decisions: Record<string, string> }>('/api/material-action', { id, action });
 }

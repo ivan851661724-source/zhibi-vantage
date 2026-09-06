@@ -9,6 +9,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiPost } from '@/lib/api';
+import { isDemoMode } from '@/lib/demo';
+import { DemoPageGuard } from '@/components/demo-page-guard';
 import type { ZhibiState } from '@/types/state';
 
 // ---------- 后端 /api/sector 响应（宽松建模，字段逐个收紧） ----------
@@ -263,6 +265,12 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
 }
 
 export default function AssetsPage() {
+  // 演示模式：本页依赖 POST /api/sector 服务端计算，替换为提示屏（F-04 配套）
+  if (isDemoMode()) return <DemoPageGuard label="算法资产" />;
+  return <AssetsPageInner />;
+}
+
+function AssetsPageInner() {
   const { state, loading } = useZhibiState();
   const [r, setR] = useState<SectorResp | null>(null);
   const [fetching, setFetching] = useState(false);

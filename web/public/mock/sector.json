@@ -1,0 +1,25 @@
+{
+  "track": "定制手办 · 潮流玩具",
+  "quadrants": [
+    { "name": "品类分布 · 谁在做什么", "items": [
+      { "label": "标准定制人偶", "evidence": "ok", "evidenceLabel": "饱和", "value": "6/6 家" },
+      { "label": "可动关节 / 场景配件", "evidence": "warn", "evidenceLabel": "分散", "value": "2/6 家" },
+      { "label": "磁吸模块化 / 亲子共创", "evidence": "unk", "evidenceLabel": "空白", "value": "0/6 家" }
+    ]},
+    { "name": "价格阶梯 · 市场带", "bands": [
+      { "label": "低价带", "me": false, "width": 34, "range": "$19–49" },
+      { "label": "主力带", "me": true, "width": 52, "range": "$50–99" },
+      { "label": "高端带", "me": false, "width": 30, "range": "$100–175" }
+    ]},
+    { "name": "渠道覆盖矩阵", "items": [
+      { "label": "官网独立站", "evidence": "ok", "evidenceLabel": "海外主战场", "value": "6/6 家" },
+      { "label": "Etsy / Amazon", "evidence": "warn", "evidenceLabel": "半覆盖", "value": "3/6 家" },
+      { "label": "TikTok Shop / 小红书", "evidence": "unk", "evidenceLabel": "待观察", "value": "1/6 家（刚开）" }
+    ]},
+    { "name": "头部格局 · 关系定位", "items": [
+      { "label": "MakieLab · 工艺口碑", "evidence": "ok", "evidenceLabel": "老牌头部", "value": "价 £119 起" },
+      { "label": "Hero Forge · 上新凶猛", "evidence": "warn", "evidenceLabel": "新兴势力", "value": "月更 24 款" },
+      { "label": "MiniYou / Figurine", "evidence": "unk", "evidenceLabel": "快时尚", "value": "低价走量" }
+    ]}
+  ]
+}

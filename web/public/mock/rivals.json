@@ -1,0 +1,92 @@
+[
+  {
+    "id": "rival_makie",
+    "name": "MakieLab",
+    "avatar": "M",
+    "tag": "英国 · 定制人偶老牌 · 2008",
+    "relation": "direct",
+    "relationLabel": "直接对手",
+    "price": { "from": 119, "currency": "GBP", "band": "市场带 £95–£175" },
+    "channels": [
+      { "label": "官网", "tier": "ok" },
+      { "label": "Etsy", "tier": "ok" },
+      { "label": "Amazon UK", "tier": "ok" },
+      { "label": "无小红书", "tier": "warn" }
+    ],
+    "latestAction": { "type": "down", "text": "降价 20%", "detail": "全系列下调至历史最低", "when": "今晨" }
+  },
+  {
+    "id": "rival_hero",
+    "name": "Hero Forge",
+    "avatar": "H",
+    "tag": "美国 · 3D 打印角色定制 · 2014",
+    "relation": "ref",
+    "relationLabel": "高价参考",
+    "price": { "from": 34.99, "currency": "USD", "band": "市场带 $20–$160" },
+    "channels": [
+      { "label": "官网", "tier": "ok" },
+      { "label": "TikTok Shop", "tier": "ok" },
+      { "label": "Etsy", "tier": "ok" }
+    ],
+    "latestAction": { "type": "new", "text": "上新 24 款", "detail": "「Mythic 战役」系列", "when": "昨夜" }
+  },
+  {
+    "id": "rival_mini",
+    "name": "MiniYou Fig",
+    "avatar": "M",
+    "tag": "美国 · 快时尚定制人偶 · 2023",
+    "relation": "cheap",
+    "relationLabel": "低价走量",
+    "price": { "from": 29, "currency": "USD", "band": "市场带 $19–$49" },
+    "channels": [
+      { "label": "独立站", "tier": "ok" },
+      { "label": "TikTok Shop", "tier": "ok" },
+      { "label": "Instagram Shop", "tier": "warn" }
+    ],
+    "latestAction": { "type": "down", "text": "降价 8%", "detail": "入门款跟进降价", "when": "昨天" }
+  },
+  {
+    "id": "rival_bjd",
+    "name": "BJD Doki",
+    "avatar": "D",
+    "tag": "日本 · 磁吸关节 BJD · 2019",
+    "relation": "ref",
+    "relationLabel": "高价参考",
+    "price": { "from": 1980, "currency": "CNY", "band": "市场带 ¥1,200–¥3,400" },
+    "channels": [
+      { "label": "官网", "tier": "ok" },
+      { "label": "乐天", "tier": "ok" },
+      { "label": "小红书(新)", "tier": "ok" }
+    ],
+    "latestAction": { "type": "new", "text": "新开小红书店", "detail": "国风限定 3 款", "when": "昨天" }
+  },
+  {
+    "id": "rival_fig",
+    "name": "Figurine Studio",
+    "avatar": "F",
+    "tag": "美国 · 量产快线 · 2021",
+    "relation": "direct",
+    "relationLabel": "直接对手",
+    "price": { "from": 45, "currency": "USD", "band": "市场带 $35–$80" },
+    "channels": [
+      { "label": "Amazon US", "tier": "ok" },
+      { "label": "独立站(弱)", "tier": "warn" }
+    ],
+    "latestAction": { "type": "crisis", "text": "差评暴涨", "detail": "头雕不符 · 4%→23%", "when": "今晨" }
+  },
+  {
+    "id": "rival_custom",
+    "name": "Custom Doll Lab",
+    "avatar": "C",
+    "tag": "中国 · 工厂直营 · 2020",
+    "relation": "cheap",
+    "relationLabel": "低价走量",
+    "price": { "from": 89, "currency": "USD", "band": "市场带 $59–$110" },
+    "channels": [
+      { "label": "独立站", "tier": "ok" },
+      { "label": "1688", "tier": "ok" },
+      { "label": "亚马逊(未探测)", "tier": "warn" }
+    ],
+    "latestAction": { "type": "up", "text": "涨价 $10", "detail": "经典款未公告调价", "when": "昨天" }
+  }
+]

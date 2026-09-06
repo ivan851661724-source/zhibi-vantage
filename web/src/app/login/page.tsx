@@ -1,19 +1,55 @@
 // 登录页（Phase 0 功能版；Phase 1 对齐设计稿 #authScreen 视觉）
 // 契约：docs/02-API契约.md §2.1 —— 注册字段为 { email, password, name }（name=品牌/工作区名）。
+// F-04 演示模式闸门：URL 带 ?demo=1 → 查 GET /api/public-config（ZB_DEMO_ALLOWED=1 才放行）
+//   · 放行：写 demo-token + sessionStorage 标记 → 进面板（mock state）
+//   · 拦截：显示「演示模式未启用」屏（复刻旧版 #demoBlocked）
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { login, register, setToken } from '@/lib/api';
+import { Suspense, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { getPublicConfig, login, register, setToken } from '@/lib/api';
+import { enterDemo, DEMO_TOKEN } from '@/lib/demo';
 
-export default function LoginPage() {
+function LoginPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [brand, setBrand] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // F-04 演示闸门：'checking' 检查中（避免闪烁）| 'blocked' 未启用 | null 常规登录
+  const [demoBlocked, setDemoBlocked] = useState<boolean | 'checking' | null>(null);
+
+  const demoWanted = searchParams.get('demo') === '1';
+
+  useEffect(() => {
+    if (!demoWanted) return;
+    let alive = true;
+    setDemoBlocked('checking');
+    getPublicConfig()
+      .then((cfg) => {
+        if (!alive) return;
+        if (cfg && cfg.demoAllowed) {
+          setToken(DEMO_TOKEN);
+          enterDemo();
+          router.replace('/');
+        } else {
+          setDemoBlocked(true); // 生产未开 ZB_DEMO_ALLOWED：拦截直进
+        }
+      })
+      .catch(() => {
+        // 查询失败按放行处理（对齐旧版 catch { demoAllowed = true }——闸门不可用时不挡验收）
+        if (!alive) return;
+        setToken(DEMO_TOKEN);
+        enterDemo();
+        router.replace('/');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [demoWanted, router]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -38,6 +74,32 @@ export default function LoginPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // F-04 演示模式禁用屏（复刻旧版 #demoBlocked 结构）
+  if (demoBlocked === true) {
+    return (
+      <main className="demo-blocked">
+        <div className="db-card">
+          <div className="bn">知彼 Vantage</div>
+          <h2>演示模式未启用</h2>
+          <p className="db-sub">
+            当前部署未开启演示入口（<code>?demo=1</code>）。如需 1:1 验收，请在服务端设置环境变量{' '}
+            <code>ZB_DEMO_ALLOWED=1</code> 后重试。
+          </p>
+          <button
+            className="btn-primary"
+            type="button"
+            onClick={() => {
+              setDemoBlocked(null);
+              router.replace('/login');
+            }}
+          >
+            返回登录
+          </button>
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -119,5 +181,13 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<main className="auth-screen" />}>
+      <LoginPageInner />
+    </Suspense>
   );
 }

@@ -9,6 +9,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import { clearToken, getToken } from '@/lib/api';
 import { ZhibiStateProvider, useZhibiState } from '@/hooks/use-zhibi-state';
 import { wbLoad } from '@/lib/wb';
+import { isDemoMode } from '@/lib/demo';
+import { AlertsCenter } from '@/components/alerts-center';
 
 const NAV_GROUPS: {
   sec: string;
@@ -167,6 +169,7 @@ function TopBar() {
   const pathname = usePathname();
   const { state } = useZhibiState();
   const track = state && typeof state.track === 'string' ? state.track : '';
+  const demo = isDemoMode();
   return (
     <header className="topbar">
       <div className="tb-title">
@@ -175,7 +178,9 @@ function TopBar() {
         {track ? <span className="tb-track"><span className="track-pill">{track}</span></span> : null}
       </div>
       <div className="tb-right">
-        <Link className="btn-ghost" href="/?new=1" title="换赛道：重新调研一个新的赛道">换赛道</Link>
+        {/* 演示态隐藏换赛道（避免误触 onboarding → 401 踢出演示） */}
+        {!demo && <Link className="btn-ghost" href="/?new=1" title="换赛道：重新调研一个新的赛道">换赛道</Link>}
+        <AlertsCenter />
       </div>
     </header>
   );
@@ -191,12 +196,17 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
 
   return (
     <ZhibiStateProvider>
-      <div style={{ display: 'flex', minHeight: '100vh' }}>
+      {/* .logged-in：F-07 响应式钩子（≤820px 侧栏转底部标签栏） */}
+      <div className="logged-in" style={{ display: 'flex', minHeight: '100vh' }}>
         <SideNav />
         <div className="app-main">
           <TopBar />
           <main>{children}</main>
         </div>
+        {/* F-04 演示模式运行时提示条：数据来自本地 mock，非真实后端（复刻旧版 demoBanner） */}
+        {isDemoMode() && (
+          <div className="demo-banner">⚠ <b>演示模式</b> · 数据来自本地 mock（/api/state 契约）· 仅呈现已落地功能</div>
+        )}
       </div>
     </ZhibiStateProvider>
   );

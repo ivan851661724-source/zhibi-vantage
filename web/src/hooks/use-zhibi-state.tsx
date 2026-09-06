@@ -15,6 +15,8 @@ import {
 } from 'react';
 import { apiGet } from '@/lib/api';
 import { connectStream, type SseEvent } from '@/lib/sse';
+import { isDemoMode, buildDemoState } from '@/lib/demo';
+import { wbHydrateFromServer } from '@/lib/wb';
 import type { ZhibiState } from '@/types/state';
 
 // ---------- 签名函数（逐行复刻 app.js stateSig，L616-630） ----------
@@ -79,6 +81,8 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
   const onPush = useCallback(async () => {
     try {
       const s = await apiGet<ZhibiState>('/api/state');
+      // 三动作服务端持久化（F-03）：state.decisions 水合本地（换设备/清缓存还原；本地非空则跳过）
+      wbHydrateFromServer(s.decisions);
       setState((prev) => {
         const sig = stateSig(s as ZhibiState);
         if (sig === sigRef.current) return prev; // 数据未变，跳过重渲染
@@ -106,6 +110,18 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // 演示模式（F-04）：本地 mock state，不连后端、不启动 SSE/轮询（对齐旧版 enterApp 的 DEMO_MODE 分支）
+    if (isDemoMode()) {
+      let alive = true;
+      void buildDemoState().then((s) => {
+        if (!alive) return;
+        setState(s as unknown as ZhibiState);
+        setLoading(false);
+      });
+      return () => {
+        alive = false;
+      };
+    }
     void onPush(); // 首拉
     const handle = connectStream({
       onEvent: (evt) => {

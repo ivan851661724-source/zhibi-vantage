@@ -1,0 +1,35 @@
+[
+  {
+    "id": "opp_001",
+    "title": "磁吸关节 BJD · 高端定制带（¥1,500–¥2,500）",
+    "desc": "6 家对手中无人主打「磁吸关节 + 中高端定制」组合；海外该打法已跑通（参考 Dollfie Dream 改装生态）。",
+    "score": 86,
+    "breadth": "4/6 家",
+    "confidence": "medium",
+    "confidenceLabel": "推算 · 置信中（封顶）",
+    "methodKey": "adjacencyStruct",
+    "disclaimer": "此结论基于不足证据，仅供参考，不构成行动建议。来源：邻接结构推理（无具体对手来源，诚实标注）。"
+  },
+  {
+    "id": "opp_002",
+    "title": "可动关节 · 高性价比带（$30–$45）",
+    "desc": "Hero Forge 新品切入该带，但仅 1 家布局；用户声音中「可动关节 + 亲民价」被 5 家买家群体提到。",
+    "score": 74,
+    "breadth": "3/4 家有声音",
+    "confidence": "medium",
+    "confidenceLabel": "推算 · 置信中",
+    "methodKey": "importance+satisfaction",
+    "disclaimer": "此结论基于不足证据，仅供参考，不构成行动建议。"
+  },
+  {
+    "id": "opp_003",
+    "title": "定制周期太长（3–4 周）——无人解决",
+    "desc": "6 家对手的负面声音中，「周期长」被反复提及且无人主打「快速交付」；此为推测性痛点机会，非已验证机会。",
+    "score": 51,
+    "breadth": "6/38 条",
+    "confidence": "low",
+    "confidenceLabel": "推测 · 置信低",
+    "methodKey": "speculative=true",
+    "disclaimer": "口碑类机会一律标注为推测：是「对手被抱怨、无人解决」的推断，不是已验证的市场空位。"
+  }
+]

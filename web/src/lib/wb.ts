@@ -1,7 +1,10 @@
 'use client';
 // 工作台材料流工具（移植 app.js L1457-1617 的 wb* 系列，行为逐项对应）
-// 三动作裁决本地记录（localStorage），绝不替用户决定，不收集用户私有数据。
+// 三动作裁决：localStorage 即时展示 + POST /api/material-action 服务端落盘（跨设备还原）。
+// 绝不替用户决定，不收集用户私有数据。
 import { useEffect, useState } from 'react';
+import { apiPost, getToken } from '@/lib/api';
+import { isDemoMode } from '@/lib/demo';
 
 export const WB_KEY = 'ci_workbench_decisions'; // 与旧前端同键：已有裁决无缝继承
 export const WB_ACTIONS: Record<string, string> = { keep: '收了', ignore: '忽略', later: '稍后' };
@@ -50,16 +53,67 @@ export function wbSave(d: WbDecisions): void {
   localStorage.setItem(WB_KEY, JSON.stringify(d));
 }
 
+// ---- 服务端持久化（POST /api/material-action） ----
+// fire-and-forget：失败静默（localStorage 仍是本设备真相，下次操作会再同步）；
+// 演示模式（demo-token）跳过——后端无此会话，401 会误杀演示态。
+function wbSyncServer(matId: string, action: WbAction | ''): void {
+  if (isDemoMode() || getToken() === 'demo-token') return;
+  apiPost('/api/material-action', { id: matId, action: action || '' }).catch(() => {
+    /* 网络失败静默：本地已生效，跨设备同步下次操作补齐 */
+  });
+}
+
+// 水合/外部写入后的同标签页广播（storage 事件只在跨标签页触发，同页需自定义事件）
+export const WB_CHANGED_EVENT = 'wb-decisions-changed';
+function fireWbChanged(): void {
+  try {
+    window.dispatchEvent(new Event(WB_CHANGED_EVENT));
+  } catch {
+    /* 极旧浏览器静默 */
+  }
+}
+
+/**
+ * 从服务端 state.decisions 水合本地（换设备 / 清缓存后还原裁决）。
+ * 策略：本地为空且服务端非空才回填——本地已有记录时以本地为准
+ * （本设备是最近操作的真相源，避免服务端陈旧值复活已撤销的裁决）。
+ * 幂等：由 use-zhibi-state 在每次拉到 state 后调用。
+ */
+export function wbHydrateFromServer(decisions: unknown): void {
+  try {
+    if (!decisions || typeof decisions !== 'object') return;
+    const local = wbLoad();
+    if (Object.keys(local).length) return; // 本地非空：不回填
+    const ok: WbDecisions = {};
+    for (const [k, v] of Object.entries(decisions as Record<string, unknown>)) {
+      if (v === 'keep' || v === 'later' || v === 'ignore') ok[k] = v;
+    }
+    if (Object.keys(ok).length) {
+      wbSave(ok);
+      fireWbChanged(); // 通知已挂载的 useWbDecisions / 徽章刷新
+    }
+  } catch {
+    /* 坏数据静默 */
+  }
+}
+
 // React 版：订阅式读取（决策变化触发重渲染，替代旧版手动 renderWorkbench）
 export function useWbDecisions(): [WbDecisions, (matId: string, action: WbAction | '') => void] {
   const [decisions, setDecisions] = useState<WbDecisions>({});
   useEffect(() => {
     setDecisions(wbLoad());
     const onStorage = () => setDecisions(wbLoad());
+    const onWbChanged = () => setDecisions(wbLoad()); // 同标签页水合/外部写入
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener(WB_CHANGED_EVENT, onWbChanged);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener(WB_CHANGED_EVENT, onWbChanged);
+    };
   }, []);
   const set = (matId: string, action: WbAction | '') => {
+    // 服务端同步（撤销也同步：action='' 后端删除该条）
+    wbSyncServer(matId, action);
     setDecisions((prev) => {
       const d = { ...prev };
       if (!action || d[matId] === action) delete d[matId]; // 再点取消（对齐 wbSet）

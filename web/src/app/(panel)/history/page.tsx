@@ -3,11 +3,13 @@
 // 数据源 GET /api/projects（清单层：db 与文件态在此汇合）；切换 POST /api/projects/switch
 //   → 返回装饰后的完整 state → patch() 即时生效 + 回工作台；删除 POST /api/projects/delete
 //   → 返回 { ok, projects } 刷新清单；若删的是当前档案 → refresh() 拉回 { track: null } 空态。
-// 注：旧版 DEMO_MODE（?demo=1 URL 开关）不属于核心迁移范围，不迁。
+// 注：演示模式（?demo=1）下本页由 DemoPageGuard 拦截（依赖真实会话，见 F-04）。
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
+import { isDemoMode } from '@/lib/demo';
+import { DemoPageGuard } from '@/components/demo-page-guard';
 import type { ZhibiState } from '@/types/state';
 
 interface ProjectItem {
@@ -27,6 +29,12 @@ function fmtMeta(p: ProjectItem): string {
 }
 
 export default function HistoryPage() {
+  // 演示模式：本页依赖 /api/projects 真实会话，替换为提示屏（F-04 配套）
+  if (isDemoMode()) return <DemoPageGuard label="历史调研" />;
+  return <HistoryPageInner />;
+}
+
+function HistoryPageInner() {
   const { patch, refresh } = useZhibiState();
   const router = useRouter();
   const [list, setList] = useState<ProjectItem[] | null>(null); // null = 加载中

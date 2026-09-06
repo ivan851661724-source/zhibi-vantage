@@ -1,0 +1,251 @@
+[
+  {
+    "id": "mat_zk2041",
+    "type": "price_down",
+    "signal": "down",
+    "brand": {
+      "name": "MakieLab",
+      "url": "makielab.co.uk",
+      "avatar": "M"
+    },
+    "summary": "核心单品「Makie 标准人偶 · 全系列」价格下调，涉及官网全渠道",
+    "confidence": "high",
+    "evidenceTier": "verified",
+    "price": {
+      "old": 149,
+      "new": 119,
+      "deltaPct": -20.1,
+      "currency": "GBP",
+      "range": {
+        "min": 95,
+        "max": 175
+      }
+    },
+    "sources": [
+      {
+        "label": "makielab.co.uk",
+        "tier": 1,
+        "url": "https://makielab.co.uk/products/makie-standard",
+        "capturedAt": "2026-08-10T08:42:00Z"
+      },
+      {
+        "label": "etsy.com/shop/makielab",
+        "tier": 1,
+        "url": "https://etsy.com/shop/makielab",
+        "capturedAt": "2026-08-10T08:41:00Z"
+      },
+      {
+        "label": "amazon.co.uk 在售快照",
+        "tier": 2,
+        "url": "https://amazon.co.uk/dp/xxx",
+        "capturedAt": "2026-08-10T08:40:00Z"
+      }
+    ],
+    "inference": {
+      "text": "与你的 S/M 尺寸人偶价位带（¥199–¥329）存在部分重叠；本轮为历史最低价。",
+      "why": "近 12 周价格序列 + 全渠道在售价均为 £119，未见更低记录"
+    },
+    "missingFields": [
+      "history:60d"
+    ],
+    "capturedAt": "2026-08-10T08:42:00Z",
+    "status": "pending"
+  },
+  {
+    "id": "mat_zk2042",
+    "type": "review_crisis",
+    "signal": "crisis",
+    "brand": {
+      "name": "Figurine Studio",
+      "url": "figurinestudio.com",
+      "avatar": "F"
+    },
+    "summary": "近 7 天差评占比从 4% → 23%，集中在「头雕细节与官图不符」，主要出现在 Amazon US",
+    "confidence": "high",
+    "evidenceTier": "verified",
+    "sources": [
+      {
+        "label": "amazon.com 评论采样 38 条",
+        "tier": 1,
+        "url": "https://amazon.com/product-reviews/xxx",
+        "capturedAt": "2026-08-10T06:15:00Z"
+      },
+      {
+        "label": "trustpilot.com",
+        "tier": 2,
+        "url": "https://trustpilot.com/review/figurinestudio",
+        "capturedAt": "2026-08-10T06:10:00Z"
+      },
+      {
+        "label": "reddit r/customfigures",
+        "tier": 2,
+        "url": "https://reddit.com/r/customfigures",
+        "capturedAt": "2026-08-10T06:05:00Z"
+      }
+    ],
+    "inference": {
+      "text": "同价位带买家可能外溢，但不构成对你的直接建议。仅呈现事实。",
+      "why": "差评主题聚类（14/38 条同关键词）"
+    },
+    "missingFields": [],
+    "capturedAt": "2026-08-10T06:15:00Z",
+    "status": "pending"
+  },
+  {
+    "id": "mat_zk2043",
+    "type": "launch",
+    "signal": "new",
+    "brand": {
+      "name": "Hero Forge",
+      "url": "heroforge.com",
+      "avatar": "H"
+    },
+    "summary": "新系列「Mythic 战役 · 24 款角色」上线，主打高精度可动关节，定价 $34.99 起",
+    "confidence": "medium",
+    "evidenceTier": "inferred",
+    "price": {
+      "old": null,
+      "new": 34.99,
+      "deltaPct": null,
+      "currency": "USD",
+      "range": {
+        "min": 34.99,
+        "max": 89.99
+      }
+    },
+    "sources": [
+      {
+        "label": "heroforge.com 新品页",
+        "tier": 1,
+        "url": "https://heroforge.com/new",
+        "capturedAt": "2026-08-09T23:50:00Z"
+      },
+      {
+        "label": "tiktok.com 官方预热",
+        "tier": 2,
+        "url": "https://tiktok.com/@heroforge",
+        "capturedAt": "2026-08-09T23:30:00Z"
+      }
+    ],
+    "inference": {
+      "text": "与你的「可动关节」卖点方向重合，价格带低于你的 M 码。",
+      "why": "价位与卖点标签比对"
+    },
+    "missingFields": [
+      "实体渠道铺货"
+    ],
+    "capturedAt": "2026-08-09T23:50:00Z",
+    "status": "pending"
+  },
+  {
+    "id": "mat_zk2044",
+    "type": "channel",
+    "signal": "new",
+    "brand": {
+      "name": "BJD Doki",
+      "url": "bjddoki.jp",
+      "avatar": "D"
+    },
+    "summary": "新开设小红书官方店（粉丝 1.2w，首条笔记 8 小时破 3k 赞），同步上线 3 款国风限定",
+    "confidence": "high",
+    "evidenceTier": "verified",
+    "sources": [
+      {
+        "label": "xiaohongshu.com 店铺页",
+        "tier": 1,
+        "url": "https://xiaohongshu.com/user/profile/xxx",
+        "capturedAt": "2026-08-09T20:30:00Z"
+      },
+      {
+        "label": "xiaohongshu.com 笔记数据",
+        "tier": 1,
+        "url": "https://xiaohongshu.com/explore/xxx",
+        "capturedAt": "2026-08-09T20:25:00Z"
+      }
+    ],
+    "inference": {
+      "text": "国内渠道竞争升温，但该品牌主力仍在日本。",
+      "why": "渠道分布比对"
+    },
+    "missingFields": [],
+    "capturedAt": "2026-08-09T20:30:00Z",
+    "status": "kept"
+  },
+  {
+    "id": "mat_zk2045",
+    "type": "price_up",
+    "signal": "up",
+    "brand": {
+      "name": "Custom Doll Lab",
+      "url": "customdolllab.com",
+      "avatar": "C"
+    },
+    "summary": "经典款「Atelier No.7」价格上调：$89 → $99，未发公告",
+    "confidence": "high",
+    "evidenceTier": "verified",
+    "price": {
+      "old": 89,
+      "new": 99,
+      "deltaPct": 11.2,
+      "currency": "USD",
+      "range": {
+        "min": 59,
+        "max": 110
+      }
+    },
+    "sources": [
+      {
+        "label": "customdolllab.com",
+        "tier": 1,
+        "url": "https://customdolllab.com/products/atelier-no7",
+        "capturedAt": "2026-08-09T14:05:00Z"
+      }
+    ],
+    "inference": {
+      "text": "该价位带空缺可能被让出。",
+      "why": "涨价后与相邻对手无重叠"
+    },
+    "missingFields": [],
+    "capturedAt": "2026-08-09T14:05:00Z",
+    "status": "dropped"
+  },
+  {
+    "id": "mat_zk2046",
+    "type": "price_follow",
+    "brand": {
+      "name": "Dollfie Dream",
+      "url": "dollfiedream.com",
+      "avatar": "D"
+    },
+    "summary": "主力款「DD 素体」当前价格区间确认，全渠道在售稳定",
+    "confidence": "medium",
+    "evidenceTier": "inferred",
+    "price": {
+      "old": null,
+      "new": 780,
+      "deltaPct": null,
+      "currency": "JPY",
+      "range": {
+        "min": 650,
+        "max": 880
+      }
+    },
+    "sources": [
+      {
+        "label": "dollfiedream.com 官方",
+        "tier": 1,
+        "url": "https://dollfiedream.com/products/dd-body",
+        "capturedAt": "2026-08-11T06:20:00Z"
+      }
+    ],
+    "inference": {
+      "text": "价格带与你的高端系列部分重叠，主战场在高价位细分。",
+      "why": "价格带 JP¥650–880 与你定位锚点带位比较（推算，非实抓）"
+    },
+    "missingFields": [
+      "history:60d"
+    ],
+    "capturedAt": "2026-08-11T06:20:00Z",
+    "status": "pending"
+  }
+]
