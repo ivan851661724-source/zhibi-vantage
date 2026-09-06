@@ -1,0 +1,11 @@
+{
+  "name": "competitor-intel-assistant",
+  "version": "1.4.0",
+  "private": true,
+  "description": "知彼 Vantage —— 零依赖 Node 服务",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/run-tests.js",
+    "health-check": "node scripts/collect-health-check.js --demo"
+  }
+}

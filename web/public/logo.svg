@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- 外环：观测范围 -->
+  <circle cx="16" cy="16" r="13" stroke="#33B98C" stroke-width="2.4"/>
+  <!-- 内环：聚焦 -->
+  <circle cx="16" cy="16" r="8" stroke="#33B98C" stroke-width="1.4" opacity="0.55"/>
+  <!-- 中心：观察者（你） -->
+  <circle cx="16" cy="16" r="3.2" fill="#33B98C"/>
+  <!-- 四向刻度：精准扫描 -->
+  <line x1="16" y1="1"   x2="16" y2="7"  stroke="#33B98C" stroke-width="1.6"/>
+  <line x1="16" y1="25"  x2="16" y2="31" stroke="#33B98C" stroke-width="1.6"/>
+  <line x1="1"   y1="16" x2="7"  y2="16" stroke="#33B98C" stroke-width="1.6"/>
+  <line x1="25"  y1="16" x2="31" y2="16" stroke="#33B98C" stroke-width="1.6"/>
+  <!-- 琥珀光点：被观测的「彼」（对手信号） -->
+  <circle cx="27.5" cy="16" r="2.1" fill="#D9A25C"/>
+</svg>

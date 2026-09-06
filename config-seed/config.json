@@ -1,0 +1,20 @@
+{
+  "llm": {
+    "baseUrl": "https://api.deepseek.com/v1",
+    "model": "deepseek-v4-flash",
+    "apiKey": "sk-331b46eba7644ab0875adc83b19f95c8"
+  },
+  "search": {
+    "provider": "serper",
+    "apiKey": "",
+    "serperKey": "8b9bf78b44d2a5147826c056561602e24c43f957",
+    "serperKeys": [
+      "8b9bf78b44d2a5147826c056561602e24c43f957"
+    ],
+    "tavilyKey": "",
+    "braveKey": "",
+    "bochaKey": ""
+  },
+  "ownBrands": [],
+  "_secretsEncrypted": false
+}

@@ -1,0 +1,22 @@
+# 构建上下文排除项（不进镜像）
+**/data
+**/logs
+**/node_modules
+**/.next
+.next
+.git
+.gitignore
+.test-instance
+backups
+ui-redesign
+docs
+scripts
+*.log
+*.zip
+*.bak
+*.md.bak
+.zhibi.pid
+.watchdog.lock
+.server-lock
+README-阿里云部署.md
+.env

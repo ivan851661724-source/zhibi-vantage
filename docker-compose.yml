@@ -1,0 +1,61 @@
+# 知彼 Vantage · Aliyun ECS Docker Compose
+# 用法：docker compose up -d --build   （首次会构建镜像）
+# 同目录 .env 可覆盖下方环境变量（见 .env.example）
+
+services:
+  zhibi-vantage:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zhibi-vantage:1.4.0
+    container_name: zhibi-vantage
+    restart: always                      # 崩溃/重启自动拉起
+    # Phase 5：宿主机 3300 映射已移除（旧静态前端删除，纯 API 后端）。
+    # 容器内 3300 仍监听，仅供 zhibi-web 反代（容器网络）；诊断可临时加回 "3300:3300"。
+    ports: []
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "${PORT:-3300}"
+      SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-1}"   # 每日定时雷达扫描（0 关闭）
+      ZB_QUOTA_ENABLED: "${ZB_QUOTA_ENABLED:-0}"     # 配额硬拦截（默认关闭）
+      # 安全建议：设置后 API 密钥将以加密形式落盘（务必妥善保存，丢失无法解密）
+      # 生成方式：openssl rand -hex 32
+      MT_MASTER_KEY: "${MT_MASTER_KEY:-}"
+    volumes:
+      - zhibi_data:/app/data             # 数据（配置/档案/数据库/日志）持久化
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3300)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # ---------- Next.js 前端（Phase 4，docs/03-迁移实施方案.md） ----------
+  # 反代 /api/* 到 zhibi-vantage（rewrites 已在构建期固化 BACKEND_URL）。
+  zhibi-web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    image: zhibi-web:0.1.0
+    container_name: zhibi-web
+    restart: always
+    depends_on:
+      zhibi-vantage:
+        condition: service_healthy    # 后端健康后前端才起（避免启动期代理 502）
+    ports:
+      - "3000:3000"                   # 新入口（阿里云安全组需放行 3000）
+    environment:
+      TZ: Asia/Shanghai
+      PORT: 3000
+      BACKEND_URL: http://zhibi-vantage:3300
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    # Phase 5：唯一 Web 入口（旧静态前端与 3300 回退映射已移除）。
+
+volumes:
+  zhibi_data:
+    name: zhibi_data

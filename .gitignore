@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build artifacts
+.next/
+**/.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# Data & runtime (secrets, databases, logs)
+app/data/
+**/data/
+**/logs/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.bak
+.server-lock
+.watchdog.lock
+.zhibi.pid
+.admin-secret
+.jwt-secret
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Backups & archives
+*.zip
+backups/
+ui-redesign/
