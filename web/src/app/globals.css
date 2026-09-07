@@ -2465,3 +2465,56 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
   .topbar .tb-right{gap:6px}
   .btn-ghost{padding:6px 10px;font-size:12px}
 }
+
+
+/* ===== R6 诚实条 / R7 导读 / R5.2 候补 ===== */
+.evidence-bar-wrap { margin: 8px 0 14px; }
+.evidence-bar {
+  display: flex; align-items: center; width: 100%; gap: 0;
+  background: none; border: 1px solid #e3e8e0; border-radius: 8px;
+  overflow: hidden; cursor: pointer; padding: 0; min-height: 26px;
+}
+.eb-seg { display: block; height: 8px; }
+.eb-verified { background: #33b98c; }
+.eb-inferred { background: #d9a25c; }
+.eb-unverified { background: #cfd8d2; }
+.eb-text { padding: 4px 10px; font-size: 12px; color: #4a5a50; white-space: nowrap; }
+.eb-hint { color: #9aa8a0; margin-left: 6px; }
+.evidence-detail { border: 1px solid #e3e8e0; border-top: none; border-radius: 0 0 8px 8px; padding: 10px 12px; background: #fbfdfb; }
+.ed-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; color: #3c4a42; }
+.ed-head { color: #8a968e; }
+.ed-note { font-size: 11px; color: #9aa8a0; margin: 8px 0 0; }
+.guide-overlay { position: fixed; inset: 0; background: rgba(20, 28, 24, 0.45); display: flex; align-items: center; justify-content: center; z-index: 90; }
+.guide-card { width: min(480px, 92vw); background: #fff; border-radius: 14px; padding: 22px 24px; box-shadow: 0 18px 50px rgba(0,0,0,0.18); }
+.guide-brand { font-size: 12px; letter-spacing: 0.08em; color: #33b98c; margin-bottom: 10px; }
+.guide-title { margin: 0 0 8px; font-size: 17px; }
+.guide-body { margin: 0 0 14px; font-size: 13.5px; line-height: 1.7; color: #4a5a50; }
+.guide-dots { display: flex; gap: 6px; margin-bottom: 14px; }
+.gd { width: 7px; height: 7px; border-radius: 50%; background: #dbe4de; display: inline-block; }
+.gd.on { background: #33b98c; }
+.guide-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.waitlist-form { margin-top: 8px; }
+.wl-done { color: #33b98c; }
+.auth-example { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+
+
+/* ===== R6.2 报告页 / R5.4 管理面板 ===== */
+.report-page { max-width: 860px; }
+.report-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
+.report-title { margin: 0; font-size: 18px; }
+.report-body { line-height: 1.8; font-size: 14px; color: #2f3d36; }
+.report-body h2, .report-body h3, .report-body h4 { margin: 18px 0 8px; color: #1f2a24; }
+.report-body blockquote.md-quote { border-left: 3px solid #33b98c; margin: 10px 0; padding: 6px 12px; background: #f4faf7; border-radius: 0 8px 8px 0; }
+.report-body blockquote.md-quote p { margin: 4px 0; }
+.report-body .md-table { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 13px; }
+.report-body .md-table th, .report-body .md-table td { border: 1px solid #e3e8e0; padding: 6px 10px; text-align: left; }
+.report-body .md-table th { background: #f4faf7; }
+.report-body hr { border: none; border-top: 1px dashed #d5ded8; margin: 16px 0; }
+.report-qc { margin-top: 16px; }
+.qc-list { margin: 8px 0; padding-left: 18px; font-size: 12.5px; color: #4a5a50; }
+.admin-page { max-width: 900px; margin: 40px auto; padding: 0 20px; }
+.admin-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.admin-sec { margin: 18px 0 28px; }
+.admin-sec h3 { margin: 0 0 10px; font-size: 15px; }
+.badge-ok { color: #33b98c; font-weight: 600; }
+.badge-warn { color: #d9a25c; font-weight: 600; }

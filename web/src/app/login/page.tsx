@@ -8,7 +8,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { getPublicConfig, login, register, setToken } from '@/lib/api';
-import { enterDemo, DEMO_TOKEN } from '@/lib/demo';
+import { enterDemo, DEMO_TOKEN, markDemoSource } from '@/lib/demo';
 
 function LoginPageInner() {
   const router = useRouter();
@@ -21,6 +21,7 @@ function LoginPageInner() {
   const [busy, setBusy] = useState(false);
   // F-04 演示闸门：'checking' 检查中（避免闪烁）| 'blocked' 未启用 | null 常规登录
   const [demoBlocked, setDemoBlocked] = useState<boolean | 'checking' | null>(null);
+  const [exampleHint, setExampleHint] = useState('');
 
   const demoWanted = searchParams.get('demo') === '1';
 
@@ -40,16 +41,39 @@ function LoginPageInner() {
         }
       })
       .catch(() => {
-        // 查询失败按放行处理（对齐旧版 catch { demoAllowed = true }——闸门不可用时不挡验收）
+        // fail-closed（安全闸门反模式修复）：闸门查询失败 = 无法证明演示模式已启用，
+        // 一律拦截。不再"查询失败按放行"（那等于后端宕机/被拦截时演示门常开）。
         if (!alive) return;
-        setToken(DEMO_TOKEN);
-        enterDemo();
-        router.replace('/');
+        setDemoBlocked(true);
       });
     return () => {
       alive = false;
     };
   }, [demoWanted, router]);
+
+  // R7.2：先看个例子——加载一次真实赛道调研数据（服务端 ZB_DEMO_ALLOWED 闸门内；
+  // data/sample/sample-state.json 未导入时提示，绝不喂 mock 冒充真实数据）
+  async function onExample() {
+    setExampleHint('');
+    try {
+      const cfg = await getPublicConfig();
+      if (!cfg || !cfg.demoAllowed) {
+        setExampleHint('示例入口未启用（需服务端设置 ZB_DEMO_ALLOWED=1 并导入示例数据）');
+        return;
+      }
+      const r = await fetch('/api/sample');
+      if (!r.ok) {
+        setExampleHint('示例数据未导入（data/sample/sample-state.json）');
+        return;
+      }
+      markDemoSource('sample');
+      setToken(DEMO_TOKEN);
+      enterDemo();
+      router.replace('/');
+    } catch {
+      setExampleHint('示例暂不可用，请稍后再试');
+    }
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -178,6 +202,10 @@ function LoginPageInner() {
             <p id="authError" className="auth-error">{error}</p>
           </form>
           <p className="auth-foot">注册即创建你的独立工作区，数据与其他租户隔离。</p>
+          <div className="auth-example">
+            <button className="btn-ghost" type="button" onClick={onExample}>先看个例子 →</button>
+            {exampleHint && <p className="hint">{exampleHint}</p>}
+          </div>
         </div>
       </div>
     </main>

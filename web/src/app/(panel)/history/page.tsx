@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
-import { isDemoMode } from '@/lib/demo';
+import { useIsDemoMode } from '@/lib/demo';
 import { DemoPageGuard } from '@/components/demo-page-guard';
 import type { ZhibiState } from '@/types/state';
 
@@ -30,7 +30,8 @@ function fmtMeta(p: ProjectItem): string {
 
 export default function HistoryPage() {
   // 演示模式：本页依赖 /api/projects 真实会话，替换为提示屏（F-04 配套）
-  if (isDemoMode()) return <DemoPageGuard label="历史调研" />;
+  const demo = useIsDemoMode(); // hydration 安全（渲染期读 sessionStorage 会 SSR/CSR 不一致）
+  if (demo) return <DemoPageGuard label="历史调研" />;
   return <HistoryPageInner />;
 }
 

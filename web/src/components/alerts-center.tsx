@@ -39,12 +39,16 @@ export function AlertsCenter() {
   }, [refresh]);
 
   // SSE 接线：调研完成/失败 → 本地推送（复刻 app.js L775/L798）
+  // track 经 ref 读取：订阅依赖里不放 state——否则每次 state 推送都会退订/重订 SSE（订阅抖动）
+  const trackRef = useRef('');
+  useEffect(() => {
+    trackRef.current = (state && state.track) || '赛道';
+  }, [state]);
   useEffect(
     () =>
       subscribe((evt) => {
         if (evt.type === 'discover_complete') {
-          const track = (state && state.track) || '赛道';
-          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${track}」对手材料已整理完成，去工作台处理吧。` });
+          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${trackRef.current}」对手材料已整理完成，去工作台处理吧。` });
           refresh();
         } else if (evt.type === 'discover_error') {
           const msg = (evt.message as string | undefined) || '请稍后重试';
@@ -52,7 +56,7 @@ export function AlertsCenter() {
           refresh();
         }
       }),
-    [subscribe, state, refresh],
+    [subscribe, refresh],
   );
 
   // Escape 关闭

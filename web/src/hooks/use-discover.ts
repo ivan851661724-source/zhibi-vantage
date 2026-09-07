@@ -4,7 +4,7 @@
 //   · start() → POST /api/discover（202 accepted，进度由 SSE typed 事件推送）
 //   · discover_stage → 进度条；brand_found/removed → 实时骨架卡；complete → 全量拉 state；error → 原地失败面板
 import { useCallback, useEffect, useState } from 'react';
-import { apiPost } from '@/lib/api';
+import { apiPost, ApiError } from '@/lib/api';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 
 export interface DiscoverCard {
@@ -97,6 +97,11 @@ export function useDiscover() {
       } catch (e) {
         setRunning(false);
         setProgress(null);
+        // R5.2：每日免费额度用尽 → 明确提示 + 候补名单入口（后端 429 DISCOVER_QUOTA）
+        if (e instanceof ApiError && e.body && e.body.error === 'DISCOVER_QUOTA') {
+          setError({ code: 'DISCOVER_QUOTA', message: e.body.message || '今日免费调研次数已用完（每租户每日 3 次）。' });
+          return;
+        }
         const m = e instanceof Error ? e.message : '未知错误';
         setError({
           message: /NO_KEYS/.test(m)

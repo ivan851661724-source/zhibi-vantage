@@ -1,10 +1,13 @@
 'use client';
 // 工作台（Phase 2：onboarding + discover 进度 + 材料流三动作，复刻 renderWorkbench L1623-1656）
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { useDiscover, type DiscoverCard } from '@/hooks/use-discover';
 import { Onboarding } from '@/components/onboarding';
+import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
+import { GuideTour, guideNeeded } from '@/components/guide-tour';
+import { WaitlistForm } from '@/components/waitlist-form';
 import { MaterialDrawer } from '@/components/wb-drawer';
 import { apiPost } from '@/lib/api';
 import {
@@ -180,6 +183,13 @@ function WorkbenchInner() {
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const searchParams = useSearchParams();
   const forceOb = searchParams.get('new') === '1';
+  // R6：诚实条数据（decorate 实时派生，深研过程中随之更新）
+  const evidenceDist = (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined) || undefined;
+  // R7.1：首次报告生成后的 5 步导读（一次性）
+  const [guide, setGuide] = useState(false);
+  useEffect(() => {
+    if (!loading && state && (state as Record<string, unknown>).brief && guideNeeded()) setGuide(true);
+  }, [loading, state]);
 
   const msAll = ((state && state.materials) || []) as WbMaterial[];
   const hasTrack = !!(state && (state.track || (state.competitors && state.competitors.length)));
@@ -235,6 +245,10 @@ function WorkbenchInner() {
 
   return (
     <div>
+      {/* R6.2：顶部诚实条（实查/推测/未探测三色占比，点击展开字段清单） */}
+      <EvidenceBar dist={evidenceDist} />
+      {/* R7.1：首次报告后的 5 步导读（一次性） */}
+      {guide && <GuideTour onDone={() => setGuide(false)} />}
       {/* 进度条（discover 进行中或失败时显示） */}
       {(discover.running || discover.progress) && (
         <div className="progress-wrap">
@@ -248,11 +262,19 @@ function WorkbenchInner() {
             {discover.error
               ? '⚠ 研究未完成：' + discover.error.message
               : (discover.progress?.label || '正在搜索对手…') +
-                (discover.progress?.found ? `（已发现 ${discover.progress.found} 个）` : '')}
+                (discover.progress?.found ? `（已发现 ${discover.progress.found} 个）` : '') +
+                (evidenceDist && evidenceDist.total
+                  ? `（已查实 ${evidenceDist.verified}/${evidenceDist.total} 项）`
+                  : '')}
           </span>
           {discover.error && (
             <div className="discover-error-box">
-              <p className="hint">可能是 API 密钥失效或网络不可达。请到「设置」核对搜索源与 DeepSeek 密钥后重试。</p>
+              <p className="hint">
+                {discover.error.code === 'DISCOVER_QUOTA'
+                  ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
+                  : '可能是 API 密钥失效或网络不可达。请到「设置」核对搜索源与 DeepSeek 密钥后重试。'}
+              </p>
+              {discover.error.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
               <div className="row">
                 <button className="btn primary" type="button" onClick={() => discover.reset()}>返回入口</button>
               </div>

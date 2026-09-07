@@ -1,11 +1,14 @@
 // 知彼 Vantage · SSE 封装（docs/02-API契约.md §3）
 // 行为复刻自 app/public/app.js 的 startPolling()（L651-678）：
-//   · EventSource('/api/stream')，浏览器按服务端 retry:3000 自动重连
+//   · EventSource('/api/stream?token=…')，浏览器按服务端 retry:3000 自动重连
+//     （EventSource 无法自定义请求头，令牌走查询串——后端仅 /api/stream 接受该通道）
 //   · typed 事件（type 存在且 !== 'change'）→ 分发给 onEvent（Phase 2 discover 增量渲染用）
 //   · 通用 change 事件 → 触发 onPush（拉 state + 签名比对）
 //   · onerror → 15s 轮询兜底；重连成功（onopen）后清除兜底（对旧版的小改进：
 //     旧版 fallbackTimer 一旦建立不会清除，每 15s 空拉一次；事件恢复后轮询冗余）
 'use client';
+
+import { getToken } from '@/lib/api';
 
 export interface SseEvent {
   type?: string;
@@ -36,7 +39,13 @@ export function connectStream(opts: {
     }
   };
 
-  const es = new EventSource('/api/stream');
+  // 携带令牌：无令牌时后端 401，直接走轮询兜底（不空连）
+  const token = getToken();
+  if (!token) {
+    const timer = window.setInterval(onChange, 15000);
+    return { close: () => window.clearInterval(timer) };
+  }
+  const es = new EventSource('/api/stream?token=' + encodeURIComponent(token));
 
   es.onopen = () => clearFallback();
 

@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiPost } from '@/lib/api';
-import { isDemoMode } from '@/lib/demo';
+import { useIsDemoMode } from '@/lib/demo';
 import { DemoPageGuard } from '@/components/demo-page-guard';
 import type { ZhibiState } from '@/types/state';
 
@@ -266,7 +266,8 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
 
 export default function AssetsPage() {
   // 演示模式：本页依赖 POST /api/sector 服务端计算，替换为提示屏（F-04 配套）
-  if (isDemoMode()) return <DemoPageGuard label="算法资产" />;
+  const demo = useIsDemoMode(); // hydration 安全（渲染期读 sessionStorage 会 SSR/CSR 不一致）
+  if (demo) return <DemoPageGuard label="算法资产" />;
   return <AssetsPageInner />;
 }
 

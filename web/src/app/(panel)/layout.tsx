@@ -53,6 +53,13 @@ const NAV_GROUPS: {
         ),
       },
       {
+        href: '/report',
+        label: '调研报告',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 2h9l5 5v15H6z" /><path d="M9 12h6M9 16h6M9 8h2" strokeLinecap="round" /></svg>
+        ),
+      },
+      {
         href: '/sector',
         label: '赛道档案',
         icon: (
@@ -94,6 +101,7 @@ const PANEL_TITLES: Record<string, string> = {
   '/radar': '竞品雷达',
   '/intel': '情报库',
   '/opportunity': '机会视图',
+  '/report': '调研报告',
   '/sector': '赛道档案',
   '/history': '历史调研',
   '/assets': '算法资产',
@@ -169,7 +177,11 @@ function TopBar() {
   const pathname = usePathname();
   const { state } = useZhibiState();
   const track = state && typeof state.track === 'string' ? state.track : '';
-  const demo = isDemoMode();
+  // demo 态在 effect 后注入：渲染期直接读 sessionStorage 会造成 SSR/CSR 水合不一致
+  const [demo, setDemo] = useState(false);
+  useEffect(() => {
+    setDemo(isDemoMode());
+  }, []);
   return (
     <header className="topbar">
       <div className="tb-title">
@@ -188,11 +200,23 @@ function TopBar() {
 
 export default function PanelLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  // 鉴权门：校验完成前不渲染面板内容——防受保护页闪现，也防子页未登录就发数据请求（401 噪音）
+  const [authed, setAuthed] = useState(false);
+  // demo 态同样 effect 后注入（hydration 安全）
+  const [demo, setDemo] = useState(false);
 
-  // 鉴权门：未登录访问面板 → 跳 /login（Phase 1 验收项）
   useEffect(() => {
-    if (!getToken()) router.replace('/login');
+    setDemo(isDemoMode());
+    if (!getToken()) {
+      router.replace('/login');
+      return;
+    }
+    setAuthed(true);
   }, [router]);
+
+  if (!authed) {
+    return <div className="logged-in" style={{ display: 'flex', minHeight: '100vh' }} aria-busy="true" />;
+  }
 
   return (
     <ZhibiStateProvider>
@@ -204,7 +228,7 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
           <main>{children}</main>
         </div>
         {/* F-04 演示模式运行时提示条：数据来自本地 mock，非真实后端（复刻旧版 demoBanner） */}
-        {isDemoMode() && (
+        {demo && (
           <div className="demo-banner">⚠ <b>演示模式</b> · 数据来自本地 mock（/api/state 契约）· 仅呈现已落地功能</div>
         )}
       </div>

@@ -50,7 +50,11 @@ export function wbLoad(): WbDecisions {
 }
 
 export function wbSave(d: WbDecisions): void {
-  localStorage.setItem(WB_KEY, JSON.stringify(d));
+  try {
+    localStorage.setItem(WB_KEY, JSON.stringify(d));
+  } catch {
+    /* 隐私模式等 localStorage 不可用：静默（本会话内存态仍可用） */
+  }
 }
 
 // ---- 服务端持久化（POST /api/material-action） ----
@@ -118,7 +122,8 @@ export function useWbDecisions(): [WbDecisions, (matId: string, action: WbAction
       const d = { ...prev };
       if (!action || d[matId] === action) delete d[matId]; // 再点取消（对齐 wbSet）
       else d[matId] = action;
-      wbSave(d);
+      // 持久化延迟到微任务：updater 必须是纯函数（StrictMode 双调用会重复执行副作用）
+      queueMicrotask(() => wbSave(d));
       return d;
     });
   };

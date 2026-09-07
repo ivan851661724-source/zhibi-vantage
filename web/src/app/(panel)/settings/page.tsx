@@ -6,7 +6,7 @@
 // 注意：密钥输入框不回填（旧版行为：GET 只回传 has* 布尔与 ownBrands，密钥永不回传前端）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
-import { isDemoMode } from '@/lib/demo';
+import { useIsDemoMode } from '@/lib/demo';
 import { DemoPageGuard } from '@/components/demo-page-guard';
 
 interface ConfigResp {
@@ -18,6 +18,8 @@ interface ConfigResp {
   hasBocha?: boolean;
   serperKeyCount?: number;
   serperKeysDisabled?: number;
+  llmModel?: string;
+  llmBaseUrl?: string;
   ownBrands?: string[];
 }
 interface SaveResp {
@@ -46,7 +48,8 @@ const splitList = (raw: string): string[] =>
 
 export default function SettingsPage() {
   // 演示模式：本页依赖 /api/config 真实会话，替换为提示屏（F-04 配套）
-  if (isDemoMode()) return <DemoPageGuard label="设置" />;
+  const demo = useIsDemoMode(); // hydration 安全（渲染期读 sessionStorage 会 SSR/CSR 不一致）
+  if (demo) return <DemoPageGuard label="设置" />;
   return <SettingsPageInner />;
 }
 
@@ -54,6 +57,8 @@ function SettingsPageInner() {
   const [cfg, setCfg] = useState<ConfigResp | null>(null);
   const [provider, setProvider] = useState('tavily');
   const [ds, setDs] = useState('');
+  const [llmBase, setLlmBase] = useState('');
+  const [llmModel, setLlmModel] = useState('');
   const [tavily, setTavily] = useState('');
   const [serper, setSerper] = useState('');
   const [serperPool, setSerperPool] = useState('');
@@ -78,6 +83,8 @@ function SettingsPageInner() {
         cfgRef.current = c;
         setCfg(c);
         if (c.provider) setProvider(c.provider);
+        if (c.llmBaseUrl) setLlmBase(c.llmBaseUrl);
+        if (c.llmModel) setLlmModel(c.llmModel);
         if (Array.isArray(c.ownBrands)) setOwnBrands(c.ownBrands.join('\n'));
       })
       .catch((e: Error) => {
@@ -117,7 +124,7 @@ function SettingsPageInner() {
     setSaving(true);
     try {
       const r = await apiPost<SaveResp>('/api/config', {
-        llm: { apiKey: ds.trim() },
+        llm: { apiKey: ds.trim(), baseUrl: llmBase.trim(), model: llmModel.trim() },
         search: { provider, apiKey: tavily.trim(), serperKey: s, serperKeys, braveKey: brave.trim(), bochaKey: bocha.trim() },
         ownBrands: splitList(ownBrands),
       });
@@ -159,8 +166,12 @@ function SettingsPageInner() {
       <div className="modal-card" style={{ maxWidth: 720, margin: '0 auto' }}>
         <h3>设置 API 密钥</h3>
         <p className="modal-sub">用于自动搜索对手与综合情报。密钥仅存于本机 <code>data/config.json</code>。</p>
-        <label className="field-label">DeepSeek API Key</label>
-        <input className="text-input" type="password" placeholder="sk-…" value={ds} onChange={(e) => setDs(e.target.value)} />
+        <label className="field-label">LLM API Key <span className="field-hint">DeepSeek / 阿里云百炼 Token Plan 等 OpenAI 兼容服务</span></label>
+        <input className="text-input" type="password" placeholder="sk-…（留空则保持已配置；也可由环境变量 LLM_API_KEY 下发）" value={ds} onChange={(e) => setDs(e.target.value)} />
+        <label className="field-label">LLM 接入点（基地址）<span className="field-hint">留空 = DeepSeek 官方或环境变量 LLM_BASE_URL</span></label>
+        <input className="text-input" type="text" placeholder="如 https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" value={llmBase} onChange={(e) => setLlmBase(e.target.value)} />
+        <label className="field-label">LLM 模型<span className="field-hint">留空 = deepseek-v4-flash 或环境变量 LLM_MODEL</span></label>
+        <input className="text-input" type="text" placeholder="如 deepseek-v4-flash / qwen3.7-plus / glm-5.2" value={llmModel} onChange={(e) => setLlmModel(e.target.value)} />
         <label className="field-label">搜索源</label>
         <select className="text-input" value={provider} onChange={(e) => setProvider(e.target.value)}>
           {PROVIDERS.map((p) => (

@@ -6,17 +6,38 @@
 // 跨路由保持：进入演示时写 sessionStorage 标记（Next.js 多路由跳转后 URL 参数会丢失），
 //             退出登录（clearToken）时清除。
 
+import { useEffect, useState } from 'react';
+
 export const DEMO_FLAG = 'zhibi_demo';
+export const DEMO_SOURCE_KEY = 'zhibi_demo_source'; // 'sample'（真实调研数据）| 'mock'（界面演示）
+
+/** 记录演示数据来源（R7.2：『先看个例子』走真实调研缓存，不喂 mock） */
+export function markDemoSource(src: 'sample' | 'mock'): void {
+  try { window.sessionStorage.setItem(DEMO_SOURCE_KEY, src); } catch { /* 隐私模式静默 */ }
+}
+export function getDemoSource(): 'sample' | 'mock' {
+  try { return window.sessionStorage.getItem(DEMO_SOURCE_KEY) === 'sample' ? 'sample' : 'mock'; } catch { return 'mock'; }
+}
 export const DEMO_TOKEN = 'demo-token'; // 与旧版一致的占位 token（仅过前端鉴权门，不调后端）
 
 export function isDemoMode(): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    if (/[?&]demo=1/.test(window.location.search)) return true;
+    // 精确匹配 demo=1（旧正则 /[?&]demo=1/ 会把 ?demo=10 误判为演示模式）
+    if (new URLSearchParams(window.location.search).get('demo') === '1') return true;
     return window.sessionStorage.getItem(DEMO_FLAG) === '1';
   } catch {
     return false;
   }
+}
+
+/** 组件用：hydration 安全的 demo 态（渲染期读 sessionStorage 会造成 SSR/CSR 不一致） */
+export function useIsDemoMode(): boolean {
+  const [demo, setDemo] = useState(false);
+  useEffect(() => {
+    setDemo(isDemoMode());
+  }, []);
+  return demo;
 }
 
 /** 进入演示模式（登录页闸门放行后调用）：写标记，供后续路由识别 */

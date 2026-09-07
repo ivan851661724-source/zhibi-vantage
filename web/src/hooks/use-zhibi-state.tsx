@@ -15,7 +15,7 @@ import {
 } from 'react';
 import { apiGet } from '@/lib/api';
 import { connectStream, type SseEvent } from '@/lib/sse';
-import { isDemoMode, buildDemoState } from '@/lib/demo';
+import { isDemoMode, buildDemoState, getDemoSource } from '@/lib/demo';
 import { wbHydrateFromServer } from '@/lib/wb';
 import type { ZhibiState } from '@/types/state';
 
@@ -74,11 +74,15 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ZhibiState | null>(null);
   const [loading, setLoading] = useState(true);
   const sigRef = useRef<string>('');
+  // onPush 并发防护：SSE change 风暴时 in-flight 去重（并发请求乱序完成会让旧数据覆盖新数据）
+  const inFlightRef = useRef(false);
   // typed 事件订阅者集合（Set 天然幂等去重）
   const listenersRef = useRef(new Set<(evt: SseEvent) => void>());
 
   // onPush（复刻 app.js L639-650）：拉 state → 签名比对 → 不同才替换
   const onPush = useCallback(async () => {
+    if (inFlightRef.current) return; // 去重：已有在途请求时跳过（in-flight 落地后数据即为最新）
+    inFlightRef.current = true;
     try {
       const s = await apiGet<ZhibiState>('/api/state');
       // 三动作服务端持久化（F-03）：state.decisions 水合本地（换设备/清缓存还原；本地非空则跳过）
@@ -92,6 +96,7 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
     } catch {
       // 静默（对齐旧版 catch {}）：401 已由 api.ts 统一跳登录处理
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -113,7 +118,14 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
     // 演示模式（F-04）：本地 mock state，不连后端、不启动 SSE/轮询（对齐旧版 enterApp 的 DEMO_MODE 分支）
     if (isDemoMode()) {
       let alive = true;
-      void buildDemoState().then((s) => {
+      // R7.2：『先看个例子』标记 → 优先加载真实调研数据（/api/sample，服务端闸门内）；
+      // 未导入示例（404）才回退界面演示 mock。
+      const load = getDemoSource() === 'sample'
+        ? fetch('/api/sample')
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('no_sample'))))
+            .catch(() => buildDemoState())
+        : buildDemoState();
+      void load.then((s) => {
         if (!alive) return;
         setState(s as unknown as ZhibiState);
         setLoading(false);

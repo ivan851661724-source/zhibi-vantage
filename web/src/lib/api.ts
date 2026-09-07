@@ -86,7 +86,19 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(res.status, url, body);
   }
-  return (await res.json()) as T;
+  // 空响应体（204/无 Content-Length 的 200）不解析 JSON——此前 res.json() 会抛 SyntaxError，
+  // 让"成功"被调用方当失败处理（如 material-action 同步静默失败、跨设备永不还原）。
+  const ct = res.headers.get('content-type') || '';
+  if (res.status === 204 || !ct.includes('json')) {
+    return {} as T;
+  }
+  const text = await res.text();
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return {} as T;
+  }
 }
 
 export function apiGet<T>(url: string): Promise<T> {
@@ -115,10 +127,6 @@ export function register(email: string, password: string, name: string): Promise
 
 // ---------- 系统（public，docs/02 §2.2） ----------
 
-export function getVersion(): Promise<{ version?: string } & Record<string, unknown>> {
-  return apiGet<{ version?: string }>('/api/version');
-}
-
 /** 演示模式闸门（F-04）：ZB_DEMO_ALLOWED=1 的部署才放行 ?demo=1 直进 */
 export function getPublicConfig(): Promise<{ demoAllowed?: boolean } & Record<string, unknown>> {
   return apiGet<{ demoAllowed?: boolean }>('/api/public-config');
@@ -143,8 +151,3 @@ export function markAlertsRead(ids: string[]): Promise<{ marked: number }> {
   return apiPost<{ marked: number }>('/api/alerts/read', { ids });
 }
 
-// ---------- 工作台三动作（tenant：服务端持久化，跨设备还原） ----------
-
-export function materialAction(id: string, action: string): Promise<{ ok: boolean; decisions: Record<string, string> }> {
-  return apiPost<{ ok: boolean; decisions: Record<string, string> }>('/api/material-action', { id, action });
-}
