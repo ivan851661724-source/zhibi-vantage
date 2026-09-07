@@ -6,6 +6,7 @@
 // ============================================================
 
 // ---------- /api/config（GET：密钥状态速览） ----------
+// ownBrands（自有品牌清单）属平台业务敏感信息：仅超管返回；租户只见键状态布尔。
 async function configGet(ctx, req, res, url, p) {
   if (p !== '/api/config' || req.method !== 'GET') return false;
   const c = ctx.loadConfig() || {};
@@ -15,17 +16,26 @@ async function configGet(ctx, req, res, url, p) {
   const hasSerper = serperPool.keys.length > 0;
   const hasBrave = !!(c.search && c.search.braveKey);
   const hasBocha = !!(c.search && c.search.bochaKey);
-  const hasKeys = !!(ctx.activeSearchKey(c) && c.llm && c.llm.apiKey);
-  return ctx.sendJSON(res, 200, { hasKeys, provider, hasTavily, hasSerper, hasBrave, hasBocha, serperKeyCount: serperPool.keys.length, serperKeysDisabled: serperPool.disabled.size, ownBrands: (c.ownBrands || []).filter(Boolean) });
+  const hasKeys = !!(ctx.activeSearchKey(c) && ((c.llm && c.llm.apiKey) || process.env.LLM_API_KEY));
+  const ap = ctx.getAuthPayload(req);
+  const isAdmin = !!(ap && ap.kind === 'admin');
+  return ctx.sendJSON(res, 200, {
+    hasKeys, provider, hasTavily, hasSerper, hasBrave, hasBocha,
+    serperKeyCount: serperPool.keys.length, serperKeysDisabled: serperPool.disabled.size,
+    // LLM 接入点/模型非机密，回传设置页回显（key 永不回传）
+    llmModel: (c.llm && c.llm.model) || '', llmBaseUrl: (c.llm && c.llm.baseUrl) || '',
+    ownBrands: isAdmin ? (c.ownBrands || []).filter(Boolean) : undefined,
+  });
 }
 
-// ---------- /api/config（POST：保存配置，RBAC 仅 admin） ----------
+// ---------- /api/config（POST：保存配置，RBAC 仅平台超管） ----------
 async function configPost(ctx, req, res, url, p) {
   if (p !== '/api/config' || req.method !== 'POST') return false;
-  // RBAC（P1-4.2）：仅平台超管或租户管理员可改全局配置（含密钥）
+  // RBAC 收紧：只认平台超管凭证（kind==='admin'）。租户 JWT 的任何角色（owner/admin）
+  // 都不得改平台全局配置（含付费密钥）——否则未来给租户发 admin 角色即越权。
   const ap = ctx.getAuthPayload(req);
-  const isAdmin = ap && (ap.kind === 'admin' || (ap.payload && (ap.payload.role === 'platform_admin' || ap.payload.role === 'admin')));
-  if (!isAdmin) return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅平台超管或租户管理员可修改配置。' });
+  const isAdmin = !!(ap && ap.kind === 'admin');
+  if (!isAdmin) return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅平台超管可修改配置。' });
   const body = await ctx.readBody(req);
   ctx.ensureData();
   const cur = ctx.loadConfig() || {};
@@ -43,7 +53,9 @@ async function configPost(ctx, req, res, url, p) {
     serperKeys = curKeys;
   }
   const next = {
-    llm: { baseUrl: (body.llm && body.llm.baseUrl) || (cur.llm && cur.llm.baseUrl) || 'https://api.deepseek.com/v1', model: (body.llm && body.llm.model) || 'deepseek-chat', apiKey: (body.llm && body.llm.apiKey) || (cur.llm && cur.llm.apiKey) || '' },
+    // baseUrl/model 留空 = 不锁定（走环境变量 LLM_BASE_URL/LLM_MODEL 或内置 DeepSeek 默认），
+    // 不再硬编码回填官方地址——否则会把 .env 下发的专属接入点（如百炼 Token Plan）悄悄覆盖掉。
+    llm: { baseUrl: (body.llm && body.llm.baseUrl) || (cur.llm && cur.llm.baseUrl) || '', model: (body.llm && body.llm.model) || (cur.llm && cur.llm.model) || 'deepseek-v4-flash', apiKey: (body.llm && body.llm.apiKey) || (cur.llm && cur.llm.apiKey) || '' },
     search: {
       provider,
       apiKey: (body.search && body.search.apiKey) || (cur.search && cur.search.apiKey) || '',
@@ -63,8 +75,13 @@ async function configPost(ctx, req, res, url, p) {
 // ---------- /api/searchtest（POST：搜索源交叉验证） ----------
 async function searchtest(ctx, req, res, url, p) {
   if (p !== '/api/searchtest' || req.method !== 'POST') return false;
+  // 烧钱向量防护：平台付费 key 代查——每租户独立限流（10 次/分）+ 查询限长
+  const tid = ctx.curTenantId ? ctx.curTenantId() : (ctx.resolveTenantId() || '_legacy');
+  if (ctx.rateLimited('t:' + tid, 'searchtest', 10, 60000)) {
+    return ctx.sendJSON(res, 429, { error: 'RATE_LIMIT', message: '搜索测试过于频繁，请一分钟后再试。' });
+  }
   const body = await ctx.readBody(req);
-  const query = (body.query || '').trim();
+  const query = (body.query || '').trim().slice(0, 200);
   if (!query) return ctx.sendJSON(res, 400, { error: '请填写测试查询词' });
   const c = ctx.loadConfig() || {};
   const sc = c.search || {};

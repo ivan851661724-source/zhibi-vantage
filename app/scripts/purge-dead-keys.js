@@ -103,8 +103,12 @@ async function probe(label, fn) {
 }
 
 const tinyMsg = [{ role: 'user', content: 'ping' }];
-async function probeDeepSeek(key, model) {
-  return probe('deepseek', (signal) => fetch('https://api.deepseek.com/v1/chat/completions', {
+// 探测地址跟随实际 LLM 接入点（config.llm.baseUrl > 环境变量 LLM_BASE_URL > DeepSeek 官方）：
+// 专属基地址的 key（如百炼 Token Plan）打官方地址必然 401，会被误判为死 key 而删除。
+async function probeDeepSeek(key, model, baseUrl) {
+  const base = String(baseUrl || process.env.LLM_BASE_URL || 'https://api.deepseek.com/v1').trim().replace(/\/+$/, '');
+  const endpoint = /\/chat\/completions$/.test(base) ? base : base + '/chat/completions';
+  return probe('llm', (signal) => fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
     body: JSON.stringify({ model: model || 'deepseek-v4-flash', messages: tinyMsg, max_tokens: 1 }),
@@ -155,7 +159,7 @@ function mask(k) { return k.length > 8 ? k.slice(0, 4) + '…' + k.slice(-4) : k
 
   // 收集非空候选 key
   const candidates = [];
-  if (cfg.llm.apiKey) candidates.push({ group: 'llm', field: 'apiKey', key: cfg.llm.apiKey, provider: 'deepseek', probe: (k) => probeDeepSeek(k, cfg.llm.model) });
+  if (cfg.llm.apiKey) candidates.push({ group: 'llm', field: 'apiKey', key: cfg.llm.apiKey, provider: 'llm', probe: (k) => probeDeepSeek(k, cfg.llm.model, cfg.llm.baseUrl) });
 
   const serperSingles = [];
   if (cfg.search.serperKey) serperSingles.push(cfg.search.serperKey);

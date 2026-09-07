@@ -10,6 +10,7 @@
 // 租户 token 在本分发器一律 BAD_ADMIN_TOKEN；反之亦然。两条通道互不可达。
 // ============================================================
 const auth = require('./auth.js');
+const ProviderHealth = require('./providers/health.js');
 const admin = require('./admin.js');
 const db = require('./db.js');
 const { extractToken } = require('../middleware/tenantScope.js');
@@ -31,13 +32,27 @@ function readBody(req) {
   });
 }
 
-// 超管凭证闸门：无 token / token 非法 / 非 platform_admin → 拒。返回 true（已响应）或 null（通过）。
+// 超管凭证闸门：无 token / token 非法 / 非 platform_admin → 拒（已响应）；
+// 通过则返回 payload（调用方直接用，避免二次验签的每请求双倍 HMAC+读密钥开销）。
 function requireAdmin(req, res) {
   const token = extractToken(req);
-  if (!token) return sendJSON(res, 401, { error: 'ADMIN_AUTH_REQUIRED' });
+  if (!token) { sendJSON(res, 401, { error: 'ADMIN_AUTH_REQUIRED' }); return null; }
   const payload = auth.verifyAdminToken(token);
-  if (!payload || payload.role !== 'platform_admin') return sendJSON(res, 401, { error: 'BAD_ADMIN_TOKEN' });
-  return null;
+  if (!payload || payload.role !== 'platform_admin') { sendJSON(res, 401, { error: 'BAD_ADMIN_TOKEN' }); return null; }
+  return payload;
+}
+
+// 工单读取：优先 x-admin-ticket 头（不进 URL/反代日志/浏览器历史），兼容 ?ticket= 查询参数
+function ticketOf(req, url) {
+  const h = req.headers && req.headers['x-admin-ticket'];
+  if (h) return String(h).trim();
+  return url ? url.searchParams.get('ticket') : null;
+}
+
+// 路径段安全解码：畸形百分号编码回 400 而不是炸成 500
+function safeDecode(seg, res) {
+  try { return decodeURIComponent(seg); }
+  catch (e) { sendJSON(res, 400, { error: 'BAD_PATH_ENCODING' }); return null; }
 }
 
 async function handleAdminRoutes(req, res, ctx) {
@@ -59,15 +74,26 @@ async function handleAdminRoutes(req, res, ctx) {
   }
 
   // ---- 其余全部需要超管凭证 ----
-  const deny = requireAdmin(req, res);
-  if (deny) return deny;
-  // 取出操作者身份（token.sub = 具体管理员账号），写入审计，区分到人。
-  const adminPayload = auth.verifyAdminToken(extractToken(req));
-  const by = adminPayload ? adminPayload.sub : null;
+  const adminPayload = requireAdmin(req, res);
+  if (!adminPayload) return true;
+  // 操作者身份（token.sub = 具体管理员账号），写入审计，区分到人。
+  const by = adminPayload.sub || null;
 
   // 全局总览
   if (p === '/api/admin/overview' && req.method === 'GET') {
     return sendJSON(res, 200, admin.getGlobalOverview());
+  }
+
+  // R5.4：搜索源健康状态（管理面板数据源）
+  if (p === '/api/admin/source-health' && req.method === 'GET') {
+    let serper = { keys: 0, disabled: 0 };
+    try {
+      const { loadConfig } = require('../core/config.js');
+      const { getSerperPool } = require('./providers/search.js');
+      const pool = getSerperPool(loadConfig() || {});
+      serper = { keys: pool.keys.length, disabled: pool.disabled.size };
+    } catch (e) { /* 配置不可读时只报健康快照 */ }
+    return sendJSON(res, 200, { providers: ProviderHealth.snapshot(), serper });
   }
 
   // 审计
@@ -88,7 +114,8 @@ async function handleAdminRoutes(req, res, ctx) {
   // 租户路由：/api/admin/tenant/:id
   const tm = p.match(/^\/api\/admin\/tenant\/([^/]+)$/);
   if (tm) {
-    const tid = decodeURIComponent(tm[1]);
+    const tid = safeDecode(tm[1], res);
+    if (!tid) return true;
     if (req.method === 'GET') {
       const dm = admin.getTenantDebugMirror(tid);
       if (dm.error) return sendJSON(res, 404, { error: dm.error });
@@ -106,11 +133,12 @@ async function handleAdminRoutes(req, res, ctx) {
   // 租户全部明文（需 ticket）
   const tp = p.match(/^\/api\/admin\/tenant\/([^/]+)\/plaintext$/);
   if (tp && req.method === 'GET') {
-    const tid = decodeURIComponent(tp[1]);
+    const tid = safeDecode(tp[1], res);
+    if (!tid) return true;
     const u = new URL(req.url, 'http://localhost');
-    const ticket = u.searchParams.get('ticket');
+    const ticket = ticketOf(req, u);
     if (!ticket) return sendJSON(res, 400, { error: 'TICKET_REQUIRED' });
-    const r = admin.getTenantPlaintext(tid, ticket);
+    const r = admin.getTenantPlaintext(tid, ticket, by); // by：审计"哪个管理员看了明文"
     if (r.error) return sendJSON(res, 403, { error: r.error });
     return sendJSON(res, 200, r);
   }
@@ -118,8 +146,10 @@ async function handleAdminRoutes(req, res, ctx) {
   // 单项目路由：/api/admin/tenant/:id/project/:pid
   const pm = p.match(/^\/api\/admin\/tenant\/([^/]+)\/project\/([^/]+)$/);
   if (pm) {
-    const tid = decodeURIComponent(pm[1]);
-    const pid = decodeURIComponent(pm[2]);
+    const tid = safeDecode(pm[1], res);
+    if (!tid) return true;
+    const pid = safeDecode(pm[2], res);
+    if (!pid) return true;
     if (req.method === 'GET') {
       const r = admin.getProjectDebugMirror(tid, pid); // 默认脱敏
       if (r.error) return sendJSON(res, 404, { error: r.error });
@@ -131,12 +161,14 @@ async function handleAdminRoutes(req, res, ctx) {
   // 单项目明文（需 ticket）
   const pp = p.match(/^\/api\/admin\/tenant\/([^/]+)\/project\/([^/]+)\/plaintext$/);
   if (pp && req.method === 'GET') {
-    const tid = decodeURIComponent(pp[1]);
-    const pid = decodeURIComponent(pp[2]);
+    const tid = safeDecode(pp[1], res);
+    if (!tid) return true;
+    const pid = safeDecode(pp[2], res);
+    if (!pid) return true;
     const u = new URL(req.url, 'http://localhost');
-    const ticket = u.searchParams.get('ticket');
+    const ticket = ticketOf(req, u);
     if (!ticket) return sendJSON(res, 400, { error: 'TICKET_REQUIRED' });
-    const r = admin.getProjectPlaintext(tid, pid, ticket);
+    const r = admin.getProjectPlaintext(tid, pid, ticket, by);
     if (r.error) return sendJSON(res, 403, { error: r.error });
     return sendJSON(res, 200, r);
   }

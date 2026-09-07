@@ -9,9 +9,11 @@
 //   · 回收：reclaimExpired 把 running 且 claimExpiresAt < now 的任务回 pending（kill -9 后断点续跑）
 // ============================================================
 const { DatabaseSync } = require('node:sqlite');
+const crypto = require('crypto');
 const path = require('path');
 
-const TASKS_DB = path.join(__dirname, '..', 'data', 'research_tasks.db');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同口径）
+const TASKS_DB = path.join(process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(__dirname, '..', 'data'), 'research_tasks.db');
 const CLAIM_TTL_MS = 60000;   // 认领租期 60s（心跳每 30s 续租）
 
 let db;
@@ -57,14 +59,17 @@ function enqueue(task) {
   return id;
 }
 
-// 原子认领：仅 pending 或过期 running 可被认领（workerToken 校验后续心跳/完成）
+// 原子认领：仅 pending 或过期 running 可被认领。
+// 每次认领生成随机 claimToken（修复：静态 token 会让「任务超时被回收后原执行仍能 finish」，
+// 且新旧执行无法区分，防误提交护栏形同虚设）；RETURNING 带回 claimToken 供消费端心跳/finish。
 function claim(projectId, workerToken, now) {
+  const token = 'ct_' + crypto.randomBytes(12).toString('hex');
   const r = init().prepare(`UPDATE tasks SET status='running', claimToken=?, claimExpiresAt=?, heartbeatAt=?,
       attempts=attempts+1
     WHERE id = (SELECT id FROM tasks
       WHERE projectId=? AND (status='pending' OR (status='running' AND claimExpiresAt < ?))
       ORDER BY priority DESC, createdAt ASC LIMIT 1)
-    RETURNING id, payload, tenantId, projectId, type`).get(workerToken, (now || Date.now()) + CLAIM_TTL_MS, now || Date.now(), projectId, now || Date.now());
+    RETURNING id, payload, tenantId, projectId, type, claimToken`).get(token, (now || Date.now()) + CLAIM_TTL_MS, now || Date.now(), projectId, now || Date.now());
   return r || null;
 }
 
@@ -74,10 +79,11 @@ function heartbeat(id, token, now) {
     .run(now || Date.now(), (now || Date.now()) + CLAIM_TTL_MS, id, token);
 }
 
-// 完成（校验 token 防误提交）；status: 'done' | 'error' | 'dead'
+// 完成（校验 token 防误提交）；status 白名单外一律落 error（防写入前端无法识别的状态）
 function finish(id, token, status, err) {
+  const s = ['done', 'error', 'dead'].includes(status) ? status : 'error';
   init().prepare(`UPDATE tasks SET status=?, doneAt=?, lastError=? WHERE id=? AND claimToken=?`)
-    .run(status, Date.now(), err || null, id, token);
+    .run(s, Date.now(), err || null, id, token);
 }
 
 // 回收：running 且 claimExpiresAt < now → 回 pending（retry++；超过 maxRetry 置 dead）

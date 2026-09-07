@@ -310,6 +310,61 @@ class YouTubeAdapter extends BaseVoiceAdapter {
 }
 
 // ============================================================
+// 独立站评论页适配器（R2.2）：抓品牌官网的公开评论页（常见 Shopify 评论应用路径），
+// 抽取文本片段作为声音条目（带来源 URL，tier2）。评论组件各异，只做保守文本抽取；
+// 情感交给归一化层的词典派生。SSRF 防护走 research/net 的 assertPublicUrl（惰性 require 防循环）。
+// ============================================================
+class SiteReviewsAdapter extends BaseVoiceAdapter {
+  constructor() { super({ platform: 'site', tier: 2, rateLimitMs: 500 }); }
+  headers() { return { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36' }; }
+  async fetchVoice(opts) {
+    const f = opts.fetchImpl || fetch;
+    const siteUrl = (opts.opts && opts.opts.siteUrl) || '';
+    if (!siteUrl) return [];
+    let assertPublicUrl = null;
+    try { assertPublicUrl = require('../research/net.js').assertPublicUrl; } catch (e) { assertPublicUrl = null; }
+    const paths = ['/reviews', '/pages/reviews', '/a/reviews'];
+    const maxItems = opts.maxItems || 30;
+    const out = [];
+    for (const p of paths) {
+      if (out.length >= maxItems) break;
+      let target;
+      try { target = new URL(p, String(siteUrl)).href; } catch (e) { return out; }
+      try {
+        if (assertPublicUrl) { try { await assertPublicUrl(target); } catch (e) { continue; } } // 私网/元数据地址直接跳过
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);
+        let r, html;
+        try {
+          r = await f(target, { headers: this.headers(), signal: ctrl.signal });
+          if (!r.ok) continue;
+          html = await r.text();
+        } finally { clearTimeout(timer); }
+        // 保守抽取：剥脚本/标签 → 按句切 → 取 40-240 字符的候选片段（评论页正文多为短句）
+        const text = String(html || '')
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;|&amp;|&quot;|&#\d+;|&[a-z]+;/gi, ' ')
+          .replace(/\s+/g, ' ');
+        const parts = text.split(/(?<=[.!?。！？])\s+/);
+        for (const seg of parts) {
+          const t = seg.trim();
+          if (t.length < 40 || t.length > 240) continue;
+          if (!/[a-zA-Z一-鿿]/.test(t)) continue;
+          out.push(coerceVoiceItem({
+            platform: 'site', url: target, text: t, author: 'site-anon',
+            date: null, sentiment: 'neu', tier: 2
+          }));
+          if (out.length >= maxItems) break;
+        }
+      } catch (e) { /* 单路径失败静默，试下一个 */ }
+    }
+    return this._dedupe(this._afterSince(out, opts.since));
+  }
+}
+
+// ============================================================
 // 注册表：新增平台 = 实例化一个适配器并 register 即可（消费端零改动）
 // 默认只启用「评论源」（文档 1.3 裁决：默认不注册帖子源 XHS/TikTok）
 // ============================================================
@@ -325,9 +380,10 @@ registerVoiceAdapter(new TrustpilotAdapter());
 registerVoiceAdapter(new EtsyAdapter());
 registerVoiceAdapter(new RedditAdapter());
 registerVoiceAdapter(new YouTubeAdapter());
+registerVoiceAdapter(new SiteReviewsAdapter());
 
 // 默认启用列表（仅评论源；帖子源不注册，需要时走第三方数据服务）
-const DEFAULT_ENABLED = ['trustpilot', 'etsy', 'reddit', 'youtube'];
+const DEFAULT_ENABLED = ['trustpilot', 'etsy', 'reddit', 'youtube', 'site'];
 
 // ============================================================
 // 编排：跨平台收集某品牌的用户声音。
@@ -366,6 +422,21 @@ async function collectBrandVoice(brand, opts) {
 // 映射极性：pos→pos, neg→neg, neu 不参与机会打分（机会只看 pos/neg 提及比）。
 // basis：tier1 官方API → verified；tier2 公开端点 → inferred。
 // ============================================================
+// 情感词典（透明派生，R2.3 前置）：平台无原生情感时按词表判定，结果仅作提及极性候选。
+// 规则极简且确定性：正/负词命中数多者胜，平手保持 neu（不参与机会打分）。绝不臆造强度。
+const POS_LEXICON = ['love', 'loved', 'perfect', 'great', 'amazing', 'awesome', 'excellent', 'best', 'recommend', 'comfortable', 'durable', 'beautiful', 'worth it', 'five stars', 'wonderful', 'good quality', '好用', '喜欢', '推荐', '满意', '超值', '舒服', '质量好'];
+const NEG_LEXICON = ['broke', 'broken', 'terrible', 'awful', 'worst', 'disappointed', 'disappointing', 'waste', 'returned', 'returning', 'cheap', 'flimsy', 'stopped working', 'never again', 'poor quality', 'uncomfortable', 'refund', 'scam', '难用', '失望', '退货', '质量差', '后悔', '坑人', '破损'];
+function lexiconSentiment(text) {
+  const t = String(text || '').toLowerCase();
+  if (!t) return null;
+  let pos = 0, neg = 0;
+  POS_LEXICON.forEach(w => { if (t.includes(w)) pos++; });
+  NEG_LEXICON.forEach(w => { if (t.includes(w)) neg++; });
+  if (pos > neg) return 'pos';
+  if (neg > pos) return 'neg';
+  return null;
+}
+
 function voiceItemsToNormalized(items, brand) {
   const bName = (brand && brand.name) || (typeof brand === 'string' ? brand : 'unknown');
   const bId = (brand && brand.id) || null;
@@ -374,23 +445,25 @@ function voiceItemsToNormalized(items, brand) {
     let polarity = null;
     if (it.sentiment === 'pos') polarity = 'pos';
     else if (it.sentiment === 'neg') polarity = 'neg';
-    if (!polarity) continue; // neu 不参与机会打分
+    if (!polarity) polarity = lexiconSentiment(it.text); // 透明词典派生（仅 pos/neg 参与机会打分）
+    if (!polarity) continue; // 仍中性：不参与机会打分
     out.push({
       text: it.text,
       brand: bName,
       brandId: bId,
       polarity,
       field: 'voice.' + it.platform,
-      basis: it.tier === 1 ? 'verified' : 'inferred'
+      basis: it.tier === 1 ? 'verified' : 'inferred',
+      url: it.url || null // R2.3：每条主题可溯源——保留原始 URL 进机会管线
     });
   }
   return out;
 }
 
 module.exports = {
-  SENTIMENTS, anonymizeAuthor, toISO, starsToSentiment, coerceVoiceItem,
+  SENTIMENTS, anonymizeAuthor, toISO, starsToSentiment, coerceVoiceItem, lexiconSentiment,
   BaseVoiceAdapter,
-  RedditAdapter, TrustpilotAdapter, EtsyAdapter, YouTubeAdapter,
+  RedditAdapter, TrustpilotAdapter, EtsyAdapter, YouTubeAdapter, SiteReviewsAdapter,
   registerVoiceAdapter, getVoiceAdapter, listVoiceAdapters,
   DEFAULT_ENABLED, collectBrandVoice, voiceItemsToNormalized
 };

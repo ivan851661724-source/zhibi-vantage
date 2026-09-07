@@ -63,12 +63,32 @@ function record(entry) {
     );
 }
 
-// 今日已花（¥）
+// 今日已花（¥）。预算窗口按 ZB_BUDGET_TZ（默认 Asia/Shanghai）算"今日零点"，
+// 不再依赖容器本地时区（UTC 容器此前会把中国租户的预算窗口错 8 小时）。
+function tzOffsetMs(epoch, tz) {
+  const parts = {};
+  new Intl.DateTimeFormat('en-US', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    .formatToParts(epoch).forEach(p => { parts[p.type] = p.value; });
+  const asUTC = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour) % 24, Number(parts.minute), Number(parts.second));
+  return asUTC - epoch;
+}
+function dailyStartMs() {
+  const tz = process.env.ZB_BUDGET_TZ || 'Asia/Shanghai';
+  try {
+    const now = Date.now();
+    const off = tzOffsetMs(now, tz);
+    const localNow = now + off;                                   // 目标时区挂钟的伪 epoch
+    const startLocal = Math.floor(localNow / 86400000) * 86400000; // 该挂钟今日零点
+    return startLocal - off;                                       // 换回真实 epoch
+  } catch (e) {
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    return start.getTime();
+  }
+}
 function dailySpend(tenantId) {
   if (!tenantId) return 0;
-  const start = new Date(); start.setHours(0, 0, 0, 0);
   const row = init().prepare('SELECT COALESCE(SUM(costYuan),0) AS s FROM cost_telemetry WHERE tenantId=? AND createdAt >= ?')
-    .get(tenantId, start.getTime());
+    .get(tenantId, dailyStartMs());
   return row ? row.s : 0;
 }
 

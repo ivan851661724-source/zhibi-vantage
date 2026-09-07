@@ -52,8 +52,10 @@ function set(kind, key, payload, ttlSec) {
   init().prepare(`INSERT INTO cache (kind, ckey, payload, expiresAt) VALUES (?,?,?,?)
     ON CONFLICT(ckey) DO UPDATE SET payload=excluded.payload, expiresAt=excluded.expiresAt`)
     .run(kind, ck, JSON.stringify(payload), Date.now() + ttl * 1000);
-  // 懒清理：每次 set 顺带清过期行（量小，够用）
-  init().prepare('DELETE FROM cache WHERE expiresAt < ?').run(Date.now());
+  // 懒清理：概率抽样清理过期行（修复：此前每次 set 全表 DELETE，高频写入时写放大）
+  if (Math.random() < 0.05) {
+    init().prepare('DELETE FROM cache WHERE expiresAt < ?').run(Date.now());
+  }
 }
 
 module.exports = { get, set, init, TTL, normKey };

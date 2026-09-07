@@ -27,7 +27,8 @@ const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(ROOT, 'data');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同口径）
+const DATA = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(ROOT, 'data');
 // 测试隔离：允许用环境变量把存储重定向到临时文件（v0.2 同名变量，扩展名 .json 不影响 SQLite 使用）
 const STORE_PATH = process.env.MT_STORE_PATH || path.join(DATA, 'multitenant.db');
 
@@ -60,8 +61,7 @@ function getDb() {
       createdAt TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenantId);
-    CREATE TABLE IF NOT EXISTS projects (
-      id TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS projects (      id TEXT PRIMARY KEY,
       tenantId TEXT NOT NULL,
       track TEXT NOT NULL DEFAULT 'project',
       competitors TEXT NOT NULL DEFAULT '[]',
@@ -72,6 +72,13 @@ function getDb() {
       lastSweepAt TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenantId);
+    CREATE TABLE IF NOT EXISTS metering_daily (
+      tenantId TEXT NOT NULL,
+      day TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenantId, day, kind)
+    );
     CREATE TABLE IF NOT EXISTS quotas (
       tenantId TEXT PRIMARY KEY,
       plan TEXT NOT NULL DEFAULT 'free',
@@ -85,8 +92,16 @@ function getDb() {
       PRIMARY KEY (tenantId, kind)
     );
   `);
-  // 模块 2-1：存量库迁移 —— projects 表补 lastSweepAt 列（幂等：列已存在则跳过）
-  try { db.exec('ALTER TABLE projects ADD COLUMN lastSweepAt TEXT'); } catch (e) { /* 列已存在 */ }
+  // 模块 2-1：存量库迁移 —— projects 表补 lastSweepAt 列（幂等：仅忽略"列已存在"类错误）
+  try { db.exec('ALTER TABLE projects ADD COLUMN lastSweepAt TEXT'); } catch (e) {
+    if (!/duplicate column|already exists/i.test(String(e && e.message))) {
+      try { console.error('[db] projects.lastSweepAt 迁移失败:', e && e.message || e); } catch (e2) {}
+    }
+  }
+  // users.email 唯一约束（未来"邀请成员"场景防同邮箱多账号致登录不可分辨；存量有重复时跳过不阻塞启动）
+  try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email)'); } catch (e) {
+    try { console.warn('[db] users.email 唯一索引未建立（存量数据可能有重复邮箱）:', e && e.message || e); } catch (e2) {}
+  }
   _db = db;
   return db;
 }
@@ -195,16 +210,16 @@ function getProject(tenantId, id) {
 }
 function saveProject(proj) {
   const db = getDb();
+  // 归属保护：upsert 冲突时绝不改写 tenantId/createdAt（错误归主的 saveProject 会把项目
+  // "迁移"到别的租户名下，且隔离层事后无法发现）。改名归主需走显式的超管迁移流程。
   db.prepare(`
     INSERT INTO projects (id, tenantId, track, competitors, brief, whiteSpace, createdAt, discoveredAt, lastSweepAt)
     VALUES (?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
-      tenantId = excluded.tenantId,
       track = excluded.track,
       competitors = excluded.competitors,
       brief = excluded.brief,
       whiteSpace = excluded.whiteSpace,
-      createdAt = excluded.createdAt,
       discoveredAt = excluded.discoveredAt,
       lastSweepAt = excluded.lastSweepAt
   `).run(
@@ -254,6 +269,21 @@ function getMetering(tenantId) {
   return out;
 }
 
+// ---------------- 每日计量（R5.1：单免费档每租户每日 N 次全景调研） ----------------
+function bumpDaily(tenantId, kind, n, day) {
+  const d = day || new Date().toISOString().slice(0, 10);
+  getDb().prepare(`
+    INSERT INTO metering_daily (tenantId, day, kind, count) VALUES (?,?,?,?)
+    ON CONFLICT(tenantId, day, kind) DO UPDATE SET count = count + excluded.count
+  `).run(tenantId, d, kind, n || 1);
+  return getDaily(tenantId, kind, d);
+}
+function getDaily(tenantId, kind, day) {
+  const d = day || new Date().toISOString().slice(0, 10);
+  const r = getDb().prepare('SELECT count FROM metering_daily WHERE tenantId = ? AND day = ? AND kind = ?').get(tenantId, d, kind);
+  return r ? r.count : 0;
+}
+
 // ---------------- 超管级跨租户读取（§6.1，独立实现，tenant 路由不得调用） ----------------
 function listAllTenants() {
   const db = getDb();
@@ -284,6 +314,7 @@ function reset() {
 
 module.exports = {
   STORE_PATH,
+  bumpDaily, getDaily,
   createTenant, getTenant, getTenantByEmail, setPlan,
   createUser, getUser, getUserByEmail, listUsers,
   createProject, listProjects, getProject, saveProject,

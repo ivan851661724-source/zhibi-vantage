@@ -95,7 +95,9 @@ async function handleTenantRoutes(req, res, ctx) {
 
   const m = p.match(/^\/api\/projects\/([^/]+)$/);
   if (m && req.method === 'GET') {
-    const proj = db.getProject(c.tenantId, decodeURIComponent(m[1])); // 跨租户 id 返回 null（隔离裁决）
+    let pid;
+    try { pid = decodeURIComponent(m[1]); } catch (e) { return sendJSON(res, 400, { error: 'BAD_PATH_ENCODING' }); }
+    const proj = db.getProject(c.tenantId, pid); // 跨租户 id 返回 null（隔离裁决）
     if (!proj) return sendJSON(res, 404, { error: 'NOT_FOUND' });
     return sendJSON(res, 200, { project: sanitizeBriefing(proj) });
   }

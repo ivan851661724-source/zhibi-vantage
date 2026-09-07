@@ -17,7 +17,8 @@ async function serperSearch(query, key, gl) {
   const r = await fetch('https://google.serper.dev/search', {
     method: 'POST',
     headers: { 'X-API-KEY': key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ q: query, num: 10, gl: gl || 'us', hl: 'en' })
+    body: JSON.stringify({ q: query, num: 10, gl: gl || 'us', hl: 'en' }),
+    signal: AbortSignal.timeout(15000) // 有界超时（此前依赖 undici 默认 ~300s，会拖住 sweep/failover）
   });
   if (!r.ok) {
     let bodyText = '';
@@ -96,7 +97,8 @@ async function tavilySearch(query, key) {
   const r = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ api_key: key, query, search_depth: 'advanced', max_results: 10, include_answer: true })
+    body: JSON.stringify({ api_key: key, query, search_depth: 'advanced', max_results: 10, include_answer: true }),
+    signal: AbortSignal.timeout(15000)
   });
   if (!r.ok) throw new Error('TAVILY_' + r.status);
   const j = await r.json();
@@ -108,7 +110,7 @@ async function tavilySearch(query, key) {
 async function braveSearch(query, key, gl) {
   const u = 'https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(query)
     + '&count=10&country=' + (gl === 'uk' ? 'gb' : (gl || 'us')) + '&search_lang=en';
-  const r = await fetch(u, { headers: { 'Accept': 'application/json', 'X-Subscription-Token': key } });
+  const r = await fetch(u, { headers: { 'Accept': 'application/json', 'X-Subscription-Token': key }, signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error('BRAVE_' + r.status);
   const j = await r.json();
   const items = (j.web && Array.isArray(j.web.results)) ? j.web.results : [];
@@ -120,7 +122,8 @@ async function bochaSearch(query, key) {
   const r = await fetch('https://api.bochaai.com/v1/web-search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-    body: JSON.stringify({ query, count: 10, summary: true })
+    body: JSON.stringify({ query, count: 10, summary: true }),
+    signal: AbortSignal.timeout(15000)
   });
   if (!r.ok) throw new Error('BOCHA_' + r.status);
   const j = await r.json();

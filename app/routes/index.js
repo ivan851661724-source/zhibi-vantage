@@ -83,8 +83,13 @@ function registerAll() {
   registry.register('GET', '/api/cost/summary', 'tenant', TelemetryH.costSummary);
   registry.register('GET', '/api/scheduler/status', 'tenant', TelemetryH.schedulerStatus);
   // —— 预警推送（2026-09-05 §6 ⬜）：站内信列表 / 已读 ——
+  registry.register('GET', '/api/alerts/settings', 'tenant', TelemetryH.alertsSettings);
+  registry.register('POST', '/api/alerts/settings', 'tenant', TelemetryH.alertsSettings);
   registry.register('GET', '/api/alerts', 'tenant', TelemetryH.alerts);
   registry.register('POST', '/api/alerts/read', 'tenant', TelemetryH.alertsRead);
+  // R5.2 候补名单（public，匿名可提交）+ R7.2 真实数据示例（闸门在 handler 内）
+  registry.register('POST', '/api/waitlist', 'public', SystemH.waitlist);
+  registry.register('GET', '/api/sample', 'public', SystemH.sample);
 }
 
 registerAll();

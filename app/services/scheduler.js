@@ -24,7 +24,10 @@ let _stopped = false;
 let _nextAt = null;
 
 function scheduleNext(runSweep, logger) {
-  const hours = hoursOf();
+  _stopped = false; // 重新调用即重新武装（修复：stop() 后无法重启）
+  // 修复：自定义 SWEEP_HOURS 乱序（如 '[18,2]'）时，跨天兜底取 min(hour)，
+  // 否则会固定跳过凌晨档（原来假设 hours[0] 是最早时刻）。
+  const hours = hoursOf().slice().sort((a, b) => a - b);
   const now = new Date();
   let next = null;
   for (const h of hours) {
@@ -70,4 +73,22 @@ function status() {
 let _lastSweepAt = null;
 function markSwept(at) { _lastSweepAt = at || new Date().toISOString(); }
 
-module.exports = { scheduleNext, stop, status, markSwept, hoursOf };
+// ---- R4.2：每日 digest 调度（默认每天 8 点；DIGEST_HOUR 可改） ----
+let _digestTimer = null;
+function scheduleDaily(fn, logger) {
+  if (_digestTimer) { clearTimeout(_digestTimer); _digestTimer = null; }
+  const hour = Math.max(0, Math.min(23, parseInt(process.env.DIGEST_HOUR || '8', 10) || 8));
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(hour, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = Math.max(1000, next - now);
+  _digestTimer = setTimeout(async () => {
+    try { if (fn) await fn(); } catch (e) { try { logger && logger.error && logger.error('digest 执行失败', e); } catch (e2) {} }
+    scheduleDaily(fn, logger); // 递归排明天
+  }, delay);
+  if (_digestTimer.unref) _digestTimer.unref();
+  return { nextAt: next, delayMs: delay, hour };
+}
+
+module.exports = { scheduleNext, stop, status, markSwept, hoursOf, scheduleDaily };

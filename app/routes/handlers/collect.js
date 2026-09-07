@@ -7,7 +7,9 @@
 // 逻辑与原 server.js 实现逐行对应（纯搬运，不改行为）。
 // ============================================================
 
-// ---------- /api/stream（GET：SSE 变化推送） ----------
+const { llmApiKey } = require('../../research/llm.js');
+
+// ---------- /api/stream（GET：SSE 变化推送，按租户分通道） ----------
 async function stream(ctx, req, res, url, p) {
   if (p !== '/api/stream' || req.method !== 'GET') return false;
   res.writeHead(200, {
@@ -16,20 +18,16 @@ async function stream(ctx, req, res, url, p) {
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no'
   });
-  res.write('retry: 3000\n\n');
-  res.write(': connected\n\n');
-  ctx.sseClients.add(res);
-  // ▶ 加固（0812 体验报告）：回放最近一次发现的事件，避免晚连客户端错过 discover_error 等
-  try {
-    const buf = ctx.discoverReplay && ctx.discoverReplay();
-    if (buf && buf.length) {
-      for (const ev of buf) {
-        try { res.write('data: ' + JSON.stringify(Object.assign({ type: ev.type }, ev.payload || {})) + '\n\n'); } catch {}
-      }
-    }
-  } catch {}
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 25000);
-  req.on('close', () => { clearInterval(ping); ctx.sseClients.delete(res); });
+  // 连接归属租户：入口层 resolveIdentity 已从 Bearer 或 ?token= 解出并注入 ALS；
+  // sse-hub 按租户分通道投递（杜绝跨租户事件泄露），并限制每租户连接数（超限 503）。
+  const tid = ctx.curTenantId ? ctx.curTenantId() : (ctx.resolveTenantId() || '_legacy');
+  const cleanup = ctx.sseHub.connect(res, tid);
+  if (!cleanup) {
+    res.write('data: ' + JSON.stringify({ type: 'stream_rejected', reason: 'too_many_connections' }) + '\n\n');
+    res.end();
+    return true;
+  }
+  req.on('close', cleanup);
   return true; // 长连接，不 sendJSON
 }
 
@@ -82,6 +80,7 @@ async function sector(ctx, req, res, url, p) {
 }
 
 // ---------- /api/discover（POST：发现竞品） ----------
+const metering = require('../../services/metering.js');
 async function discover(ctx, req, res, url, p) {
   if (p !== '/api/discover' || req.method !== 'POST') return false;
   // 并发护栏：研究任务满负荷时直接拒绝（经 ctx 闭包门读写 server.js 的 activeDiscovers）
@@ -100,12 +99,22 @@ async function discover(ctx, req, res, url, p) {
   if (track.length > 200) return fail(400, { error: '赛道描述过长（上限 200 字）' });
   const config = ctx.loadConfig();
   // 密钥缺失：同步前置拦截，立即 401（异步管线无法再回 401）
-  if (!ctx.activeSearchKey(config) || !config.llm || !config.llm.apiKey) {
-    return fail(401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 DeepSeek 密钥。' });
+  if (!ctx.activeSearchKey(config) || !llmApiKey(config)) {
+    return fail(401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 LLM 密钥。' });
+  }
+  // R5.1：单免费档·每租户每日 N 次全景调研（防滥用上限；值 ZB_FREE_DAILY_DISCOVERS 可配）
+  const _tid = ctx.curTenantId ? ctx.curTenantId() : '_legacy';
+  if (!metering.withinDailyDiscover(_tid)) {
+    return fail(429, {
+      error: 'DISCOVER_QUOTA',
+      message: '今日免费调研次数已用完（每租户每日 ' + metering.dailyDiscoverLimit() + ' 次）。明天再来，或留下联系方式加入候补名单（POST /api/waitlist）。',
+      dailyUsage: metering.dailyDiscoverUsage(_tid),
+    });
   }
   // 渐进式发现：异步启动管线，立即 202 返回 projectId；后续进度经 SSE /api/stream 推送。
   // 并发闸在 discoverLaunch 的 setImmediate 链末端 .finally 释放（成功/失败都释放）。
   const { projectId } = ctx.discoverLaunch(track, body.intent || {}, config, ctx.discoverGate);
+  metering.recordDailyDiscover(_tid); // R5.1：占用一次每日额度
   return ctx.sendJSON(res, 202, { projectId, sessionId: projectId, status: 'accepted' });
 }
 
@@ -128,8 +137,8 @@ async function lookup(ctx, req, res, url, p) {
   const name = (body.name || '').trim();
   if (!name) return ctx.sendJSON(res, 400, { error: 'EMPTY', message: '请填写品牌名' });
   const config = ctx.loadConfig();
-  if (!config || !ctx.activeSearchKey(config) || !config.llm || !config.llm.apiKey)
-    return ctx.sendJSON(res, 401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 DeepSeek 密钥。' });
+  if (!config || !ctx.activeSearchKey(config) || !llmApiKey(config))
+    return ctx.sendJSON(res, 401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 LLM 密钥。' });
   try {
     const s = await ctx.lookupBrand(name, body.url || '', config, body.intent);
     // 正向信号：用户手工补的"真对手"——算法漏了谁，比删了谁更有信息量
@@ -156,7 +165,7 @@ async function timeline(ctx, req, res, url, p) {
   const s = ctx.loadState();
   if (!s) return ctx.sendJSON(res, 404, { error: 'NO_STATE' });
   const config = ctx.loadConfig();
-  if (!config || !config.llm || !config.llm.apiKey) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
+  if (!config || !llmApiKey(config)) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
   const comp = s.competitors.find(c => c.id === body.competitorId);
   if (!comp) return ctx.sendJSON(res, 404, { error: 'NO_COMP' });
   try {
@@ -173,7 +182,7 @@ async function brief(ctx, req, res, url, p) {
   const s = ctx.loadState();
   if (!s) return ctx.sendJSON(res, 404, { error: 'NO_STATE' });
   const config = ctx.loadConfig();
-  if (!config || !config.llm || !config.llm.apiKey) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
+  if (!config || !llmApiKey(config)) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
   try {
     const briefRes = await ctx.buildReport(s, config);
     s.brief = briefRes; ctx.saveState(s);

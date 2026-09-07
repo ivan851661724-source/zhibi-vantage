@@ -19,12 +19,19 @@ const path = require('path');
 const { atomicWrite } = require('./fs-util.js');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(ROOT, 'data');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同口径）
+const DATA = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(ROOT, 'data');
 const MAX_LEN = 5000;
 
 // 必须与 server.js 的 sanitizeNs 同算法，否则落盘目录与项目档案对不上。
 function sanitizeNs(x) { return String(x || '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64) || '_legacy'; }
 function notesPath(tenantId) { return path.join(DATA, 'research', sanitizeNs(tenantId), 'user-notes.json'); }
+
+// 对象键防护：__proto__/constructor/prototype 作为键会破坏原型链（备注静默丢失/损坏）
+function safeKey(x) {
+  const k = String(x == null ? '' : x).slice(0, 80);
+  return (k === '__proto__' || k === 'constructor' || k === 'prototype') ? '' : k;
+}
 
 function readAll(tenantId) {
   try {
@@ -60,19 +67,22 @@ function listNotes(tenantId, userId) {
   return out;
 }
 
-// 保存；text 为空串 → 删除该条。返回保存后的 {text, updatedAt} 或 null（已删除）。
+// 保存；text 为空串 → 删除该条。返回保存后的 {text, updatedAt} 或 null（已删除/键非法）。
 function setNote(tenantId, userId, competitorId, text) {
   const t = String(text == null ? '' : text).slice(0, MAX_LEN);
+  const uid = safeKey(userId);
+  const cid = safeKey(competitorId);
+  if (!uid || !cid) return null;
   const all = readAll(tenantId);
-  if (!all[userId]) all[userId] = {};
+  if (!all[uid]) all[uid] = {};
   if (!t.trim()) {
-    delete all[userId][competitorId];
+    delete all[uid][cid];
   } else {
-    all[userId][competitorId] = { text: t, updatedAt: new Date().toISOString() };
+    all[uid][cid] = { text: t, updatedAt: new Date().toISOString() };
   }
-  if (Object.keys(all[userId]).length === 0) delete all[userId];
+  if (Object.keys(all[uid]).length === 0) delete all[uid];
   writeAll(tenantId, all);
-  return t.trim() ? all[userId][competitorId] : null;
+  return t.trim() ? all[uid][cid] : null;
 }
 
-module.exports = { MAX_LEN, notesPath, getNote, listNotes, setNote };
+module.exports = { MAX_LEN, notesPath, safeKey, getNote, listNotes, setNote };

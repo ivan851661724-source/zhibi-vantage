@@ -55,7 +55,27 @@ async function schedulerStatus(ctx, req, res, url, p) {
   return ctx.sendJSON(res, 200, Scheduler.status());
 }
 
-module.exports = { tasks, costSummary, schedulerStatus, alerts, alertsRead };
+// ---------- GET/POST /api/alerts/settings（tenant：每日摘要收件人，R4.3） ----------
+async function alertsSettings(ctx, req, res, url, p) {
+  if (p !== '/api/alerts/settings') return false;
+  const ap = ctx.getAuthPayload(req);
+  if (!ap || ap.kind !== 'tenant') return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可配置。' });
+  const tid = ap.payload.tid;
+  if (req.method === 'GET') {
+    const st = ctx.Alerts ? ctx.Alerts.getSettings(tid) : {};
+    return ctx.sendJSON(res, 200, { mailTo: st.mailTo || '', digestEnabled: !!process.env.ZB_MAIL_API_URL });
+  }
+  if (req.method === 'POST') {
+    const body = await ctx.readBody(req);
+    if (!ctx.Alerts) return ctx.sendJSON(res, 500, { error: 'NO_SERVICE' });
+    const r = ctx.Alerts.setSettings(tid, { mailTo: body.mailTo });
+    if (r && r.error) return ctx.sendJSON(res, 400, { error: r.error });
+    return ctx.sendJSON(res, 200, { ok: true, mailTo: r.mailTo || '' });
+  }
+  return ctx.sendJSON(res, 405, { error: 'METHOD' });
+}
+
+module.exports = { tasks, costSummary, schedulerStatus, alerts, alertsRead, alertsSettings };
 
 // ---------- GET /api/alerts （tenant：站内信预警列表） ----------
 async function alerts(ctx, req, res, url, p) {

@@ -86,7 +86,8 @@ async function fieldCorrect(ctx, req, res, url, p) {
     val = v;
   }
   const source = (body.source || '').trim();
-  const actor = String(req.headers['x-actor'] || body.actor || 'owner').slice(0, 40);
+  // 审计主体取真实身份（JWT sub）；x-actor/body.actor 可被客户端任意伪造，仅作无身份时的兜底展示
+  const actor = String((_ident && _ident.userId) || req.headers['x-actor'] || body.actor || 'owner').slice(0, 40);
   const fcId = 'fc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
   // PRD §7.3 硬约束：confirm-correct（确认现值正确）无风险，零延迟生效；其余纠错须附来源、进待复核队列
   let status, reviewedAt = null, reviewer = null;
@@ -194,7 +195,7 @@ async function fieldReview(ctx, req, res, url, p) {
     corr.reverify = true;
   }
   corr.reviewedAt = new Date().toISOString();
-  corr.reviewer = String(req.headers['x-actor'] || body.reviewer || 'owner').slice(0, 40);
+  corr.reviewer = String((_ident && _ident.userId) || req.headers['x-actor'] || body.reviewer || 'owner').slice(0, 40);
   if (isOverlay) ctx.correctionOverlay.updateById(_tid, _uid, fcId, { status: corr.status, reverify: corr.reverify, reviewedAt: corr.reviewedAt, reviewer: corr.reviewer });
   else ctx.saveState(s);
   return ctx.sendJSON(res, 200, {
@@ -228,7 +229,7 @@ async function fieldRevoke(ctx, req, res, url, p) {
   if (!corr) return ctx.sendJSON(res, 404, { error: 'NO_CORR' });
   corr.status = 'revoked';
   corr.reviewedAt = new Date().toISOString();
-  corr.reviewer = String(req.headers['x-actor'] || body.reviewer || 'owner').slice(0, 40);
+  corr.reviewer = String((_ident && _ident.userId) || req.headers['x-actor'] || body.reviewer || 'owner').slice(0, 40);
   // #4：撤销回滚——删除对应准确率样本并重建汇总，避免已撤销纠错继续污染维度准确率
   const dropped = ctx.M.deleteAccuracySample('fc-' + fcId);
   if (isOverlay) ctx.correctionOverlay.updateById(_tid, _uid, fcId, { status: 'revoked', reviewedAt: corr.reviewedAt, reviewer: corr.reviewer });
@@ -289,7 +290,11 @@ async function feedback(ctx, req, res, url, p) {
   const s = ctx.loadState();
   if (!s) return ctx.sendJSON(res, 404, { error: 'NO_STATE' });
   s.signals = s.signals || {};
-  const cid = body.competitorId || 'global';
+  // 键白名单：未消毒的 competitorId 用作对象键，__proto__/constructor 会破坏对象原型
+  const rawCid = String(body.competitorId || 'global');
+  const cid = (rawCid === '__proto__' || rawCid === 'constructor' || rawCid === 'prototype')
+    ? 'global'
+    : (rawCid.replace(/[^\w\u4e00-\u9fff:-]/g, '').slice(0, 80) || 'global');
   s.signals[cid] = s.signals[cid] || { views: 0, stars: 0, ignore: 0 };
   if (body.action === 'view') s.signals[cid].views++;
   if (body.action === 'star') s.signals[cid].stars++;

@@ -24,11 +24,18 @@ const path = require('path');
 const { atomicWrite } = require('./fs-util.js');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(ROOT, 'data');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同口径）
+const DATA = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(ROOT, 'data');
 
 // 必须与 user-notes.js / server.js 的 sanitizeNs 同算法，否则落盘目录对不上。
 function sanitizeNs(x) { return String(x || '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64) || '_legacy'; }
 function storePath(tenantId) { return path.join(DATA, 'research', sanitizeNs(tenantId), 'field-corrections.json'); }
+
+// 对象键防护：__proto__/constructor/prototype 作为键会破坏原型链（纠错静默丢失/损坏）
+function safeKey(x) {
+  const k = String(x == null ? '' : x).slice(0, 80);
+  return (k === '__proto__' || k === 'constructor' || k === 'prototype') ? '' : k;
+}
 
 function readAll(tenantId) {
   try {
@@ -52,12 +59,15 @@ function getCorrections(tenantId, userId, competitorId) {
   return Array.isArray(arr) ? arr : [];
 }
 
-// 追加一条纠错（私有层只增不改；状态变迁走 updateById）
+// 追加一条纠错（私有层只增不改；状态变迁走 updateById）。键非法（如 __proto__）返回 null。
 function setCorrection(tenantId, userId, corr) {
+  const uid = safeKey(userId);
+  const cid = safeKey(corr && corr.competitorId);
+  if (!uid || !cid) return null;
   const all = readAll(tenantId);
-  if (!all[userId]) all[userId] = {};
-  if (!all[userId][corr.competitorId]) all[userId][corr.competitorId] = [];
-  all[userId][corr.competitorId].push(corr);
+  if (!all[uid]) all[uid] = {};
+  if (!all[uid][cid]) all[uid][cid] = [];
+  all[uid][cid].push(corr);
   writeAll(tenantId, all);
   return corr;
 }

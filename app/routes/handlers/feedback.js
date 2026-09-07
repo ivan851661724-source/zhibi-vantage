@@ -30,7 +30,10 @@ async function ruleReview(ctx, req, res, url, p) {
     return true;
   }
   s.ruleDecisions = s.ruleDecisions || {};
-  s.ruleDecisions[rid] = { decision, at: new Date().toISOString(), kind: rule.kind, keywords: rule.keywords || [], text: rule.text };
+  // 键防护：__proto__ 等保留键会破坏对象原型
+  const safeRid = (rid === '__proto__' || rid === 'constructor' || rid === 'prototype') ? '' : rid.replace(/[^\w\u4e00-\u9fff:-]/g, '').slice(0, 80);
+  if (!safeRid) { ctx.sendJSON(res, 400, { error: 'BAD_INPUT', message: '非法规则 id' }); return true; }
+  s.ruleDecisions[safeRid] = { decision, at: new Date().toISOString(), kind: rule.kind, keywords: rule.keywords || [], text: rule.text };
   ctx.saveState(s);
   ctx.sendJSON(res, 200, ctx.constructFeedbackReport(s));
   return true;
@@ -87,9 +90,12 @@ async function materialAction(ctx, req, res, url, p) {
   const s = ctx.loadState();
   if (!s) { ctx.sendJSON(res, 404, { error: 'NO_STATE' }); return true; }
   s.decisions = s.decisions || {};
-  if (!action || action === '') delete s.decisions[id];
-  else s.decisions[id] = action;
+  // 键防护：__proto__ 等保留键会破坏对象原型
+  const sid = (id === '__proto__' || id === 'constructor' || id === 'prototype') ? '' : id.replace(/[^\w\u4e00-\u9fff:-]/g, '').slice(0, 80);
+  if (!sid) { ctx.sendJSON(res, 400, { error: 'BAD_INPUT', message: '非法材料 id' }); return true; }
+  if (!action || action === '') delete s.decisions[sid];
+  else s.decisions[sid] = action;
   ctx.saveState(s);
-  ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[id] || null, decisions: s.decisions });
+  ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[sid] || null, decisions: s.decisions });
   return true;
 }

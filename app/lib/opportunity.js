@@ -84,27 +84,33 @@ function similarity(a, b) {
 function collectVoiceItems(comps) {
   const items = [];
   const seen = new Set();
-  const push = (c, text, polarity, field, basis) => {
+  const push = (c, text, polarity, field, basis, url) => {
     const t = String(text == null ? '' : text).trim();
     if (!t) return;
     const key = c.id + '|' + polarity + '|' + normTheme(t);
     if (!key.split('|')[2]) return;
     if (seen.has(key)) return;
     seen.add(key);
-    items.push({ text: t.slice(0, 60), brand: c.name, brandId: c.id, polarity, field, basis: basis || 'unverified' });
+    // R2.3：真实声音条目带 url（来源可点开溯源）；LLM 研判主题无 url → null，不编造
+    items.push({ text: t.slice(0, 60), brand: c.name, brandId: c.id, polarity, field, basis: basis || 'unverified', url: url || null });
   };
   comps.forEach(c => {
     const rv = c.reviews || {};
     (rv.negThemes || []).forEach(t => push(c, t, 'neg', 'reviews.negThemes', rv.basis));
     (rv.posThemes || []).forEach(t => push(c, t, 'pos', 'reviews.posThemes', rv.basis));
     (c.painPoints || []).forEach(p => push(c, (p && p.point != null) ? p.point : p, 'neg', 'painPoints', p && p.basis));
+    // R2.5：真实声音（voice-collector 采集，带来源 URL）接入机会管线
+    (c.voiceItems || []).forEach(v => {
+      if (!v || (v.polarity !== 'pos' && v.polarity !== 'neg')) return;
+      push(c, v.text, v.polarity, v.field || 'voice.real', v.basis, v.url);
+    });
   });
   return items;
 }
 
 function hasVoice(c) {
   const rv = c.reviews || {};
-  return ((rv.negThemes || []).length + (rv.posThemes || []).length + ((c.painPoints || []).length)) > 0;
+  return ((rv.negThemes || []).length + (rv.posThemes || []).length + ((c.painPoints || []).length) + ((c.voiceItems || []).length)) > 0;
 }
 
 // 贪心聚类：按出现频次从高到低，逐条并入首个足够相似的簇，否则自立门户。
@@ -173,7 +179,8 @@ function scoreCluster(cl, brandsWithVoice) {
     denominatorText: `${brandSet.size}/${denom} 家有用户声音的对手提到（正面 ${pos} · 负面 ${neg}）`,
     sources: cl.mentions.slice(0, 12).map(m => ({
       name: m.brand, field: m.field, polarity: m.polarity,
-      basis: m.basis || 'unverified', detail: m.text
+      basis: m.basis || 'unverified', detail: m.text,
+      url: m.url || null // R2.3：每条主题可溯源（真实声音带原始 URL）
     }))
   };
 }

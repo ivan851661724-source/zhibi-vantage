@@ -144,6 +144,7 @@ function recordConsumption(rec) {
   if (!itemId) return { ok: false, error: 'NO_ITEM' };
   const r = {
     ts: rec.ts ? rec.ts : new Date().toISOString(),
+    tenantId: String((rec && rec.tenantId) || '').slice(0, 64) || null, // 租户归属（隔离读取用）
     userId: String((rec && rec.userId) || 'anon').slice(0, 40),
     itemType: (rec && rec.itemType === 'field') ? 'field' : 'gap',
     itemId,
@@ -210,6 +211,7 @@ function recordCalibration(rec) {
   if (!gapId) return { ok: false, error: 'NO_GAP' };
   const c = {
     gapId, verdict,
+    tenantId: String((rec && rec.tenantId) || '').slice(0, 64) || null, // 租户归属（隔离/追责用）
     evidence: String((rec && rec.evidence) || '').slice(0, 400),
     note: String((rec && rec.note) || '').slice(0, 400),
     at: rec && rec.at ? rec.at : new Date().toISOString()
@@ -343,6 +345,7 @@ function recordAccuracySample(rec) {
   const s = {
     id: (rec && rec.id) || ('acc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)),
     at: rec && rec.at ? rec.at : new Date().toISOString(),
+    tenantId: String((rec && rec.tenantId) || '').slice(0, 64) || null, // 租户归属（隔离/追责用）
     dimension,
     fieldKey: String((rec && rec.fieldKey) || '').slice(0, 60),
     evidenceId: String((rec && rec.evidenceId) || '').slice(0, 60),

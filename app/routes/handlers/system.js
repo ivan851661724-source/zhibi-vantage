@@ -42,7 +42,49 @@ async function healthz(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { metrics, healthz, publicConfig };
+// ---------- /api/waitlist（POST：候补名单，R5.2） ----------
+// 超出每日免费额度时，用户留联系方式进候补（运营后续触达）。匿名可提交（登录前也可能超额提示）。
+async function waitlist(ctx, req, res, url, p) {
+  if (p !== '/api/waitlist' || req.method !== 'POST') return false;
+  const body = await ctx.readBody(req);
+  const contact = String(body.contact || '').trim().slice(0, 120);
+  if (!contact) { ctx.sendJSON(res, 400, { error: 'EMPTY', message: '请填写联系方式（邮箱/微信/手机）' }); return true; }
+  const fsMod = require('fs');
+  const pathMod = require('path');
+  const dataDir = ctx.DATA;
+  if (!fsMod.existsSync(dataDir)) fsMod.mkdirSync(dataDir, { recursive: true });
+  const file = pathMod.join(dataDir, 'waitlist.json');
+  let arr = [];
+  try { arr = JSON.parse(fsMod.readFileSync(file, 'utf8')); if (!Array.isArray(arr)) arr = []; } catch (e) {}
+  // 同联系方式去重（更新 note 即可，不重复占位）
+  const dup = arr.find(x => x.contact === contact);
+  if (!dup) {
+    arr.push({ at: new Date().toISOString(), contact, note: String(body.note || '').slice(0, 200), source: 'quota-exceeded' });
+    fsMod.writeFileSync(file, JSON.stringify(arr, null, 2));
+  }
+  ctx.sendJSON(res, 200, { ok: true, message: '已加入候补名单，我们会尽快联系你。' });
+  return true;
+}
+
+// ---------- /api/sample（GET：真实调研数据示例，R7.2） ----------
+// 数据源 = data/sample/sample-state.json（运维导入的一次**真实调研**导出——PRD 明确不用 mock）。
+// 闸门与演示模式同源（ZB_DEMO_ALLOWED=1）；未导入样例或未开闸 → 404（前端回退提示，不喂 mock）。
+async function sample(ctx, req, res, url, p) {
+  if (p !== '/api/sample' || req.method !== 'GET') return false;
+  if (process.env.ZB_DEMO_ALLOWED !== '1') { ctx.sendJSON(res, 404, { error: 'NO_SAMPLE' }); return true; }
+  const fsMod = require('fs');
+  const pathMod = require('path');
+  const file = pathMod.join(ctx.DATA, 'sample', 'sample-state.json');
+  try {
+    const state = JSON.parse(fsMod.readFileSync(file, 'utf8'));
+    ctx.sendJSON(res, 200, state);
+  } catch (e) {
+    ctx.sendJSON(res, 404, { error: 'NO_SAMPLE', message: '示例数据未导入（data/sample/sample-state.json）' });
+  }
+  return true;
+}
+
+module.exports = { metrics, healthz, publicConfig, waitlist, sample };
 
 // ---------- /api/public-config（GET，public）：前端启动期读取的公开开关 ----------
 // 当前仅演示模式闸门（F-04）：生产部署不设 ZB_DEMO_ALLOWED=1 时，?demo=1 直进被前端拦截。

@@ -32,7 +32,8 @@ function countVoiceBrands(competitors) {
   let n = 0;
   (competitors || []).forEach(c => {
     const rv = c.reviews || {};
-    if (((rv.negThemes || []).length + (rv.posThemes || []).length + ((c.painPoints || []).length)) > 0) n++;
+    // R2.5：真实声音（voice-collector 采集，带来源 URL）计入需求样本厚度
+    if (((rv.negThemes || []).length + (rv.posThemes || []).length + ((c.painPoints || []).length) + ((c.voiceItems || []).length)) > 0) n++;
   });
   return n;
 }

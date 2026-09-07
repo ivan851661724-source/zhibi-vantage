@@ -9,7 +9,7 @@
  *  3. enabled=false 的域：L2 不产出材料，L3 配方不可消费（T4 护栏）；
  *  4. acceptance 为 Phase 0 采集验收门槛，全部达标才允许 enabled=true；
  *  5. engine 惰性加载：enabled=false 的域不加载引擎（按需 require，避免启动即耦合未落地模块）。
- *  6. 当前 Phase B 仅 price 域 enabled:true（跟价材料场景），其余域已注册但不出材料。
+ *  6. Phase B 起 price 域 enabled（跟价材料）；R2/R3 落地后 voice/channel 域亦 enabled（2026-09）。
  */
 'use strict';
 
@@ -43,7 +43,8 @@ module.exports = {
 
   voice: {
     label: '品牌声量域',
-    enabled: false,
+    enabled: true, // R2 落地（2026-09）：采集→归一化→机会管线→域 verdict 全链路接通
+
     evaluation: {
       sourceQuality: 'platformTrust * deBot * sampleSize',
       weight: 'reach * engagement * recency * platformWeight',
@@ -60,7 +61,8 @@ module.exports = {
 
   channel: {
     label: '渠道域',
-    enabled: false,
+    enabled: true, // R3 落地（2026-09）：存在性探测/判定纪律已在 enrich/deepdive 运行，域 verdict 出渠道分布
+
     evaluation: {
       sourceQuality: 'officialStore>marketplaceBrand>aggregator>llmGuess',
       weight: 'coverage * recency * channelTrust',

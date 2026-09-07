@@ -21,15 +21,16 @@ const auth = require('./auth.js');
 const { debugMirror } = require('../middleware/sanitize.js');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(ROOT, 'data');
-const STATE_PATH = process.env.MT_ADMIN_STATE_PATH || path.join(DATA, '.admin-state.json');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同口径）
+const DATA_DIR = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(ROOT, 'data');
+const STATE_PATH = process.env.MT_ADMIN_STATE_PATH || path.join(DATA_DIR, '.admin-state.json');
 
 const TICKET_MIN_MIN = 5;
 const TICKET_MAX_MIN = 240;
 
-function ensureState() { if (!fs.existsSync(DATA)) fs.mkdirSync(DATA, { recursive: true }); }
+function ensureState2() { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); }
 function readState() {
-  ensureState();
+  ensureState2();
   try {
     const s = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
     s.tickets = s.tickets || {};
@@ -37,9 +38,19 @@ function readState() {
     return s;
   } catch { return { tickets: {}, audit: [] }; }
 }
+// 原子写（tmp+rename）：修复直接 writeFileSync 在崩溃时留下截断 JSON，
+// 下次 readState 失败回空对象、写回即把全部审计与工单静默清零的缺陷。
 function writeState(s) {
-  ensureState();
-  fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+  ensureState2();
+  // 顺带清理过期工单（只增不删会无限累积）
+  const now = Date.now();
+  for (const id of Object.keys(s.tickets || {})) {
+    const tk = s.tickets[id];
+    if (tk && tk.status !== 'revoked' && tk.expiresAt && tk.expiresAt < now - 7 * 86400000) delete s.tickets[id];
+  }
+  const tmp = STATE_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2));
+  fs.renameSync(tmp, STATE_PATH);
 }
 function audit(s, entry) {
   s.audit.unshift(Object.assign({ at: new Date().toISOString() }, entry));
@@ -137,33 +148,33 @@ function validateTicket(ticketId, tenantId) {
   return { ok: true, ticket: tk };
 }
 
-function getTenantPlaintext(tenantId, ticketId) {
+function getTenantPlaintext(tenantId, ticketId, by) {
   const v = validateTicket(ticketId, tenantId);
   if (!v.ok) return { error: v.reason };
   const t = db.getTenant(tenantId);
   if (!t) return { error: 'TENANT_NOT_FOUND' };
   const projects = db.listProjects(tenantId); // 明文（不过 debugMirror）
   const s = readState();
-  audit(s, { action: 'VIEW_PLAINTEXT', ticketId, tenantId, scope: 'tenant' });
+  audit(s, { action: 'VIEW_PLAINTEXT', by: by || null, ticketId, tenantId, scope: 'tenant' });
   writeState(s);
   return { tenant: { id: t.id, name: t.name, email: t.email, plan: t.plan, status: t.status || 'active' }, projects, ticketId };
 }
-function getProjectPlaintext(tenantId, projectId, ticketId) {
+function getProjectPlaintext(tenantId, projectId, ticketId, by) {
   const v = validateTicket(ticketId, tenantId);
   if (!v.ok) return { error: v.reason };
   const proj = db.getProjectById(projectId);
   if (!proj || proj.tenantId !== tenantId) return { error: 'PROJECT_NOT_FOUND' };
   const s = readState();
-  audit(s, { action: 'VIEW_PLAINTEXT', ticketId, tenantId, scope: 'project', projectId });
+  audit(s, { action: 'VIEW_PLAINTEXT', by: by || null, ticketId, tenantId, scope: 'project', projectId });
   writeState(s);
   return { project: proj, ticketId };
 }
 
-function revokeTicket(ticketId) {
+function revokeTicket(ticketId, by) {
   const s = readState();
   if (!s.tickets[ticketId]) return { error: 'TICKET_UNKNOWN' };
   s.tickets[ticketId].status = 'revoked';
-  audit(s, { action: 'REVOKE_TICKET', ticketId });
+  audit(s, { action: 'REVOKE_TICKET', by: by || null, ticketId });
   writeState(s);
   return { ok: true };
 }

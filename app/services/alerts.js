@@ -55,6 +55,28 @@ function push(tenantId, alert, webhookUrl) {
   return a;
 }
 
+// ---- R4.3 租户级收件人配置（每日邮件摘要） ----
+// 存 data/alerts/<ns>/settings.json：{ mailTo }；未配置时 digest 回退租户账号邮箱。
+function settingsFileOf(tenantId) {
+  const dir = path.join(ALERTS_DIR, nsOf(tenantId));
+  try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+  return path.join(dir, 'settings.json');
+}
+function getSettings(tenantId) {
+  try { return JSON.parse(fs.readFileSync(settingsFileOf(tenantId), 'utf8')) || {}; } catch (e) { return {}; }
+}
+function setSettings(tenantId, patch) {
+  const cur = getSettings(tenantId);
+  const next = Object.assign(cur, {});
+  if (patch && patch.mailTo !== undefined) {
+    const v = String(patch.mailTo || '').trim();
+    if (v && !/^[^s@]+@[^s@]+.[^s@]+$/.test(v)) return { error: 'BAD_EMAIL' };
+    next.mailTo = v; // 空串 = 清除（回退账号邮箱）
+  }
+  try { fs.writeFileSync(settingsFileOf(tenantId), JSON.stringify(next, null, 2)); } catch (e) { return { error: 'WRITE_FAILED' }; }
+  return next;
+}
+
 // 读取（新→旧）；limit 默认 50
 function list(tenantId, limit) {
   const arr = readAll(tenantId);
@@ -70,4 +92,4 @@ function markRead(tenantId, ids) {
   return arr.filter(x => idSet.has(x.id)).length;
 }
 
-module.exports = { push, list, markRead };
+module.exports = {push, list, markRead, getSettings, setSettings };

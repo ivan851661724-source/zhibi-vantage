@@ -47,13 +47,15 @@ function loadCategories(p) {
   catch (e) { console.error('类目清单读取失败: ' + p); process.exit(1); }
 }
 
-// 复用代码库的 DeepSeek 调用约定（server.js:266 同款）。
+// 复用代码库的 LLM 调用约定（OpenAI 兼容 /chat/completions；接入点/模型/key 均可用环境变量覆盖）。
 async function deepseekJSON(messages, key, model) {
-  if (!key) throw new Error('缺少 config.llm.apiKey');
-  const r = await fetch('https://api.deepseek.com/v1/chat/completions', {
+  if (!key) throw new Error('缺少 config.llm.apiKey（或环境变量 LLM_API_KEY）');
+  const base = String(process.env.LLM_BASE_URL || 'https://api.deepseek.com/v1').trim().replace(/\/+$/, '');
+  const endpoint = /\/chat\/completions$/.test(base) ? base : base + '/chat/completions';
+  const r = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-    body: JSON.stringify({ model: model || 'deepseek-chat', messages, response_format: { type: 'json_object' }, temperature: 0.2 }),
+    body: JSON.stringify({ model: model || process.env.LLM_MODEL || 'deepseek-v4-flash', messages, response_format: { type: 'json_object' }, temperature: 0.2 }),
   });
   if (!r.ok) { const t = await r.text(); throw new Error('deepseek HTTP ' + r.status + ' ' + t.slice(0, 160)); }
   const j = await r.json();
@@ -156,7 +158,7 @@ async function main() {
 
   for (const cat of limited) {
     let brands = [];
-    try { brands = await llmEnumerate(cat, cfg.llm && cfg.llm.apiKey, cfg.llm && cfg.llm.model); }
+    try { brands = await llmEnumerate(cat, (cfg.llm && cfg.llm.apiKey) || process.env.LLM_API_KEY, cfg.llm && cfg.llm.model); }
     catch (e) { console.error('  LLM枚举失败(' + cat + '): ' + e.message); }
     const recs = AL.llmEnumerationAdapter(brands.map((b) => ({ category: cat, name: b.name, note: b.note })), 'llm-enum');
     allRecords = allRecords.concat(recs);

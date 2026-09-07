@@ -19,6 +19,7 @@ function recordOk(p) {
 
 // 判定失败是否额度/配额类（402/429/额度耗尽/key 失效）→ 进程内早退信号
 // 2026-09-06 B-01：全源 402/429 时不再每 query 把配置源全打一遍（额度结算周期内不会恢复，等同 serper 多 key 的 disabled 语义）
+// 标记带 10 分钟衰减（见 isExhausted）：到期自动重试一次，额度真耗尽会再次标记。
 const EXHAUST_RE = /QUOTA|EXHAUST|_402|_429|_403/i;
 function recordFail(p, err) {
   if (!ST[p]) return;
@@ -26,11 +27,12 @@ function recordFail(p, err) {
   ST[p].lastFailAt = Date.now();
   const msg = String((err && err.message) || err || '');
   ST[p].lastErr = msg.slice(0, 120);
-  if (EXHAUST_RE.test(msg)) ST[p].exhausted = true; // 额度类 → 进程内永久跳过（直到重启）
+  if (EXHAUST_RE.test(msg)) ST[p].exhausted = true;
 }
 
-// 额度耗尽标记：比「不健康」更硬——exhausted 源进程内直接跳过候选，不再尝试
-// 时间衰减：429 限流窗口 10 分钟，到期自动重试（若额度真耗尽会再次标记，每 10 分钟至多 1 次尝试）
+// 额度耗尽标记：比「不健康」更硬——exhausted 源直接跳过候选，不再尝试。
+// 时间衰减：429 限流窗口 10 分钟，到期自动重试（若额度真耗尽会再次标记，每 10 分钟至多 1 次尝试）。
+// ⚠️ 本函数带副作用（到期清标记）；isHealthy 用纯读判定，避免谓词修改状态。
 function isExhausted(p) {
   const s = ST[p];
   if (!s || !s.exhausted) return false;
@@ -38,11 +40,12 @@ function isExhausted(p) {
   return true;
 }
 
-// 健康判定：exhausted → 不健康；10 分钟内有失败记录且失败率 ≥ 60% 且样本 ≥ 3 → 不健康
-// 最小样本保护：偶发单次失败（样本 < 3）不裁决，避免网络抖动误判
+// 健康判定（纯读，不改状态）：exhausted 且仍在衰减窗口内 → 不健康；
+// 10 分钟内有失败记录且失败率 ≥ 60% 且样本 ≥ 3 → 不健康。最小样本保护：偶发单次失败不裁决。
 function isHealthy(p) {
   const s = ST[p];
-  if (!s || isExhausted(p)) return false;
+  if (!s) return false;
+  if (s.exhausted && Date.now() - s.lastFailAt <= 600000) return false; // 纯读：不清标记（清理由 isExhausted 做）
   if (!s.fail) return true;
   if (Date.now() - s.lastFailAt > 600000) return true; // 10 分钟无新失败 → 视为恢复
   if (s.ok + s.fail < 3) return true;                  // 样本太少不裁决

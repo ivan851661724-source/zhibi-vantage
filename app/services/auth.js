@@ -11,7 +11,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const DATA = path.join(ROOT, 'data');
+// ZB_DATA_DIR 可覆盖数据目录（与 core/paths.js 同一口径；隔离测试/多实例用）
+const DATA = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(ROOT, 'data');
 const SECRET_PATH = process.env.MT_SECRET_PATH || path.join(DATA, '.jwt-secret');
 
 // 超管独立密钥：与租户 JWT 密钥**完全不同**，从根上杜绝"租户 token 伪装成超管"。
@@ -64,19 +65,28 @@ function verifyJWT(token, secret) {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null; // 签名不符 → 拒
   let payload;
   try { payload = JSON.parse(b64urlDecode(p).toString('utf8')); } catch { return null; }
-  if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null; // 过期 → 拒
+  if (payload.exp === undefined || payload.exp === null || payload.exp < Math.floor(Date.now() / 1000)) return null; // 缺 exp 或过期 → 拒（无 exp 的令牌永不过期属漏洞）
   return payload;
 }
 
 // ---------------- secret 持久化（重启不失效） ----------------
+// 密钥进程内缓存：热路径（每请求验签）不再同步读盘；首次解析后复用。
+let _jwtSecretCache = null;
+let _adminSecretCache = null;
+// ⚠️ fail-closed（P0 修复）：密钥文件不可读且不可写（磁盘只读/权限错误）时直接抛错，
+// 绝不回退到源码内的可预测字符串——否则任何人可伪造任意租户 JWT 乃至超管 token。
 function getJwtSecret() {
-  try { const s = fs.readFileSync(SECRET_PATH, 'utf8').trim(); if (s) return s; } catch {}
+  if (_jwtSecretCache) return _jwtSecretCache;
+  try { const s = fs.readFileSync(SECRET_PATH, 'utf8').trim(); if (s) { _jwtSecretCache = s; return s; } } catch (e) {}
   try {
     if (!fs.existsSync(DATA)) fs.mkdirSync(DATA, { recursive: true });
     const s = crypto.randomBytes(32).toString('hex');
     fs.writeFileSync(SECRET_PATH, s, { mode: 0o600 });
+    _jwtSecretCache = s;
     return s;
-  } catch { return 'insecure-dev-secret-change-me'; } // 极端兜底（磁盘只读），仅开发可用
+  } catch (e) {
+    throw new Error('JWT 密钥不可用且无法持久化（' + SECRET_PATH + '）：' + (e && e.message || e) + '。拒绝签发/验签（fail-closed），请修复数据目录权限后重启。');
+  }
 }
 
 // ---------------- 会话签发/校验 ----------------
@@ -94,13 +104,17 @@ function verifyToken(token) {
 // ---------------- 平台超管凭证（§6.1，独立密钥） ----------------
 function getAdminSecret() {
   if (process.env.MT_ADMIN_SECRET) return process.env.MT_ADMIN_SECRET;
-  try { const s = fs.readFileSync(ADMIN_SECRET_PATH, 'utf8').trim(); if (s) return s; } catch {}
+  if (_adminSecretCache) return _adminSecretCache;
+  try { const s = fs.readFileSync(ADMIN_SECRET_PATH, 'utf8').trim(); if (s) { _adminSecretCache = s; return s; } } catch (e) {}
   try {
     if (!fs.existsSync(DATA)) fs.mkdirSync(DATA, { recursive: true });
     const s = crypto.randomBytes(32).toString('hex');
     fs.writeFileSync(ADMIN_SECRET_PATH, s, { mode: 0o600 });
+    _adminSecretCache = s;
     return s;
-  } catch { return 'insecure-dev-admin-secret'; }
+  } catch (e) {
+    throw new Error('超管密钥不可用且无法持久化（' + ADMIN_SECRET_PATH + '）：' + (e && e.message || e) + '。拒绝签发/验签（fail-closed），请修复数据目录权限或设置 MT_ADMIN_SECRET。');
+  }
 }
 
 // 常量时间比较，防时序侧信道

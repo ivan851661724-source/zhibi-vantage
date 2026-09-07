@@ -19,9 +19,16 @@ services:
       SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-1}"   # 每日定时雷达扫描（0 关闭）
       ZB_QUOTA_ENABLED: "${ZB_QUOTA_ENABLED:-0}"     # 配额硬拦截（默认关闭）
       ZB_DEMO_ALLOWED: "${ZB_DEMO_ALLOWED:-0}"        # 演示模式闸门（生产请勿开启）
+      ZB_TRUSTED_PROXIES: "${ZB_TRUSTED_PROXIES:-1}"  # 前置可信代理层数（XFF 解析用）
+      # 可选：显式指定超管密钥（不设则首次启动自动生成 data/.admin-secret）
+      MT_ADMIN_SECRET: "${MT_ADMIN_SECRET:-}"
       # 安全建议：设置后 API 密钥将以加密形式落盘（务必妥善保存，丢失无法解密）
       # 生成方式：openssl rand -hex 32
       MT_MASTER_KEY: "${MT_MASTER_KEY:-}"
+      # LLM 供应商（OpenAI 兼容）：不设则默认 DeepSeek 官方；可指向阿里云百炼 Token Plan 专属基地址
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
     volumes:
       - zhibi_data:/app/data             # 数据（配置/档案/数据库/日志）持久化
     healthcheck:
@@ -44,7 +51,7 @@ services:
       zhibi-vantage:
         condition: service_healthy    # 后端健康后前端才起（避免启动期代理 502）
     ports:
-      - "3000:3000"                   # 新入口（阿里云安全组需放行 3000）
+      - "${WEB_PORT:-3000}:3000"      # 新入口（阿里云安全组需放行 3000）
     environment:
       TZ: Asia/Shanghai
       PORT: 3000
