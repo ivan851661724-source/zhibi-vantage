@@ -65,6 +65,7 @@ const LOGIN_PATHS = new Set(['/api/login', '/api/register', '/api/auth/login', '
 function sendJSON(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
+  return true; // registry 契约（handled === true）：handler 'return ctx.sendJSON(...)' 即视为已处理
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {

@@ -71,6 +71,7 @@ body{
 main{flex:1;min-height:0;display:flex;flex-direction:column}
 /* 设计稿 §3：应用态为 side(左) + main(右) 平级行——侧栏顶部与顶栏顶部对齐 */
 body:not(.logged-out){flex-direction:row}
+body>.logged-in{flex:1;min-width:0;display:flex} /* Next.js 适配：.logged-in 是 body 的 flex 子项，需撑满 */
 .app-main{flex:1;min-width:0;display:flex;flex-direction:column}
 #onboarding{flex:1;min-height:0;overflow-y:auto}
 #adminPanel{flex:1;min-height:0;overflow-y:auto}

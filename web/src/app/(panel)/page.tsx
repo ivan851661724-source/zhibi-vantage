@@ -197,8 +197,7 @@ function WorkbenchInner() {
     !loading &&
     !discover.running &&
     Object.keys(discover.cards).length === 0 &&
-    (forceOb || !hasTrack) &&
-    !discover.error;
+    (forceOb || !hasTrack); // 错误不再隐藏表单——错误横幅独立渲染，用户可读完后重试
 
   // 筛选（复刻 wbPass L1482-1489）
   const ms = useMemo(
@@ -239,12 +238,32 @@ function WorkbenchInner() {
     }
   }
 
+  // 发现失败横幅（同步错误如 NO_KEYS/每日配额；独立于进度条渲染，修复错误被吞）
+  const errorBanner = discover.error && !discover.running ? (
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }}>
+      <p className="hint">
+        {discover.error.code === 'DISCOVER_QUOTA'
+          ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
+          : discover.error.code === 'NO_KEYS'
+            ? '尚未配置 API 密钥：请到「设置」填写搜索源与 LLM 密钥后重试。'
+            : '研究未完成：' + discover.error.message}
+      </p>
+      {discover.error.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
+    </div>
+  ) : null;
+
   if (showOnboarding) {
-    return <Onboarding onDiscover={discover.start} onLookup={onLookup} busy={discover.running} />;
+    return (
+      <div>
+        {errorBanner}
+        <Onboarding onDiscover={discover.start} onLookup={onLookup} busy={discover.running} />
+      </div>
+    );
   }
 
   return (
     <div>
+      {errorBanner}
       {/* R6.2：顶部诚实条（实查/推测/未探测三色占比，点击展开字段清单） */}
       <EvidenceBar dist={evidenceDist} />
       {/* R7.1：首次报告后的 5 步导读（一次性） */}
@@ -267,19 +286,6 @@ function WorkbenchInner() {
                   ? `（已查实 ${evidenceDist.verified}/${evidenceDist.total} 项）`
                   : '')}
           </span>
-          {discover.error && (
-            <div className="discover-error-box">
-              <p className="hint">
-                {discover.error.code === 'DISCOVER_QUOTA'
-                  ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
-                  : '可能是 API 密钥失效或网络不可达。请到「设置」核对搜索源与 DeepSeek 密钥后重试。'}
-              </p>
-              {discover.error.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
-              <div className="row">
-                <button className="btn primary" type="button" onClick={() => discover.reset()}>返回入口</button>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
