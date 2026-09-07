@@ -60,46 +60,41 @@
 ```
 .
 ├── app/                      # 后端（零依赖 Node 服务）
-│   ├── server.js             # 入口：HTTP 服务 + 路由分发
-│   ├── routes/               # 声明式路由注册表 + handlers
-│   │   ├── registry.js       # 路由注册/匹配/分发机制
-│   │   └── handlers/         # 各端点处理（auth/read/correction/feedback/...）
-│   ├── services/             # 业务服务
-│   │   ├── auth.js           # 平台鉴权（JWT + 超管 token）
-│   │   ├── api-tenant.js     # 租户 API
-│   │   ├── api-admin.js      # 管理后台 API
-│   │   ├── llm-gateway.js    # LLM 统一网关（重试/熔断/降级/缓存）
-│   │   ├── providers/        # 搜索源封装（serper/tavily/brave/bocha）
-│   │   ├── metering.js       # 成本计量
-│   │   ├── scheduler.js      # 定时雷达扫描
-│   │   ├── db.js             # SQLite 持久化
-│   │   └── cache.js          # 缓存层
-│   ├── lib/                  # 纯函数领域模块（可单测）
-│   │   ├── pricefield.js     # 价格字段裁决树
-│   │   ├── channelfield.js   # 渠道字段裁决树
-│   │   ├── categoryfield.js  # 品类字段裁决树
-│   │   ├── reviewfield.js    # 口碑字段裁决树
-│   │   ├── secret.js         # 密钥加解密
-│   │   ├── ipguard.js        # IP 封禁/白名单
-│   │   └── ...               # 机会/空白/雷达/溯源等领域逻辑
-│   ├── middleware/           # 租户上下文、输入消毒
+│   ├── server.js             # 薄入口：HTTP 服务 + 边界闸（ipguard→限流→鉴权门）+ 路由组装
+│   ├── core/                 # 基础设施层
+│   │   ├── paths.js          # 数据目录唯一来源（ZB_DATA_DIR 可覆盖，隔离测试用）
+│   │   ├── als.js            # 请求级租户上下文（AsyncLocalStorage）
+│   │   ├── sse-hub.js        # SSE 枢纽：按租户分通道 + 回放 + 连接上限
+│   │   ├── http-gate.js      # 身份解析（含 SSE ?token=）/客户端 IP/限流/研究并发闸
+│   │   ├── config.js         # 配置加载/保存 + 密钥加密落盘
+│   │   ├── state-store.js    # 研究档案持久化（租户命名空间 + 原子写 + 迁移）
+│   │   └── version.js        # 版本锚定
+│   ├── research/             # 研究链路（按功能拆分，可单测）
+│   │   ├── search.js         # 搜索编排：多源 failover + 融合 + 缓存 + 计量
+│   │   ├── llm.js            # LLM 封装（经 llm-gateway）
+│   │   ├── net.js            # 抓取层（SSRF 防护：私网/元数据地址黑名单）
+│   │   ├── evidence.js       # 来源分级 / 置信推导 / 归属裁决
+│   │   ├── vocab.js          # 维度词表 + 平台集解析
+│   │   ├── candidates.js     # 候选合并/交叉验证/排名/反馈规则
+│   │   ├── discover.js       # 发现引擎（扇出 + 两阶段 harvest）
+│   │   ├── enrich.js         # 深研队列 + 全字段抽取（tasks 心跳续租）
+│   │   ├── deepdive.js       # L2 单字段深挖
+│   │   ├── whitespace.js     # 空白推理引擎
+│   │   ├── fields.js         # 字段契约（价格/渠道/品类/节奏/口碑）+ 对比表
+│   │   ├── report.js         # 行业调研报告装配 + 机器校验
+│   │   ├── sweep.js          # 定时增量雷达
+│   │   └── decorate/...      # 派生视图 / 纠错 / attempt 日志
+│   ├── routes/               # 声明式路由注册表 + handlers（ctx 依赖注入）
+│   ├── services/             # 业务服务（auth/tenant/db/llm-gateway/metering/...）
+│   ├── lib/                  # 纯函数领域模块（裁决树/算子，可单测）
+│   ├── middleware/           # 租户身份解析、输出消毒
 │   └── data/                 # 运行时数据（不入库，见 .gitignore）
 │
 ├── web/                      # 前端（Next.js 15）
-│   ├── src/app/              # App Router 路由
-│   │   ├── (panel)/          # 登录后面板组
-│   │   │   ├── page.tsx      # 工作台（发现进度 + 材料流）
-│   │   │   ├── assets/       # 竞品档案
-│   │   │   ├── intel/        # 情报详情
-│   │   │   ├── opportunity/  # 机会雷达
-│   │   │   ├── radar/        # 动态雷达
-│   │   │   ├── sector/       # 行业全景
-│   │   │   ├── history/      # 历史快照
-│   │   │   └── settings/     # 设置
-│   │   └── login/            # 登录页
+│   ├── src/app/              # App Router 路由（(panel)/ 面板组 + login）
 │   ├── src/components/       # 组件
-│   ├── src/hooks/            # 自定义 Hook（use-zhibi-state / use-discover）
-│   ├── src/lib/              # api.ts / sse.ts / wb.ts 等
+│   ├── src/hooks/            # use-zhibi-state（SSE + 签名比对 + 并发去重）
+│   ├── src/lib/              # api.ts 契约层 / sse.ts（令牌经查询串）/ wb.ts
 │   └── public/               # 静态资源
 │
 ├── config-seed/              # 首次启动播种的配置种子
@@ -161,11 +156,22 @@ pnpm dev                # http://localhost:3000
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `MT_MASTER_KEY` | _(空)_ | API 密钥加密主密钥（`openssl rand -hex 32`）。设置后密钥以加密形式落盘，**丢失则无法解密** |
+| `LLM_BASE_URL` | DeepSeek 官方 | LLM 接入点（OpenAI 兼容 `/v1` 基地址或完整 `/chat/completions` 端点均可，自动归一化）。例：阿里云百炼 Token Plan `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`（专属 key 必须配专属基地址，dashscope 通用地址不抵扣套餐额度） |
+| `LLM_MODEL` | `deepseek-v4-flash` | 默认模型名（须为所选接入点支持的模型） |
+| `LLM_API_KEY` | _(空)_ | LLM key 兜底（平台「设置」页配置的 key 优先于此处） |
+| `MT_ADMIN_SECRET` | _(自动生成)_ | 平台超管密钥；不设则首次启动生成 `data/.admin-secret` |
 | `SCHEDULER_ENABLED` | `1` | 每日定时雷达扫描：`1` 开启 / `0` 关闭 |
 | `ZB_QUOTA_ENABLED` | `0` | 配额硬拦截：`0` 仅展示不拦截 / `1` 超额拦截 |
+| `ZB_DEMO_ALLOWED` | `0` | 演示模式闸门：`1` 时允许 `?demo=1` 直进工作台（生产勿开） |
+| `ZB_TRUSTED_PROXIES` | `1` | 后端前置可信代理层数（XFF 从右往左解析；直连部署设 `0`） |
 | `PORT` | `3300` | 后端端口 |
-| `WEB_PORT` | `3000` | 前端端口（Next.js） |
-| `BACKEND_URL` | `http://zhibi-vantage:3300` | 前端反代后端地址（容器内网络） |
+| `WEB_PORT` | `3000` | 前端端口（宿主机映射；容器内固定 3000） |
+| `BACKEND_URL` | `http://zhibi-vantage:3300` | 前端反代后端地址（**构建期固化**进 rewrites，运行时改无效） |
+| `ZB_FREE_DAILY_DISCOVERS` | `3` | R5：每租户每日全景调研次数（免费档防滥用上限） |
+| `ZB_DAILY_QUOTA_ENABLED` | `1` | R5：每日调研配额总开关（`0` 关闭） |
+| `ZB_MAIL_API_URL` 等 | _(空)_ | R4：邮件 HTTP API（URL/KEY/FROM 三个变量）；未配置则每日摘要静默跳过 |
+| `DIGEST_HOUR` | `8` | R4：每日摘要发送时刻（0-23） |
+| `ZB_LOG_RETENTION_DAYS` | `14` | 日志保留天数（自动清理过期日志文件） |
 
 ---
 
@@ -185,10 +191,15 @@ pnpm dev                # http://localhost:3000
 ## 🔒 安全说明
 
 - **密钥加密**：配置中的搜索源 / LLM 密钥由 `MT_MASTER_KEY` 加密存储，落盘不可见
-- **多租户隔离**：请求级租户上下文（AsyncLocalStorage）+ 数据按租户隔离
-- **IP 管控**：支持封禁与白名单
-- **非 root 运行**：容器以 `node` 用户启动
+- **鉴权 fail-closed**：密钥文件不可读写时拒绝签发/验签（绝不回退可预测密钥）
+- **多租户隔离**：请求级租户上下文（AsyncLocalStorage）+ 数据按租户隔离 + **SSE 事件按租户分通道**（`/api/stream?token=` 查询串鉴权）
+- **边界闸次序**：ipguard → 限流（登录端点独立 10 次/分）→ 鉴权门，登录/注册不再绕过限流
+- **SSRF 防护**：对外抓取逐跳校验目标 IP（私网/环回/链路本地/云元数据段全拒）
+- **外部调用有界**：全部搜索/LLM/抓取调用带超时；LLM 熔断按 key 分桶，单失效 key 不拖垮全租户
+- **IP 管控**：支持封禁与白名单；`ZB_TRUSTED_PROXIES` 控制 XFF 可信解析（防伪造绕过限流）
+- **非 root 运行**：两个容器均以 `node` 用户启动
 - **不入库的敏感数据**：`.gitignore` 已排除 `app/data/`（含密钥、数据库、日志）
+- **前端安全头**：CSP / XFO / nosniff / Referrer-Policy 全站注入
 
 ---
 

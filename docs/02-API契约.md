@@ -124,6 +124,11 @@
 
 ## 3. SSE 协议（`GET /api/stream`）
 
+**鉴权**：与其它 `/api/*` 端点一致要求身份令牌。因 `EventSource` API 无法自定义请求头，
+`/api/stream` 额外接受 **查询串令牌**：`GET /api/stream?token=<JWT>`（或 `access_token=`）。
+令牌仅此端点接受查询串通道；服务端日志只记 pathname，不落 query。事件**按租户分通道投递**
+（各租户只能收到自己的 discover/brand 事件与回放；通用 `change` 信号为全局广播，不含业务数据）。
+
 ```
 Content-Type: text/event-stream
 retry: 3000          # 客户端断线重连间隔（ms）
@@ -134,8 +139,9 @@ data: {"type":"<事件类型>", ...payload}
 
 前端行为契约（对齐现有 `startPolling`/`onSSEEvent`，app.js L639-656）：
 1. 收到任意业务事件 → 触发 `onPush()`：拉 `/api/state` → 与本地 `state.sig` 签名比对 → 不同才替换并重渲染。
-2. `discover_error` 等事件有**回放缓冲**（服务端缓存最近事件，晚连客户端补收，handlers/collect.js L22-29）。
+2. `discover_error` 等事件有**回放缓冲**（服务端按 (租户, 项目) 缓存最近事件，晚连客户端补收）。
 3. 客户端断线由 EventSource 自动重连（`retry: 3000`）；重连成功后回放 + 签名比对保证不丢状态。
+4. 每租户连接数上限 5；超限服务端先推 `stream_rejected` 事件后关闭（前端退回 15s 轮询兜底）。
 
 ## 4. 已声明未实现的端点（迁移风险点）
 
