@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { useDiscover, type DiscoverCard } from '@/hooks/use-discover';
-import { Onboarding } from '@/components/onboarding';
+import { OverviewCards } from '@/components/overview-cards';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { GuideTour, guideNeeded } from '@/components/guide-tour';
 import { WaitlistForm } from '@/components/waitlist-form';
@@ -254,18 +254,36 @@ function WorkbenchInner() {
 
   if (showOnboarding) {
     return (
-      <div>
+      <div className="wb-page">
         {errorBanner}
-        <Onboarding onDiscover={discover.start} onLookup={onLookup} busy={discover.running} />
+        <OverviewCards onDiscover={discover.start} onLookup={onLookup} busy={discover.running} />
       </div>
     );
   }
 
   return (
-    <div>
+    <div className="wb-page">
       {errorBanner}
       {/* R6.2：顶部诚实条（实查/推测/未探测三色占比，点击展开字段清单） */}
       <EvidenceBar dist={evidenceDist} />
+      {/* 首页 Hero —— 对齐 Summarize 规格：薄荷绿渐变卡 + 近黑主操作 */}
+      {state?.track ? (
+        <section className="wb-hero">
+          <div className="wbh-left">
+            <div className="wbh-kicker">竞品信号雷达</div>
+            <div className="wbh-title">{state.track.name}</div>
+            <div className="wbh-sub">{state.track.competitor ? `对手 ${state.track.competitor} · ` : ''}实时捕捉竞品动态与价格异动</div>
+          </div>
+          <div className="wbh-right">
+            <div className="wbh-stats">
+              <div className="wbh-stat"><b>{msAll.length}</b><span>监测动态</span></div>
+              <div className="wbh-stat"><b>{counts.keep}</b><span>已采纳</span></div>
+              <div className="wbh-stat"><b>{counts.later}</b><span>稍后看</span></div>
+            </div>
+            <button className="wbh-cta" onClick={() => refresh()}>开始监测</button>
+          </div>
+        </section>
+      ) : null}
       {/* R7.1：首次报告后的 5 步导读（一次性） */}
       {guide && <GuideTour onDone={() => setGuide(false)} />}
       {/* 进度条（discover 进行中或失败时显示） */}

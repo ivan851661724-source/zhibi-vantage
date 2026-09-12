@@ -122,7 +122,7 @@ function SideNav() {
   return (
     <nav className="side-nav" id="sideNav">
       <div className="side-logo">
-        <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="13" stroke="#33B98C" strokeWidth="2.4" /><circle cx="16" cy="16" r="8" stroke="#33B98C" strokeWidth="1.4" opacity="0.5" /><circle cx="16" cy="16" r="3.2" fill="#33B98C" /><line x1="16" y1="1" x2="16" y2="7" stroke="#33B98C" strokeWidth="1.6" /><line x1="16" y1="25" x2="16" y2="31" stroke="#33B98C" strokeWidth="1.6" /><line x1="1" y1="16" x2="7" y2="16" stroke="#33B98C" strokeWidth="1.6" /><line x1="25" y1="16" x2="31" y2="16" stroke="#33B98C" strokeWidth="1.6" /><circle cx="27.5" cy="16" r="2.1" fill="#D9A25C" /></svg>
+        <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="13" stroke="#6EE7A0" strokeWidth="2.4" /><circle cx="16" cy="16" r="8" stroke="#6EE7A0" strokeWidth="1.4" opacity="0.5" /><circle cx="16" cy="16" r="3.2" fill="#33B98C" /><line x1="16" y1="1" x2="16" y2="7" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="16" y1="25" x2="16" y2="31" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="1" y1="16" x2="7" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="25" y1="16" x2="31" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><circle cx="27.5" cy="16" r="2.1" fill="#D9A25C" /></svg>
         <div><div className="bn">知彼 Vantage</div><div className="sub">竞品信号雷达</div></div>
       </div>
       {NAV_GROUPS.map((g) => (

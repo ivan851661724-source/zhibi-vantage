@@ -8,33 +8,33 @@
 
 /* ---------- 0. Design Tokens ---------- */
 :root{
-  /* 中性色（带冷绿倾向的 tinted neutral，杜绝死灰） */
-  --bg0:#0A0F0C; --bg1:#0F1512; --bg2:#151C18; --bg3:#1B2420;
-  --line1:#212B25; --line2:#2E3B33;
-  --ink:#EAF2EC; --ink2:#A6B8AC; --ink3:#71847A; --ink4:#55645B;
-  /* 品牌（青绿·降饱和青玉系 v2：去荧光、更沉稳，2026-08-11 视觉总监配色优化） */
-  --brand:#33B98C; --brand-hi:#6FD4A8; --brand-dim:#0E3529; --brand-line:#1D5A3C;
-  /* 语义色：证据等级（统一降饱和，柔和可读） */
-  --ok:#3FBF8E; --ok-bg:#0E2B1D; --ok-line:#1F5C3E;
-  --warn:#D9A25C; --warn-bg:#2C2210; --warn-line:#5C4A1E;
-  --unk:#85959D; --unk-bg:#192229; --unk-line:#3A454C;
-  --crisis:#D96862; --crisis-bg:#351717; --crisis-line:#6B2A26;
-  --info:#6FA8DC; --info-bg:#142637; --info-line:#2C4A66;
-  /* 信号色：竞品动作方向（跟随语义色） */
-  --down:#3FBF8E; --down-bg:#0E2B1D;           /* 降价 → 机会感青绿 */
-  --up:#D9A25C; --up-bg:#2C2210;               /* 涨价 → 琥珀警示 */
-  --new:#6FA8DC; --new-bg:#142637;             /* 上新/新店 → 信息蓝 */
-  --crisis2:#D96862; --crisis2-bg:#351717;     /* 口碑危机 → 红 */
-  --price:#8FA8B8; --price-bg:#15212B; --price-line:#2E4552; /* P1-5：跟价信号专色（中性灰蓝，区别于上新蓝/涨价琥珀） */
+  /* 中性色（暖灰浅底，对齐 Summarize 规格 #F0F0EE） */
+  --bg0:#F0F0EE; --bg1:#F7F7F5; --bg2:#FFFFFF; --bg3:#FFFFFF;
+  --line1:#E8E8E5; --line2:#D8D8D4;
+  --ink:#0D0D0D; --ink2:#555555; --ink3:#888888; --ink4:#999999;
+  /* 品牌（薄荷绿，对齐规格 #6EE7A0） */
+  --brand:#6EE7A0; --brand-hi:#8EF69A; --brand-dim:#E7F9EF; --brand-line:#BDEFD4;
+  /* 语义色：证据等级（浅底：深字 + 浅底，保持可读） */
+  --ok:#1F9D63; --ok-bg:#E7F6EE; --ok-line:#BFE6CF;
+  --warn:#B5792E; --warn-bg:#FBF1E2; --warn-line:#EBD3A7;
+  --unk:#5E6B72; --unk-bg:#EEF1F3; --unk-line:#D7DEE2;
+  --crisis:#C24A44; --crisis-bg:#FBE9E8; --crisis-line:#F0C4C1;
+  --info:#2F6FB0; --info-bg:#E8F1FA; --info-line:#C3DAF0;
+  /* 信号色：竞品动作方向（跟随语义色，浅底可读） */
+  --down:#1F9D63; --down-bg:#E7F6EE;          /* 降价 → 机会感青绿 */
+  --up:#B5792E; --up-bg:#FBF1E2;              /* 涨价 → 琥珀警示 */
+  --new:#2F6FB0; --new-bg:#E8F1FA;            /* 上新/新店 → 信息蓝 */
+  --crisis2:#C24A44; --crisis2-bg:#FBE9E8;    /* 口碑危机 → 红 */
+  --price:#5E6B72; --price-bg:#EEF1F3; --price-line:#D7DEE2; /* P1-5：跟价信号专色（中性灰蓝） */
   /* 度量 */
-  --r-sm:6px; --r-md:10px; --r-lg:16px;
+  --r-sm:12px; --r-md:12px; --r-lg:20px; --r-pill:999px;
   --fs-xs:11px; --fs-sm:12.5px; --fs-base:14px; --fs-lg:16px; --fs-xl:20px; --fs-2xl:26px;
-  --font:"PingFang SC","Microsoft YaHei","Noto Sans SC",-apple-system,"Segoe UI",system-ui,sans-serif;
+  --font:"Inter","PingFang SC","Microsoft YaHei","Noto Sans SC",-apple-system,"Segoe UI",system-ui,sans-serif;
   --num:"SF Mono","Cascadia Mono","JetBrains Mono",Consolas,monospace;
   /* 动效 */
   --ease:cubic-bezier(.22,.9,.36,1);
   --t-fast:120ms; --t-in:280ms; --t-drawer:320ms; --t-sweep:3.4s;
-  /* ===== 旧变量名 → 新色值映射（U3 兼容层：旧功能组件零改动换肤） ===== */
+  /* ===== 旧变量名 → 新色值映射（兼容层：旧功能组件零改动换肤） ===== */
   --bg: var(--bg0);
   --surface: var(--bg2);
   --card: var(--bg2);
@@ -56,9 +56,11 @@
   --blue2: var(--info);
   --blue-bg: var(--info-bg);
   --green: var(--ok);
-  --radius: 14px;
-  --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-  --glow-soft: 0 0 6px rgba(51,185,140,.28); /* v2 收敛光晕：低透明度替代高亮发光 */
+  --radius: 20px;
+  --shadow: 0 2px 12px rgba(0,0,0,.06);
+  --glow-soft: 0 4px 24px rgba(110,231,160,.25); /* 规格：薄荷绿柔光 */
+  --gradient-hero: linear-gradient(135deg, #A8F0C0 0%, #6EE7A0 45%, #3DD68C 100%); /* 规格：英雄/选中态绿色渐变 */
+  --gradient-hero-soft: linear-gradient(135deg, rgba(168,240,192,.55) 0%, rgba(110,231,160,.55) 45%, rgba(61,214,140,.55) 100%); /* 选中态：提高透明度的绿色渐变 */
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -68,7 +70,9 @@ body{
   /* 设计稿 App Shell：侧栏/顶栏固定，仅内容区滚动——body 锁滚动，滚动下放到 .report-main / onboarding / adminPanel */
   overflow:hidden; display:flex; flex-direction:column;
 }
-main{flex:1;min-height:0;display:flex;flex-direction:column}
+main{flex:1;min-height:0;display:flex;flex-direction:column;padding:46px 54px 60px}
+/* 面板内容区统一内边距：对齐首页（菜单到顶部标题区域间距 46/54），一处设定全站生效。
+   .content 不在 (panel) 布局 DOM 中，故直接由 main 兜底。 */
 /* 设计稿 §3：应用态为 side(左) + main(右) 平级行——侧栏顶部与顶栏顶部对齐 */
 body:not(.logged-out){flex-direction:row}
 body>.logged-in{flex:1;min-width:0;display:flex} /* Next.js 适配：.logged-in 是 body 的 flex 子项，需撑满 */
@@ -128,15 +132,16 @@ input,select,textarea{font-family:inherit}
   display:flex;flex-direction:column;padding:18px 12px 14px;
 }
 .nav{flex:1;display:flex;flex-direction:column;gap:2px;margin-top:6px;overflow-y:auto}
-.nav-sec{font-size:11px;letter-spacing:1.6px;color:var(--ink4);padding:14px 12px 6px;font-weight:600}
+.nav-sec{font-size:11px;letter-spacing:1.6px;color:var(--ink3);padding:14px 12px 6px;font-weight:600}
 .nav-item{
   display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:var(--r-md);
-  color:var(--ink2);font-size:14px;font-weight:500;transition:background .12s,color .12s;position:relative;text-align:left;width:100%;
+  color:var(--ink);font-size:14px;font-weight:600;transition:background .12s,color .12s;position:relative;text-align:left;width:100%;text-decoration:none;
 }
-.nav-item svg{width:17px;height:17px;flex-shrink:0;opacity:.85}
-.nav-item:hover{background:var(--bg2);color:var(--ink)}
-.nav-item.on,.nav-item.active{background:var(--brand-dim);color:var(--brand-hi);font-weight:600} /* active=HTML/JS 类名，on=旧类名，双支持（9-03 走查修复：激活态此前未生效） */
-.nav-item.on svg,.nav-item.active svg{opacity:1}
+.nav-item svg{width:17px;height:17px;flex-shrink:0;opacity:.72}
+.nav-item:hover{background:var(--bg1);color:var(--ink)}
+/* 选中态：浅灰白实底（#F0F0EE，无透明度，深字 #04160C 保可读），无阴影 */
+.nav-item.on,.nav-item.active{background:#F0F0EE;color:#04160C;font-weight:700}
+.nav-item.on svg,.nav-item.active svg{opacity:1;color:#04160C} /* active=HTML/JS 类名，on=旧类名，双支持 */
 .nav-item .badge{
   margin-left:auto;background:var(--crisis);color:#fff;font-size:11px;font-weight:700;
   min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;
@@ -145,13 +150,13 @@ input,select,textarea{font-family:inherit}
 .side-foot{border-top:1px solid var(--line1);padding-top:12px;margin-top:auto} /* 沉底：雷达运行中 + 用户名固定侧栏底部 */
 .plan-pill{
   display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:var(--r-md);
-  background:var(--bg2);border:1px solid var(--line1);font-size:12.5px;color:var(--ink2);
+  background:var(--bg1);border:1px solid var(--line1);font-size:12.5px;color:var(--ink);
 }
 .plan-pill .dot{width:7px;height:7px;border-radius:50%;background:var(--brand);box-shadow:var(--glow-soft)}
 .user-row{display:flex;align-items:center;gap:10px;margin-top:10px;padding:6px 8px}
 .avatar{
-  width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#14532d,#0e2f1d);
-  border:1px solid var(--brand-line);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:var(--brand-hi);
+  width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#6EE7A0,#3DD68C);
+  border:1px solid var(--brand-line);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#0D0D0D;
 }
 .user-row .un{font-size:12.5px;font-weight:600;line-height:1.3}
 .user-row .ue{font-size:11px;color:var(--ink3);line-height:1.3}
@@ -181,7 +186,8 @@ input,select,textarea{font-family:inherit}
 .btn-ghost:hover{border-color:var(--brand);color:var(--brand-hi)}
 .btn-ghost svg{width:14px;height:14px}
 
-.content{flex:1;overflow-y:auto;padding:26px 30px 60px}
+.content{flex:1;overflow-y:auto;padding:46px 54px 60px}
+@media (max-width:640px){.content{padding:24px 16px 48px}main{padding:24px 16px 48px}}
 .panel{display:none;animation:panelIn .28s cubic-bezier(.22,.9,.36,1)}
 .panel.on{display:block}
 @keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
@@ -641,8 +647,9 @@ input,select,textarea{font-family:inherit}
 /* ================= 旧功能补丁（登录/引导/管理/模态/footer） ================= */
 /* 侧边导航容器（等价原型 .side 的桌面端样式；原型 class 是 .side，落地用 .side-nav） */
 .side-nav {
-  width: 216px; flex-shrink: 0; background: var(--bg1); border-right: 1px solid var(--line1);
+  width: 216px; flex-shrink: 0; background: var(--bg2); border-right: 1px solid var(--line1);
   border-radius: 0; display: flex; flex-direction: column; padding: 18px 12px 14px;
+  box-shadow: 4px 0 24px rgba(0,0,0,.04);
   /* App Shell：侧栏固定（不随内容滚动），自身超高时内部滚动 */
   overflow-y: auto; align-self: stretch;
 }
@@ -2519,3 +2526,144 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .admin-sec h3 { margin: 0 0 10px; font-size: 15px; }
 .badge-ok { color: #33b98c; font-weight: 600; }
 .badge-warn { color: #d9a25c; font-weight: 600; }
+
+/* ===== 知彼 Vantage · 浅色重构（Summarize 规格对齐，2026-09-12） ===== */
+/* —— 首页 Hero（薄荷绿渐变卡 + 近黑主操作） —— */
+.wb-hero{position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;background:var(--gradient-hero);border-radius:var(--r-lg);padding:24px 26px;color:#0D0D0D;box-shadow:var(--glow-soft);margin-bottom:16px}
+.wb-hero::after{content:"";position:absolute;right:-40px;top:-40px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.45),transparent 70%)}
+.wb-hero .wbh-left{position:relative;z-index:1;min-width:220px}
+.wb-hero .wbh-kicker{font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#0A5C3A}
+.wb-hero .wbh-title{font-size:22px;font-weight:800;margin:6px 0 4px;color:#0D0D0D}
+.wb-hero .wbh-sub{font-size:13px;color:#0A3D28;opacity:.92}
+.wb-hero .wbh-right{position:relative;z-index:1;display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.wb-hero .wbh-stats{display:flex;gap:22px}
+.wb-hero .wbh-stat b{display:block;font-size:22px;font-weight:800;color:#0D0D0D;font-family:var(--num);line-height:1.1}
+.wb-hero .wbh-stat span{font-size:11px;color:#0A3D28}
+.wb-hero .wbh-cta{background:#0D0D0D;color:#fff;border:none;border-radius:12px;padding:11px 22px;font-size:14px;font-weight:700;cursor:pointer;transition:transform .15s,background .15s}
+.wb-hero .wbh-cta:hover{background:#000;transform:translateY(-1px)}
+@media (max-width:640px){.wb-hero{flex-direction:column;align-items:flex-start}.wb-hero .wbh-right{width:100%;justify-content:space-between}}
+
+/* —— 首页卡片：对齐规格圆角/阴影/薄荷强调 —— */
+.mat{border-radius:var(--r-lg);box-shadow:var(--shadow);border-color:var(--line1)}
+.mat-head{border-bottom:1px solid var(--line1)}
+.mat-title{color:var(--ink)}
+.mat-sub{color:var(--ink3)}
+.mat .mtype{background:var(--brand-soft);color:var(--brand-hi)}
+.mat .chip-keep{background:var(--ok-bg);color:var(--ok)}
+.mat .chip-later{background:var(--warn-bg);color:var(--warn)}
+.mat .chip-ignore{background:var(--bg1);color:var(--ink3)}
+.mat .mbody{color:var(--ink2)}
+.mat .msummary{color:var(--ink)}
+.mat-actions .btn-ghost{border-color:var(--line2);color:var(--ink2)}
+.mat-actions .btn-ghost:hover{border-color:var(--brand-line);color:var(--brand-hi)}
+.mat-actions .btn-ghost.on{border-color:var(--brand);color:var(--brand-hi);background:var(--brand-soft)}
+
+/* —— 筛选胶囊（白底描边 pill，对齐规格） —— */
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 4px}
+.chip{border:1px solid var(--line2);background:var(--bg2);color:var(--ink2);border-radius:999px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+.chip:hover{border-color:var(--brand-line);color:var(--ink)}
+.chip.on{background:var(--ink-strong);color:#fff;border-color:var(--ink-strong)}
+
+/* —— 证据条 / 导读（浅色） —— */
+.evidence-bar-wrap{margin:8px 0 14px}
+.evidence-bar{border:1px solid var(--line1);border-radius:10px;background:var(--bg2);overflow:hidden;display:flex;align-items:center;width:100%;gap:0;cursor:pointer;padding:0;min-height:26px}
+.eb-seg{display:block;height:10px}
+.eb-verified{background:var(--ok)}
+.eb-inferred{background:var(--info)}
+.eb-unverified{background:var(--ink3)}
+.eb-text{padding:4px 10px;font-size:12px;color:var(--ink2);white-space:nowrap}
+.eb-hint{color:var(--ink3);margin-left:6px}
+.evidence-detail{border:1px solid var(--line1);border-top:none;border-radius:0 0 10px 10px;padding:10px 12px;background:var(--bg1)}
+.ed-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--ink2)}
+.ed-head{color:var(--ink3)}
+.ed-note{font-size:11px;color:var(--ink3);margin:8px 0 0}
+
+/* —— 进度条（绿色，对齐规格） —— */
+.progress-wrap{margin:10px 0 14px}
+.progress-track{background:var(--bg1);border-radius:999px;overflow:hidden;height:8px}
+.progress-bar{background:linear-gradient(90deg,var(--brand),var(--brand-hi));height:100%;border-radius:999px;transition:width .4s var(--ease)}
+.progress-text{font-size:12.5px;color:var(--ink2);margin-top:6px}
+
+/* —— 边栏微调（浅色） —— */
+.user-row .u-meta{display:flex;flex-direction:column;line-height:1.3;min-width:0}
+.user-row .un{font-size:12.5px;font-weight:600;line-height:1.3;color:var(--ink)}
+.user-row .ue{font-size:11px;color:var(--ink3);line-height:1.3}
+.user-row .logout{margin-left:auto;font-size:11px;color:var(--ink3)}
+.user-row .logout:hover{color:var(--crisis)}
+
+/* —— 全局：深色硬编码表面 → 浅色（配色重构兜底，不动布局） —— */
+.tag, .snip, .pm-stat, .fb-chip, .src-chip, .st-block, .ccard, .l1-head, .fb-rule, .bo-insuf, .brief-md code, .history-item{background:var(--bg2);color:var(--ink2)}
+.tag{border-radius:8px;border:1px solid var(--line2)}
+.snip{color:var(--ink2);border-left:3px solid var(--line2)}
+.toast{background:var(--ink-strong);color:#fff;border:1px solid var(--line2)}
+.st-block{border-radius:12px}
+.l1-head{background:var(--bg1)}
+.fb-rule{border:1px solid var(--line1)}
+.fb-state.off, .fb-state.na{background:var(--bg1);color:var(--ink3)}
+.admin-table th, .asset-index th{background:var(--bg1);color:var(--ink2)}
+.bo-chip{border-color:var(--line2);color:var(--ink2)}
+.bo-chip.active{background:var(--info);color:#fff;border-color:var(--info)}
+.muted-link:hover{color:var(--brand-hi)}
+.dot.low, .dot.none{background:var(--ink3)}
+.cov-n{color:var(--ink3)}
+.ws-item.und, .ws-item.undet{border-color:var(--line2);background:var(--bg2)}
+.evidence .src, .mv-type, .gid, .cite{color:var(--brand-hi)}
+.brief-md th{background:var(--brand-soft);color:var(--brand-hi)}
+.tl-dot{box-shadow:0 0 0 3px var(--bg2)}
+.src-tag{background:var(--bg2);color:var(--ink2)}
+
+/* ===== 工作台布局规整（浅色设计系统；严格不新增任何按钮） ===== */
+
+/* 注意：内容区统一内边距已上提到布局层的 main（见第 73 行），
+   故 .wb-page 自身不再设 padding，避免与 main 叠加成双倍。 */
+
+.wb-page .wb-hero{margin-bottom:18px}
+.wb-page .progress-wrap{margin:0 0 16px}
+.wb-page .pano-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-bottom:16px}
+.wb-page .filters{margin-bottom:16px}
+.wb-page .day-group{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px;margin-bottom:22px}
+.wb-page .day-group > .day-label{grid-column:1 / -1}
+.wb-page .mat{margin-bottom:0}
+.wb-page .wb-summary{margin-top:14px}
+@media (max-width:640px){
+  .wb-page .day-group,.wb-page .pano-cards{grid-template-columns:1fr}
+}
+
+/* ===== 首页概览三卡：赛道(绿)/雷达(黑)/品牌检索(白)，对齐示例 UI ===== */
+.ov-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:18px}
+.ov-card{border-radius:var(--r-lg);padding:24px 28px;display:flex;flex-direction:column;gap:12px}
+.ov-track{grid-column:span 3;background:var(--bg2);border:1px solid var(--line1);color:#0D0D0D;box-shadow:var(--shadow)}
+/* 赛道卡占满整行，但输入框宽度保持原 span2 观感，不随卡片拉伸 */
+.ov-track .track-input{width:66.6%;max-width:760px}
+.ov-radar{grid-column:span 1;background:#0D0D0D;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.18);height:240px}
+.ov-brand{grid-column:span 2;background:var(--bg2);border:1px solid var(--line1);box-shadow:var(--shadow);height:240px}
+.ov-badge{align-self:flex-start;font-size:12px;font-weight:700;letter-spacing:.04em;background:rgba(13,13,13,.12);color:#0D0D0D;padding:3px 10px;border-radius:var(--r-pill)}
+.ov-h{font-size:20px;font-weight:800;line-height:1.3;margin:0}
+.ov-sub{font-size:13px;line-height:1.6;margin:0;opacity:.72}
+.ov-label{font-size:12px;font-weight:700;letter-spacing:.04em;opacity:.6}
+.ov-details{border-top:1px solid rgba(13,13,13,.14);padding-top:10px}
+.ov-details summary{cursor:pointer;font-size:13px;font-weight:600;list-style:none}
+.ov-details summary::-webkit-details-marker{display:none}
+.ov-extra{margin-top:10px;display:flex;flex-direction:column;gap:10px}
+.ov-btn-dark{align-self:flex-start;background:#0D0D0D;color:#fff;border:none;border-radius:var(--r-md);padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .12s,transform .12s}
+.ov-btn-dark:hover{opacity:.88}
+.ov-btn-dark:disabled{opacity:.5;cursor:not-allowed}
+.ov-status{font-size:12px;color:#b4232a;margin:0}
+.ov-track .ov-status{color:#7a1f1f}
+.ov-radar-head{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:700}
+.ov-pulse{width:9px;height:9px;border-radius:50%;background:#6EE7A0;animation:ovPulse 1.6s infinite}
+@keyframes ovPulse{0%{box-shadow:0 0 0 0 rgba(110,231,160,.7)}70%{box-shadow:0 0 0 8px rgba(110,231,160,0)}100%{box-shadow:0 0 0 0 rgba(110,231,160,0)}}
+.ov-radar-row{display:flex;align-items:center;gap:8px;font-size:13px;opacity:.85}
+.ov-radar-row::before{content:"✓";display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(110,231,160,.25);color:#6EE7A0;font-size:11px;font-weight:700}
+.ov-radar-actions{margin-top:auto;display:flex;gap:10px;padding-top:8px}
+.ov-link{display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#0D0D0D;text-decoration:none;font-size:13px;font-weight:700;padding:8px 14px;border-radius:var(--r-md);transition:transform .12s,box-shadow .12s}
+.ov-link:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.ov-brand-main{display:flex;flex-direction:column;gap:4px}
+.ov-brand-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.ov-brand-row .track-input{flex:1;min-width:220px}
+@media (max-width:880px){
+  .ov-cards{grid-template-columns:1fr}
+  .ov-track,.ov-radar,.ov-brand{grid-column:auto}
+  .ov-radar,.ov-brand{height:auto}
+  .ov-track .track-input{width:100%;max-width:none}
+}

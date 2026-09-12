@@ -3,21 +3,21 @@
 import { useState } from 'react';
 import { lbl } from '@/lib/labels';
 
-const GOALS = [
+export const GOALS = [
   { k: 'channel', t: '进新渠道' },
   { k: 'pricing', t: '看定价' },
   { k: 'newlaunch', t: '看上新' },
   { k: 'reviews', t: '看口碑' },
   { k: 'whitespace', t: '找空位' },
 ];
-const REGIONS = ['us', 'uk', 'eu', 'cn', 'jp', 'sea'];
-const PLATFORM_GROUPS: { label: string; keys: string[] }[] = [
+export const REGIONS = ['us', 'uk', 'eu', 'cn', 'jp', 'sea'];
+export const PLATFORM_GROUPS: { label: string; keys: string[] }[] = [
   { label: '海外', keys: ['amazon', 'shopifyDTC', 'tiktokShop', 'instagramShop', 'etsy'] },
   { label: '国内', keys: ['tmallJD', 'xiaohongshu'] },
   { label: '通用', keys: ['offlineRetail'] },
 ];
 
-function Chips({
+export function Chips({
   keys,
   labels,
   selected,
