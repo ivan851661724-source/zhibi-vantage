@@ -271,8 +271,8 @@ function WorkbenchInner() {
         <section className="wb-hero">
           <div className="wbh-left">
             <div className="wbh-kicker">竞品信号雷达</div>
-            <div className="wbh-title">{state.track.name}</div>
-            <div className="wbh-sub">{state.track.competitor ? `对手 ${state.track.competitor} · ` : ''}实时捕捉竞品动态与价格异动</div>
+            <div className="wbh-title">{state.track}</div>
+            <div className="wbh-sub">实时捕捉竞品动态与价格异动</div>
           </div>
           <div className="wbh-right">
             <div className="wbh-stats">
