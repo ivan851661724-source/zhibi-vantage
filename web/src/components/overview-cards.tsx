@@ -100,7 +100,7 @@ export function OverviewCards({
             ))}
           </div>
         </details>
-        <button className="ov-btn-dark" type="button" disabled={busy} onClick={goDiscover}>
+        <button className="ov-btn-green" type="button" disabled={busy} onClick={goDiscover}>
           {busy ? '研究中…' : '帮我找对手 →'}
         </button>
         <p className="ov-status">{status}</p>
@@ -121,7 +121,7 @@ export function OverviewCards({
             value={lookupName}
             onChange={(e) => setLookupName(e.target.value)}
           />
-          <button className="ov-btn-dark" type="button" disabled={busy} onClick={goLookup}>
+          <button className="ov-btn-green" type="button" disabled={busy} onClick={goLookup}>
             检索这个品牌 →
           </button>
         </div>

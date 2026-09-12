@@ -2648,6 +2648,10 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .ov-btn-dark{align-self:flex-start;background:#0D0D0D;color:#fff;border:none;border-radius:var(--r-md);padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .12s,transform .12s}
 .ov-btn-dark:hover{opacity:.88}
 .ov-btn-dark:disabled{opacity:.5;cursor:not-allowed}
+/* 规范“主要（绿色）”按钮：背景 --brand-hi(#8EF69A)，深字 #0D0D0D */
+.ov-btn-green{align-self:flex-start;background:var(--brand-hi);color:#0D0D0D;border:none;border-radius:var(--r-md);padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .12s,transform .12s}
+.ov-btn-green:hover{opacity:.92}
+.ov-btn-green:disabled{opacity:.5;cursor:not-allowed}
 .ov-status{font-size:12px;color:#b4232a;margin:0}
 .ov-track .ov-status{color:#7a1f1f}
 .ov-radar-head{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:700}
