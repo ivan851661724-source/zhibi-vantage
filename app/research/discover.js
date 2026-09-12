@@ -10,6 +10,8 @@ const { requestScope } = require('../core/als.js');
 const { emitSSE } = require('../core/sse-hub.js');
 const { loadState, mirrorProjectToDb, newProjectId, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
 const { fanoutSearch } = require('./search.js');
+const { domainOf } = require('./net.js'); // B-6：域级去重用
+const { dedupeByDomain } = require('./dedupe.js'); // B-6 修订版：纯函数去重（可单测）
 const { deepseekJSON, llmApiKey } = require('./llm.js');
 const { normalizeIntent, resolvePlatforms } = require('./vocab.js');
 const { applyApprovedRules, applyRelevanceJudgments, applySuppression, crossValidate, mergeCandidates, normName, presenceGate, rankCandidates, rejudgeRelevance, slug } = require('./candidates.js');
@@ -51,7 +53,7 @@ Rules:
 - Respond with JSON only: {"query":"<translated phrase>"}`;
   const user = `User input (may be any language): ${track}\nNiche/positioning context: ${JSON.stringify((intent && (intent.niche || intent.positioning)) || {})}`;
   try {
-    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'track-translate' });
+    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'track-translate', thinking: false });
     if (j && j.query && String(j.query).trim()) return String(j.query).trim();
   } catch (e) { /* 翻译失败，回落原文 */ }
   return null;
@@ -103,7 +105,7 @@ async function llmEnumerate(track, intent, dsKey) {
 输出 JSON：{"candidates":[{"name":"","url":"","tier":"","matchScore":0,"why":""}]}`;
   try {
     // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）
-    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: `赛道：${track}；意图：${JSON.stringify(intent || {})}` }], dsKey, null, { fieldKey: 'discover-enumerate', timeoutMs: 90000, maxAttempts: 2 });
+    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: `赛道：${track}；意图：${JSON.stringify(intent || {})}` }], dsKey, null, { fieldKey: 'discover-enumerate', timeoutMs: 90000, maxAttempts: 2, thinking: false });
     return (j.candidates || []).map(c => { c.src = 'llm'; return c; });
   } catch { return []; }
 }
@@ -131,7 +133,7 @@ async function harvestCandidates(track, intent, fanout, dsKey, labels) {
 输出 JSON：{"candidates":[{"name":"","url":"","tier":"","matchScore":0,"why":""}],"moreQueries":["",""]}`;
   const user = `搜索结果：\n${snippets.join('\n\n')}`;
   // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）
-  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-harvest', timeoutMs: 90000, maxAttempts: 2 });
+  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-harvest', timeoutMs: 90000, maxAttempts: 2, thinking: false });
   return { candidates: j.candidates || [], moreQueries: Array.isArray(j.moreQueries) ? j.moreQueries.slice(0, 3) : [] };
 }
 
@@ -268,7 +270,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
     final: candidates.map(c => ({ name: c.name, match: c.matchScore, fit: c.categoryFit, dh: c.distinctHits, ev: c.evidenceCount }))
   }, null, 1)); } catch {}
 
-  const competitors = candidates.map((c, i) => ({
+  let competitors = candidates.map((c, i) => ({ // B-6：let 以支持域级去重重排
     id: slug(c.name, i),
     name: c.name || ('竞品' + (i + 1)),
     url: c.url || '',
@@ -308,11 +310,22 @@ async function runDiscover(track, intent, config, emit, projectId) {
   state.ruleDecisions = JSON.parse(JSON.stringify(carryRules)); // 承接已审规则（采纳的持续生效，否决的不再复问）
   // 注：_initState 已含 intent.platforms / tenantId / setCurrentId / saveState / mirrorProjectToDb，
   // 此处不重复（避免二次 saveState 覆盖 discoverDone）。
+  // ▶ B-6（2026-09-12 任务书·修订版）D2 域级去重：同域名只保留 matchScore 最高者（无 url 退化用归一化名）。
+  // 复检实锤同域候选成对深研白烧 ~3 分钟（如 Nutramax/VetriScience 重复）；去重必须在排名收尾前做，
+  // 否则 HHI/份额被重复样本中度扭曲。
+  // 初版 filter 写法三重错（被保留者误入 brand_removed、高分替换者被静默丢弃、永远留第一个而非最优），
+  // 修订为纯函数 dedupeByDomain（先选最优建 map → 按 droppedIds 一次性过滤），逻辑与单测见 research/dedupe.js。
+  const _dedup = dedupeByDomain(competitors, c =>
+    domainOf(c.url) || String(c.name || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+  competitors = _dedup.kept;
+  const _droppedDup = _dedup.dropped;
   // 渐进式发现：把被最终过滤掉的 lead 线索卡移除，再逐张广播确认卡（skeleton）
   const finalIds = new Set(competitors.map(c => c.id));
   for (const lid of _leadIds) {
     if (!finalIds.has(lid)) { if (emit) emitT('brand_removed', { projectId: pid, id: lid, reason: 'filtered' }); }
   }
+  // B-6：被去重的候选显式广播（前端据此移除对应线索/骨架卡，不做静默丢弃）
+  if (emit) for (const d of _droppedDup) emitT('brand_removed', { projectId: pid, id: d.id, reason: 'duplicate', name: d.name });
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'ranking', label: '已确认对手，正在汇总…', pct: 90, found: competitors.length });
   for (const c of competitors) {
     state.competitors.push(c);

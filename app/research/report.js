@@ -5,7 +5,7 @@
 // ============================================================
 
 const { APP_COMMIT, APP_VERSION, STARTED_AT, reportProvenance } = require('../core/version.js');
-const { deepseekText, llmApiKey } = require('./llm.js');
+const { deepseekText, llmApiKey, resolveDeepModel } = require('./llm.js');
 const { fmtMoney, seedingLabel } = require('./vocab.js');
 const { assessPositioning, computeWhiteSpace } = require('./whitespace.js');
 const M = require('../lib/metrics.js');
@@ -305,7 +305,9 @@ ${voiceOppText || '(无)'}
 ${weDontKnowText}
 
 【维度覆盖提示】已充分探测（进入报告原料）的维度：${dimCov.detected.join('、') || '无'}；未充分探测（<50% 覆盖率，已排除出报告原料）的维度：${undetectedDims.join('、') || '无'}。`;
-  const raw = await deepseekText([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'report' });
+  // thinking:false：报告=给定事实的叙事合成（实测 max 关思考 22s vs 开思考 63s，内容更长）；
+  // 诚实纪律由 validateReport 硬校验兜底，不依赖思考链
+  const raw = await deepseekText([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, resolveDeepModel(), { fieldKey: 'report', timeoutMs: 180000, maxAttempts: 2, thinking: false });
   // ▶ #10：单家观察 gap 的 gid 也纳入合法引用集（否则 LLM 引用单家留白会被 validateReport 当编造编号删除）
   const citedGapIds = opps.map(g => g.gid).concat(singleGaps.map(g => g.gid)).concat(voiceOpp.hidden ? [] : (voiceOpp.themes || []).map(t => 'O' + t.onum));
   const v = validateReport(raw, facts.map(f => f.id), citedGapIds, { suspectFactIds, suspectGapIds });

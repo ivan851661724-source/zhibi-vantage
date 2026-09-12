@@ -280,7 +280,7 @@ async function rejudgeRelevance(track, candidates, fanout, dsKey) {
 输出 JSON：{"judgments":[{"name":"","relevant":true|false,"categoryFit":0-100,"reason":"一句话"}]}`;
   const user = `候选清单：\n` + items.map((it, i) => `[${i + 1}] ${it.name} | tier=${it.tier} | ${it.url || '(无官网)'} | ${it.why || ''} | 摘录：${it.snippet || ''}`).join('\n');
   try {
-    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-crossvalidate' });
+    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-crossvalidate', thinking: false });
     return j.judgments || [];
   } catch { return []; }
 }

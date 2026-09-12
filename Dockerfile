@@ -11,8 +11,11 @@ WORKDIR /app
 
 # 零依赖：无需 package.json 安装，直接拷贝源码
 # Phase 5：app/public（旧静态前端）已删除，不再 COPY
+# 9/12 架构重构（server.js 352 行 + research/ 业务层）：core/ 与 research/ 为运行时必需目录
 COPY app/package.json ./
 COPY app/server.js ./
+COPY app/core ./core
+COPY app/research ./research
 COPY app/lib ./lib
 COPY app/services ./services
 COPY app/routes ./routes

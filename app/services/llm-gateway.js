@@ -50,9 +50,12 @@ function breakerOf(key) {
 function circuitOpen(b) { return b.openedAt > 0 && Date.now() - b.openedAt < BREAK_MS; }
 function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
 
-async function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs) {
+async function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, thinking) {
   const body = { model, messages, temperature: temperature == null ? 0.2 : temperature };
   if (json) body.response_format = { type: 'json_object' };
+  // 模型分工配套（2026-09-12）：批量抽取类调用传 thinking=false 关思考链
+  // （qwen3 系列 enable_thinking，实测 JSON 小任务 5959ms → 371ms，completion_tokens 1286 → 35）
+  if (thinking === false) body.enable_thinking = false;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || TIMEOUT_MS);
   try {
@@ -100,7 +103,7 @@ async function call(messages, opts) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_BASE_MS * 2 ** (attempt - 1)));
     try {
-      const r = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs);
+      const r = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs, o.thinking);
       // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
       try {
         const logger = require('./logger.js');

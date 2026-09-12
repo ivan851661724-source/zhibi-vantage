@@ -13,9 +13,9 @@
 | `Dockerfile` | 后端镜像定义（node:22-alpine，零 npm 依赖，极小） |
 | `web/Dockerfile` | 前端镜像定义（multi-stage + `output: 'standalone'`，运行态仅 standalone 产物） |
 | `docker-compose.yml` | 编排：双服务（zhibi-vantage 后端 + zhibi-web 前端）/ 端口映射 / 数据卷 / 健康检查 / 自动重启 |
-| `docker-entrypoint.sh` | 首次启动自动把配置（含 API 密钥）写入数据卷 |
-| `config-seed/config.json` | 部署配置种子（内含你的 DeepSeek / Serper 密钥） |
-| `app/` | 后端源码（server.js + lib/services/routes/middleware/public） |
+| `docker-entrypoint.sh` | 首次启动自动把配置种子写入数据卷（数据卷已有配置则跳过，不覆盖） |
+| `config-seed/config.json` | 部署配置种子（**密钥位为空**：首次启动后到「设置」页填写，或用 `.env` 的 LLM_API_KEY 注入；切勿把真实密钥提交进包） |
+| `app/` | 后端源码（server.js + core/research/lib/services/routes/middleware，零 npm 依赖） |
 | `web/` | 前端源码（Next.js 15 + TypeScript，规范见 docs/） |
 | `.env.example` | 环境变量模板（复制为 `.env` 使用） |
 | `scripts/deploy.sh` | 一键部署（构建 + 启动 + 双服务健康检查） |

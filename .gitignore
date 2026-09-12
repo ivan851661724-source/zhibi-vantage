@@ -44,3 +44,7 @@ Thumbs.db
 *.zip
 backups/
 ui-redesign/
+
+# QA 临时数据（走查/复跑产物，不入库）
+.qa-data/
+qa-*.tmp.js

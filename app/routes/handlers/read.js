@@ -6,6 +6,8 @@
 // handler 签名：async (ctx, req, res, url, p) => boolean
 // ============================================================
 
+const { marketCurrency } = require('../../research/vocab.js'); // B-7b：quadrant 币种过滤口径
+
 // ---------- /api/version（public） ----------
 async function version(ctx, req, res, url, p) {
   if (p !== '/api/version' || req.method !== 'GET') return false;
@@ -97,7 +99,7 @@ async function quadrant(ctx, req, res, url, p) {
   const st = ctx.loadState();
   if (!st) { ctx.sendJSON(res, 404, { error: 'NO_STATE' }); return true; }
   const excluded = new Set(Array.isArray(st.excluded) ? st.excluded : []);
-  const q = ctx.QD.computeQuadrant(st.competitors, { excluded, sectorName: st.track });
+  const q = ctx.QD.computeQuadrant(st.competitors, { excluded, sectorName: st.track, marketCurrency: marketCurrency(st.intent && st.intent.regions) });
   ctx.sendJSON(res, 200, q);
   return true;
 }

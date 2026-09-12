@@ -33,7 +33,20 @@ interface TrendItem {
 interface SectorResp {
   brandCount?: number;
   sector?: {
-    concentration?: { HHI?: number; hhiInterpretation?: string; CR3?: number; CR5?: number };
+    // F-1（B-7 新契约）：显示判定一律用 sufficient（覆盖门控），不再用 HHI != null——
+    // 旧数据 HHI 恒 0 也是 number，会被误判「已算出」出假绿标。
+    concentration?: {
+      HHI?: number;
+      hhiInterpretation?: string;
+      CR3?: number;
+      CR5?: number;
+      hasData?: boolean; // 保留：≥1 家有规模值（原始是否有数据）
+      sufficient?: boolean; // 新增：覆盖门控通过（参与 ≥5 家且覆盖 ≥60%）
+      currencyExcluded?: number; // 因币种不一致被剔除的品牌数（有值时追加说明）
+      basisNote?: string; // 固定口径声明，原样展示
+      brandCountWithScale?: number; // 有规模信号的品牌数（「样本不足」文案分子）
+      brandCountNoScale?: number;
+    };
     priceBands?: { count?: number }[];
     channelMatrix?: { rows?: { brands?: unknown[] }[] };
   };
@@ -144,11 +157,16 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
   const heroCount = cs.filter((c) => c.heroProduct && c.heroProduct.heroProducts && c.heroProduct.heroProducts.length).length;
 
   const rows: AssetRowData[] = [];
+  // F-1：三态判定切到新契约——sufficient（覆盖门控通过）→ 已算出；
+  // hasData（有规模值但未达门槛）→ 样本不足；两者皆无 → 未算出。
+  // 禁改红线：集中度结论必须始终伴随 basisNote 口径声明；不出「绝对营收/规模」类推算。
   rows.push({
     name: '赛道集中度',
-    status: conc.HHI != null ? '已算出' : '未算出',
-    cls: conc.HHI != null ? 'ok' : 'idle',
-    finding: conc.HHI != null ? `HHI ${conc.HHI}（${conc.hhiInterpretation || ''}）· CR3 ${fmtPct(conc.CR3)} · CR5 ${fmtPct(conc.CR5)}` : '尚未聚合',
+    status: conc.sufficient ? '已算出' : conc.hasData ? '样本不足' : '未算出',
+    cls: conc.sufficient ? 'ok' : 'idle',
+    finding: conc.sufficient
+      ? `HHI ${conc.HHI}（${conc.hhiInterpretation || ''}）· CR3 ${fmtPct(conc.CR3)} · CR5 ${fmtPct(conc.CR5)}。${conc.basisNote || ''}${conc.currencyExcluded ? `（${conc.currencyExcluded} 家币种不一致未计入）` : ''}`
+      : `参与 ${conc.brandCountWithScale || 0}/${r?.brandCount || 0} 家有规模信号，未达门槛（≥5 家且覆盖 ≥60%），不出集中度结论`,
     coverage: `${r ? r.brandCount || 0 : 0} 家参与`,
   });
   rows.push({

@@ -9,7 +9,7 @@ const path = require('path');
 
 // ---- 启动完整性自检（§5-1）：版本/commit/启动时间，供体验报告版本锚定（#310） ----
 let _pkgVer = '0.0.0';
-try { _pkgVer = (JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')) || {}).version || '0.0.0'; } catch (e) {}
+try { _pkgVer = (JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) || {}).version || '0.0.0'; } catch (e) {} // B-3：package.json 在 app/ 根，不在 core/
 const APP_VERSION = process.env.APP_VERSION || _pkgVer;
 // 无 git 仓库时回退 'n/a'；部署流水线可用 APP_COMMIT 注入真实 commit。
 const APP_COMMIT = process.env.APP_COMMIT || 'n/a';

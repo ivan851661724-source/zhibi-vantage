@@ -6,7 +6,7 @@
 
 const { saveState } = require('../core/state-store.js');
 const { multiSourceSearch } = require('./search.js');
-const { deepseekJSON, llmApiKey } = require('./llm.js');
+const { deepseekJSON, llmApiKey, resolveDeepModel } = require('./llm.js');
 const { domainOf } = require('./net.js');
 const { belongsToBrand, sourceTier } = require('./evidence.js');
 const { AUDIENCES, CHANNELS, COLLAB_TYPES, CONTENT_FORMS, FULFILLMENT, SELLING_POINTS, TACTICS } = require('./vocab.js');
@@ -29,7 +29,7 @@ async function deepTimelineOne(comp, state, config) {
 - 若某时期无公开信息，基于可得信号【推算】并标 evidence 为"推算"。
 - 不要多余文字，直接输出 JSON。`;
   const user = `品牌：${comp.name}（${comp.url || ''}）。赛道：${state.track}。已知：定位=${comp.positioning || '未知'}；渠道=${Object.keys(comp.channels || {}).filter(k => comp.channels[k].present).join('/') || '未知'}；近期动作=${(comp.recentMoves || []).map(m => m.desc).join('；') || '未知'}。请按时间线梳理其战略与战术演进。`;
-  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'timeline', competitorId: comp.id });
+  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, resolveDeepModel(), { fieldKey: 'timeline', competitorId: comp.id, timeoutMs: 120000, maxAttempts: 2 });
   const tl = {
     generatedAt: new Date().toISOString(),
     events: Array.isArray(j.events) ? j.events : [],
@@ -238,7 +238,7 @@ async function deepDiveField(state, comp, fieldKey, config) {
 禁止汇率换算，保持原币种。`;
   const user = `检索片段：\n${snippetText}\n\n赛道背景：${state.track}。请输出 JSON。`;
   let j;
-  try { j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, config.llm.model, { fieldKey, competitorId: comp.id }); }
+  try { j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, resolveDeepModel(), { fieldKey, competitorId: comp.id, timeoutMs: 120000, maxAttempts: 2 }); }
   catch (e) { logAttempt(comp, fieldKey, query, 'llm', false, 'LLM 解析失败：' + String(e.message || e)); saveState(state); return { ok: false, reason: 'llm_error' }; }
   applyL2Result(comp, fieldKey, j || {}, srcs);
   // 忠实助理：LLM 解析成功但无有效数据 → 记 hit=false（显示"已查未得"），不留空白间隙

@@ -189,9 +189,13 @@ async function deepResearchOne(comp, state, config) {
     comp.freebies = Array.from(new Set(shopify.items.filter(x => x.minPrice === 0).map(x => x.title || '免费/赠品').filter(Boolean))).slice(0, 20);
     comp.pricePoints = Array.from(new Set(rawPts.filter(n => n > 0).map(n => Math.round(n)))).sort((a, b) => a - b).slice(0, 40);
     comp.priceVerified = true;
-    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据', `共${shopify.items.length}款，${fmtMoney(Math.min(...rawPts.filter(n => n > 0)), comp.currency)}-${fmtMoney(Math.max(...rawPts.filter(n => n > 0)), comp.currency)}`, anchorDomain);
+    // ▶ B-5b（2026-09-12 任务书）规模信号接线：products.json 实抓成功 = 最强 Shopify 正证据 +
+    // 真实在售款数（未截断）。sizing.estimateScale 三输入之一（productCount）此前全仓零写入 → HHI 恒 0。
+    comp.isShopify = true;              // 替代链接特征推断（shopifyDTC），实抓判定为准
+    comp.productCount = shopify.total;  // 真实在售款数（未截断），非 items.length
+    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据', `共${shopify.total}款，${fmtMoney(Math.min(...rawPts.filter(n => n > 0)), comp.currency)}-${fmtMoney(Math.max(...rawPts.filter(n => n > 0)), comp.currency)}`, anchorDomain);
   }
-  logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.items.length} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
+  logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.total} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
 
   // ---- L2 意图分型定向查询（渠道存在性 / 口碑 / 动作），并行 ----
   const probes = {
@@ -370,7 +374,7 @@ async function deepResearchOne(comp, state, config) {
  "evidence": "来源摘要1-2句"
 }`;
   const user = `【已编号证据】\n${evText}\n\n用户意图：${JSON.stringify(state.intent || {})}。请抽取并填表。`;
-  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'deep-research', competitorId: comp.id });
+  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'deep-research', competitorId: comp.id, thinking: false });
 
   // ---- 合并：置信度由 deriveBasis 从引用证据推导，LLM 无权自评 ----
   const citedEvs = (cites) => (Array.isArray(cites) ? cites : []).map(id => evidences.find(e => e.id === id)).filter(Boolean);
@@ -409,6 +413,12 @@ async function deepResearchOne(comp, state, config) {
   if (comp.priceVerified && comp.priceBand && shopifyEv) {
     comp.priceBand.basis = 'verified'; comp.priceBand.confidence = 'high';
     comp.priceBand.range = `${fmtMoney(Math.min(...comp.pricePoints), comp.currency)}-${fmtMoney(Math.max(...comp.pricePoints), comp.currency)}（实抓）`;
+    // ▶ B-5c（2026-09-12 任务书）：verified 路径补数值 mid（(min+max)/2，单位 = comp.currency，
+    // pricePoints 已前置过滤 $0 且同币种）。sizing.estimateScale 第三输入（priceBandMid）。
+    // LLM inferred 路径不写 mid（诚实纪律：无实抓不算数）。
+    if (comp.pricePoints.length) {
+      comp.priceBand.mid = (Math.min(...comp.pricePoints) + Math.max(...comp.pricePoints)) / 2;
+    }
     comp.fieldSources.priceBand = [{ id: shopifyEv.id, url: shopifyEv.url, tier: 1, kind: 'shopify', title: shopifyEv.title }];
   } else if (!comp.priceVerified) {
     comp.pricePoints = (Array.isArray(j.pricePoints) ? j.pricePoints : []).filter(n => typeof n === 'number' && n > 0).slice(0, 40);

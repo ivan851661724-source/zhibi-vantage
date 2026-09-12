@@ -109,16 +109,25 @@ function brandProfileFromComp(comp) {
 }
 
 // ---------------------------------------------------------------------------
-// 核心：buildSector({ name, brands })
+// 核心：buildSector({ name, brands, marketCurrency })
 // brands: brand profile 数组（可由 brandProfileFromComp 产出）。
+// marketCurrency: 目标市场币种（如 'USD'，调用方从 relationship.marketCurrency(intent.regions) 取）。
+//   传入时，detected 币种 ≠ 市场币种的品牌被剔除出集中度分母（永不做汇率换算，只剔除并计数）。
 // 输出：Sector 模型（赛道事实，含集中度/价格带/渠道矩阵/覆盖率/规模/赛道置信）。
 // ---------------------------------------------------------------------------
-function buildSector({ name, brands }) {
+function buildSector({ name, brands, marketCurrency }) {
   const list = (Array.isArray(brands) ? brands : []).filter(Boolean);
   const brandCount = list.length;
 
   // ===== 集中度（CR3/CR5/HHI）=====
-  const withScale = list.filter(b => b.scale && Number(b.scale.value) > 0);
+  // B-7a（2026-09-12 任务书）：币种过滤 + 覆盖门控。
+  // 只剔 detected 且币种确证 ≠ 市场币种的（assumed 是按市场默认假定，不算污染）；
+  // 模拟 S3 实证：1 家 CNY 混入可把 HHI 从 1846 抬到 7746。
+  const eligible = marketCurrency
+    ? list.filter(b => !(b._raw && b._raw.currencyBasis === 'detected' && b._raw.currency && b._raw.currency !== marketCurrency))
+    : list;
+  const currencyExcluded = list.length - eligible.length;
+  const withScale = eligible.filter(b => b.scale && Number(b.scale.value) > 0);
   const scaleConfs = withScale.map(b => b.scale.confidence);
   const totalScale = withScale.reduce((s, b) => s + Number(b.scale.value), 0);
   let shares = [];
@@ -129,8 +138,14 @@ function buildSector({ name, brands }) {
   }
   const topN = (n) => shares.slice(0, n).reduce((s, x) => s + x.share, 0);
   const hhi = shares.reduce((s, x) => s + Math.pow(x.share * 100, 2), 0); // 赫芬达尔指数（百分点平方）
+  // 覆盖门控（模拟 S2 实证：低覆盖裸显示会产出 CR3=100% 假集中）：≥5 家有规模且覆盖 ≥60% 才 sufficient。
+  // 前端显示判定一律用 sufficient，不得再用 HHI != null / hasData（那是"原始是否有数据"）。
+  const sufficient = withScale.length >= 5 && withScale.length >= Math.ceil(0.6 * brandCount);
   const concentration = {
     hasData: withScale.length > 0,
+    sufficient,
+    currencyExcluded,
+    basisNote: 'HHI 为建模代理口径（SKU 数 × 保守单量假设），非营收披露；仅反映相对份额',
     brandCountWithScale: withScale.length,
     brandCountNoScale: brandCount - withScale.length,
     shares,

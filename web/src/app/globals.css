@@ -829,8 +829,11 @@ input, select, textarea { font-family: inherit; }
   .tb-track .swap { display: none; } /* 窄屏只显示赛道名，换赛道走右侧「历史」入口 */
 }
 @media (max-width: 560px) {
-  /* 极窄：侧栏整体隐藏，报告区占满 */
-  .side-nav { display: none; }
+  /* 极窄：报告区占满。
+     F-3 修复：旧规则 .side-nav{display:none} 会把 ≤820px 已转为底部标签栏的侧栏
+     （见下方「F-07 响应式」媒体块）一并隐藏 → 手机端零导航。恢复其可见，
+     底部标签栏布局（order/flex-direction/宽度）由 820px 媒体块提供。 */
+  .side-nav { display: flex; }
   .report { padding: 14px; }
   .tb-title .crumb, .tb-track { display: none; }
 }

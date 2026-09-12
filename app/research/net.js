@@ -107,7 +107,10 @@ async function fetchShopifyProducts(siteUrl) {
       const prices = (p.variants || []).map(v => parseFloat(v.price)).filter(n => !isNaN(n) && n > 0);
       return { title: p.title, type: p.product_type || '', minPrice: prices.length ? Math.min(...prices) : null, maxPrice: prices.length ? Math.max(...prices) : null };
     }).filter(x => x.minPrice != null);
-    return { ok: items.length > 0, items, url: `https://${d}/products.json` };
+    // B-5a（2026-09-12 任务书）：total = 未截断的真实在售款数（products.length）。
+    // items 被 .slice(0,60) 截断 + minPrice 有效过滤，不能当 SKU 数（模拟 S5 实证：
+    // 用截断值会把 60 款目录型品牌算成 12，份额排名翻转 15%↔47%）。
+    return { ok: items.length > 0, items, total: products.length, url: `https://${d}/products.json` };
   } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
   finally { clearTimeout(timer); }
 }

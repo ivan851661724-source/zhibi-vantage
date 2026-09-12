@@ -10,6 +10,7 @@ const ProviderHealth = require('../services/providers/health.js');
 const SourceFusion = require('../lib/source-fusion.js');
 const metering = require('../services/metering.js');
 const { bochaSearch, braveSearch, getSerperPool, normalizeSerperKeys, serperSearchWithFailover, tavilySearch } = require('../services/providers/search.js');
+const { curTenantId } = require('../core/als.js'); // B-1（2026-09-12 任务书）：拆分时遗漏导入，正文 L64 调用会 ReferenceError
 
 // 搜索适配层：根据 config.search.provider 选择搜索源，统一返回 {results:[{title,url,content}]}
 // T1-1：每次外部搜索都经 metering 闸门并计费。searchProvider 委托给各 provider（tavily/serper/brave/bocha），

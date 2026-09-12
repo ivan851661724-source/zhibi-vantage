@@ -37,5 +37,11 @@ export interface ZhibiState {
   whiteSpace?: WhiteSpace | null;
   sig?: string;
   track?: string;
+  /** F-2（B-4 异步契约）：brief 生成任务状态——POST /api/brief 回 202 后轮询本字段至终态 */
+  briefStatus?: 'running' | 'done' | 'failed';
+  /** brief 报告本体（briefStatus === 'done' 时落库） */
+  brief?: unknown;
+  /** brief 生成失败原因（briefStatus === 'failed' 时存在） */
+  briefError?: string;
   [key: string]: unknown;
 }

@@ -1,12 +1,22 @@
 'use client';
 // 调研报告页（PRD R6.2）：顶部诚实条（三色横条，点击展开字段清单）+ 报告正文。
 // 数据源：state.brief（POST /api/brief 生成，lib/report 管线产出 evidenceDist + markdown）。
-// 未生成 → 提示 + 一键生成按钮（LLM 调用，耗时约 30-60s）。
-import { useState } from 'react';
+// F-2（B-4 异步契约）：POST /api/brief 立即回 202 {ok,status:'running'}（401 NO_KEYS /
+// 404 NO_STATE 同步错误仍同步抛）→ 前端轮询 GET /api/state 按 s.briefStatus 分派：
+//   running → 继续轮（间隔 ≥3s，避免打爆 state 接口）
+//   done    → patch(s) 渲染 s.brief，停止轮询
+//   failed  → 显示 s.briefError + 重试入口（重试 = 再 POST，后端幂等）
+// 轮询纪律：不新建接口/通道，只用现有 GET /api/state；组件卸载/切页清理定时器。
+// 注意：落地轮询结果用 patch() 而非 refresh()——refresh 走 stateSig 签名比对，
+// 签名不含 brief 字段，briefStatus 终态会被「数据未变」跳过导致报告永不渲染。
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { apiPost } from '@/lib/api';
+import { apiGet, apiPost } from '@/lib/api';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { renderMarkdown } from '@/lib/md';
+import type { ZhibiState } from '@/types/state';
+
+const BRIEF_POLL_MS = 3000; // 任务书 F-2：轮询间隔 ≥3s
 
 interface Brief {
   markdown?: string;
@@ -19,23 +29,68 @@ interface Brief {
 }
 
 export default function ReportPage() {
-  const { state, loading, refresh } = useZhibiState();
+  const { state, loading, patch } = useZhibiState();
   const brief = (state ? (state.brief as Brief | undefined) : undefined) || undefined;
   const dist = (brief && brief.evidenceDist) || (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [showQc, setShowQc] = useState(false);
+  // 轮询定时器句柄（ref 而非 state：不触发重渲染；卸载/终态时清理）
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPoll = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  // 组件卸载/页面切换：清理轮询定时器（任务书 F-2 第 3 条）
+  useEffect(() => stopPoll, [stopPoll]);
+
+  // 轮询一次 /api/state：按 briefStatus 分派（终态 patch 落地，running 静默续轮）
+  const pollOnce = useCallback(async () => {
+    try {
+      const s = await apiGet<ZhibiState>('/api/state');
+      if (s.briefStatus === 'done') {
+        stopPoll();
+        patch(s); // 绕过签名比对，brief 报告立即可渲染
+        setBusy(false);
+      } else if (s.briefStatus === 'failed') {
+        stopPoll();
+        patch(s);
+        setBusy(false);
+        setErr(s.briefError || '报告生成失败，请点击「生成调研报告」重试');
+      }
+      // running → 继续轮（不 patch，避免每 3s 无谓重渲染）
+    } catch {
+      // 单次轮询失败静默，下一轮自愈（对齐 onPush 的 catch 口径）
+    }
+  }, [patch, stopPoll]);
+
+  const startPoll = useCallback(() => {
+    if (pollRef.current) return; // 幂等：running 期间重复触发不叠加定时器
+    pollRef.current = setInterval(() => {
+      void pollOnce();
+    }, BRIEF_POLL_MS);
+  }, [pollOnce]);
+
+  // 挂载时若后端已有 running 任务（生成中切页后回来），恢复轮询而非让用户盲等
+  useEffect(() => {
+    if (state && state.briefStatus === 'running') startPoll();
+  }, [state, startPoll]);
 
   async function generate() {
     setErr('');
     setBusy(true);
     try {
+      // F-2：POST 只负责任务受理（202）；401 NO_KEYS / 404 NO_STATE 同步错误会抛 ApiError。
+      // 不再读 body 里的报告（异步契约下 body 无报告），改由轮询取终态。
       await apiPost('/api/brief');
-      await refresh();
+      startPoll();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '报告生成失败，请稍后再试');
-    } finally {
       setBusy(false);
+      setErr(e instanceof Error ? e.message : '报告生成失败，请稍后再试');
     }
   }
 

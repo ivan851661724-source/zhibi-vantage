@@ -8,6 +8,8 @@
 // ============================================================
 
 const { llmApiKey } = require('../../research/llm.js');
+const { requestScope, curTenantId } = require('../../core/als.js');
+const { marketCurrency } = require('../../research/vocab.js'); // B-7b：/api/sector 币种过滤口径
 
 // ---------- /api/stream（GET：SSE 变化推送，按租户分通道） ----------
 async function stream(ctx, req, res, url, p) {
@@ -66,7 +68,8 @@ async function sector(ctx, req, res, url, p) {
     subset = picked.length ? picked : comps.filter(c => set.has(c.name)); // 退化：允许未 done 的也应被纳入
   }
   const profiles = subset.map(c => ctx.Agg.brandProfileFromComp(c));
-  const sectorRes = ctx.Agg.buildSector({ name: body.sectorName || 'sector', brands: profiles });
+  // B-7b：传市场币种 → detected 币种不一致者被剔出集中度分母（currencyExcluded 计数）
+  const sectorRes = ctx.Agg.buildSector({ name: body.sectorName || 'sector', brands: profiles, marketCurrency: marketCurrency(st.intent && st.intent.regions) });
   const whitespace = ctx.SW.computeSectorWhitespace({ competitors: subset });
   const trend = ctx.TR.buildTrendInferences(subset.length ? subset : comps);
   return ctx.sendJSON(res, 200, {
@@ -177,19 +180,49 @@ async function timeline(ctx, req, res, url, p) {
 }
 
 // ---------- /api/brief（POST：行业调研报告） ----------
+// B-4（2026-09-12 任务书）：brief 异步化 —— 同步段只做校验 + 落 briefStatus='running' 后立即 202；
+// buildReport（LLM 40s+）转后台执行，消除 Next 代理 30s 断连与幽灵计费。
+// 状态契约：GET /api/state → s.briefStatus: 'running'|'done'|'failed'（+ s.brief / s.briefError）。
 async function brief(ctx, req, res, url, p) {
   if (p !== '/api/brief' || req.method !== 'POST') return false;
   const s = ctx.loadState();
   if (!s) return ctx.sendJSON(res, 404, { error: 'NO_STATE' });
   const config = ctx.loadConfig();
   if (!config || !llmApiKey(config)) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
-  try {
-    const briefRes = await ctx.buildReport(s, config);
-    s.brief = briefRes; ctx.saveState(s);
-    return ctx.sendJSON(res, 200, briefRes);
-  } catch (e) {
-    return ctx.sendJSON(res, 502, { error: 'BRIEF_FAILED', message: String(e.message || e) });
+  const now = Date.now();
+  // 幂等 + 僵尸恢复：running 中重复 POST 直接再回 202；running 超过 15 分钟视为
+  // 进程重启遗留的僵尸态 → 标记 failed（不静默卡死），本次放行重跑。
+  if (s.briefStatus === 'running') {
+    const startedAt = Number(s.briefStartedAt) || 0;
+    if (now - startedAt < 15 * 60 * 1000) return ctx.sendJSON(res, 202, { ok: true, status: 'running' });
+    s.briefStatus = 'failed';
+    s.briefError = 'brief 任务疑似中断（进程重启遗留），请重新发起';
   }
+  s.briefStatus = 'running';
+  s.briefStartedAt = now;
+  delete s.briefError;
+  ctx.saveState(s);
+  // ⚠️ ALS 上下文重建：buildReport 内部经 curTenantId()/ALS 取租户，脱离请求的异步执行会丢失
+  // AsyncLocalStorage 上下文（落到 '_legacy' 幽灵键）→ 必须在处理器内捕获 tid 并 requestScope.run 包裹。
+  const tid = curTenantId();
+  const task = async () => {
+    // B-4 坑二（任务书 9/12 评审补充）：闭包 s 是 POST 时刻快照，后台 45-180s 期间
+    // 纠错/排除/深研等并发 saveState 会被 LWW 整对象回写滚掉——终态落库前重读最新，
+    // 只叠加 brief 字段，不整对象回写。
+    const done = (patch) => {
+      const cur = ctx.loadState() || s;
+      Object.assign(cur, patch);
+      ctx.saveState(cur);
+    };
+    try {
+      const briefRes = await ctx.buildReport(s, config);
+      done({ brief: briefRes, briefStatus: 'done' });
+    } catch (e) {
+      done({ briefStatus: 'failed', briefError: String((e && e.message) || e) });
+    }
+  };
+  setImmediate(() => requestScope.run(tid, task));
+  return ctx.sendJSON(res, 202, { ok: true, status: 'running' });
 }
 
 // ---------- /api/deepdive（POST：L2 单字段 / 单模块深挖） ----------

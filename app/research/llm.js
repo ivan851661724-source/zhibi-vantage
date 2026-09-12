@@ -29,6 +29,14 @@ function resolveModel(model) {
   }
   return m;
 }
+// 模型分工（cfg.llm.modelDeep，2026-09-12）：批量抽取类调用（translate/enumerate/harvest/
+// crossvalidate/enrich 字段抽取）走 cfg.llm.model（轻快模型，如 qwen3.6-flash）；
+// 深研裁决类（deepdive 字段裁决 / report 报告生成）走 cfg.llm.modelDeep（旗舰模型，如 qwen3.8-max）。
+// modelDeep 未配置时回落到 model——单模型部署行为不变。
+function resolveDeepModel() {
+  const cfgLlm = _loadCfg().llm || {};
+  return cfgLlm.modelDeep || resolveModel(null);
+}
 // 统一取 key：平台配置优先，其次环境变量（如 Token Plan 专属 key 走 .env 下发）
 function llmApiKey(config) {
   return (config && config.llm && config.llm.apiKey) || process.env.LLM_API_KEY || '';
@@ -66,4 +74,4 @@ async function deepseekText(messages, key, model, opts) {
 }
 
 
-module.exports = { deepseekJSON, deepseekText, llmApiKey, resolveModel, resolveBaseUrl };
+module.exports = { deepseekJSON, deepseekText, llmApiKey, resolveModel, resolveDeepModel, resolveBaseUrl };

@@ -47,7 +47,8 @@ function computeQuadrant(competitors, opts) {
   const comps = (competitors || []).filter(c => c && c.status === 'done' && !ex.has(c.id));
   const profiles = comps.map(c => Agg.brandProfileFromComp(c)).filter(Boolean);
 
-  const sector = Agg.buildSector({ name: opts.sectorName || 'sector', brands: profiles });
+  // B-7b：透传市场币种（由调用方从 intent.regions 取），保持与 /api/sector 同一币种过滤口径
+  const sector = Agg.buildSector({ name: opts.sectorName || 'sector', brands: profiles, marketCurrency: opts.marketCurrency });
   const oppMap = OPP.computeOpportunityMap(comps, { excluded: ex });
 
   // 品牌名 → 机会分暴露（仅在该对手参与的主题上累加）

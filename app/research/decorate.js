@@ -35,8 +35,9 @@ function decorateState(s) {
     // P1-7 · A1+A3-L1：字段对象上卷四态 + 独立来源数（可见），并施加来源可信门禁（L1）。
     // 门禁仅附加 credible / gateReason 标注（数据层可见，前端暂未消费），不改写 basis/confidence。
     const enrich = (f, kind) => {
-      const e = FC.enrichFieldProvenance(f, kind);
-      const g = FC.provenanceGate(e);
+      // B-2（2026-09-12 任务书）：L19 已解构导入，此处误用 FC. 命名空间 → FC is not defined
+      const e = enrichFieldProvenance(f, kind);
+      const g = provenanceGate(e);
       e.credible = g.credible;
       e.gateReason = g.reason;
       e.gateLevel = g.level;
