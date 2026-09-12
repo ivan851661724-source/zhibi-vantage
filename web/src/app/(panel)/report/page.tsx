@@ -17,6 +17,7 @@ import { renderMarkdown } from '@/lib/md';
 import type { ZhibiState } from '@/types/state';
 
 const BRIEF_POLL_MS = 3000; // 任务书 F-2：轮询间隔 ≥3s
+const BRIEF_STALE_MS = 15 * 60 * 1000; // 与后端对齐：running 超 15 分钟无终态视为中断
 
 interface Brief {
   markdown?: string;
@@ -37,6 +38,8 @@ export default function ReportPage() {
   const [showQc, setShowQc] = useState(false);
   // 轮询定时器句柄（ref 而非 state：不触发重渲染；卸载/终态时清理）
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 最近一次 POST 受理时刻：重试仍在跑的超长任务时刷新 15 分钟窗（服务端 briefStartedAt 停在首次发起）
+  const acceptRef = useRef(0);
 
   const stopPoll = useCallback(() => {
     if (pollRef.current) {
@@ -61,6 +64,12 @@ export default function ReportPage() {
         patch(s);
         setBusy(false);
         setErr(s.briefError || '报告生成失败，请点击「生成调研报告」重试');
+      } else if (Date.now() - Math.max(Number(s.briefStartedAt) || 0, acceptRef.current) > BRIEF_STALE_MS) {
+        // 僵尸态自愈：后端 15 分钟判定只在下一次 POST 时触发，轮询侧先自判——
+        // 停轮 + 放开按钮提示重试。不 patch running 态，避免挂载恢复 effect 重启轮询。
+        stopPoll();
+        setBusy(false);
+        setErr('报告生成超过 15 分钟无结果，疑似中断——请点击「生成调研报告」重试');
       }
       // running → 继续轮（不 patch，避免每 3s 无谓重渲染）
     } catch {
@@ -75,9 +84,12 @@ export default function ReportPage() {
     }, BRIEF_POLL_MS);
   }, [pollOnce]);
 
-  // 挂载时若后端已有 running 任务（生成中切页后回来），恢复轮询而非让用户盲等
+  // 挂载时若后端已有 running 任务（生成中切页后回来），恢复轮询而非让用户盲等；
+  // 服务端重启遗留的僵尸态（超 15 分钟）不轮询——按钮可直接重试，后端会覆盖重跑
   useEffect(() => {
-    if (state && state.briefStatus === 'running') startPoll();
+    if (!state || state.briefStatus !== 'running') return;
+    if (Date.now() - (Number(state.briefStartedAt) || 0) > BRIEF_STALE_MS) return;
+    startPoll();
   }, [state, startPoll]);
 
   async function generate() {
@@ -87,6 +99,7 @@ export default function ReportPage() {
       // F-2：POST 只负责任务受理（202）；401 NO_KEYS / 404 NO_STATE 同步错误会抛 ApiError。
       // 不再读 body 里的报告（异步契约下 body 无报告），改由轮询取终态。
       await apiPost('/api/brief');
+      acceptRef.current = Date.now(); // 刷新本端 15 分钟窗：后端可能受理的是仍在跑的旧任务（其 startedAt 偏旧）
       startPoll();
     } catch (e) {
       setBusy(false);

@@ -43,5 +43,7 @@ export interface ZhibiState {
   brief?: unknown;
   /** brief 生成失败原因（briefStatus === 'failed' 时存在） */
   briefError?: string;
+  /** brief 任务受理时刻（ms）。前端据此判僵尸态：running 超 15 分钟无终态视为中断，提示重试 */
+  briefStartedAt?: number;
   [key: string]: unknown;
 }

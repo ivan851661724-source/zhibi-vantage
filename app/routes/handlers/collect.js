@@ -11,6 +11,13 @@ const { llmApiKey } = require('../../research/llm.js');
 const { requestScope, curTenantId } = require('../../core/als.js');
 const { marketCurrency } = require('../../research/vocab.js'); // B-7b：/api/sector 币种过滤口径
 
+// B-4 加固：进程内 inflight 表（tid → 受理时刻）＝ brief 任务存续的唯一真源。
+// 封死 loadState→saveState 窗口的双重构建竞态（双开页/直连 API 并发 POST → 双倍 LLM 计费），
+// 并取代旧的「state 15 分钟僵尸判定」：表内有条目 = 任务确实在跑（合法超长任务不会被误杀重跑）；
+// 表内无条目而 state='running' ⇒ 上一进程遗留的僵尸态，直接放行重跑。
+// 单进程架构（docker-compose 单容器）下完备；多副本部署需换共享锁。
+const briefInflight = new Map();
+
 // ---------- /api/stream（GET：SSE 变化推送，按租户分通道） ----------
 async function stream(ctx, req, res, url, p) {
   if (p !== '/api/stream' || req.method !== 'GET') return false;
@@ -189,22 +196,17 @@ async function brief(ctx, req, res, url, p) {
   if (!s) return ctx.sendJSON(res, 404, { error: 'NO_STATE' });
   const config = ctx.loadConfig();
   if (!config || !llmApiKey(config)) return ctx.sendJSON(res, 401, { error: 'NO_KEYS' });
-  const now = Date.now();
-  // 幂等 + 僵尸恢复：running 中重复 POST 直接再回 202；running 超过 15 分钟视为
-  // 进程重启遗留的僵尸态 → 标记 failed（不静默卡死），本次放行重跑。
-  if (s.briefStatus === 'running') {
-    const startedAt = Number(s.briefStartedAt) || 0;
-    if (now - startedAt < 15 * 60 * 1000) return ctx.sendJSON(res, 202, { ok: true, status: 'running' });
-    s.briefStatus = 'failed';
-    s.briefError = 'brief 任务疑似中断（进程重启遗留），请重新发起';
-  }
+  const tid = curTenantId();
+  // 幂等：任务在跑（含合法超长任务）一律 202，不重复 spawn。
+  if (briefInflight.has(tid)) return ctx.sendJSON(res, 202, { ok: true, status: 'running' });
+  // 走到这里 = 本进程无任务；state 停在 'running' 即上一进程遗留的僵尸态，直接覆盖重跑。
   s.briefStatus = 'running';
-  s.briefStartedAt = now;
+  s.briefStartedAt = Date.now();
   delete s.briefError;
+  briefInflight.set(tid, s.briefStartedAt); // 先登记再落库：saveState 到 task 启动间的新 POST 也命中 202
   ctx.saveState(s);
   // ⚠️ ALS 上下文重建：buildReport 内部经 curTenantId()/ALS 取租户，脱离请求的异步执行会丢失
   // AsyncLocalStorage 上下文（落到 '_legacy' 幽灵键）→ 必须在处理器内捕获 tid 并 requestScope.run 包裹。
-  const tid = curTenantId();
   const task = async () => {
     // B-4 坑二（任务书 9/12 评审补充）：闭包 s 是 POST 时刻快照，后台 45-180s 期间
     // 纠错/排除/深研等并发 saveState 会被 LWW 整对象回写滚掉——终态落库前重读最新，
@@ -219,6 +221,8 @@ async function brief(ctx, req, res, url, p) {
       done({ brief: briefRes, briefStatus: 'done' });
     } catch (e) {
       done({ briefStatus: 'failed', briefError: String((e && e.message) || e) });
+    } finally {
+      briefInflight.delete(tid); // 成败都注销：下一轮 POST 可重新受理
     }
   };
   setImmediate(() => requestScope.run(tid, task));
