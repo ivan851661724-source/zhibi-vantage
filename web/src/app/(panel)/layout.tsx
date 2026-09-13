@@ -121,10 +121,6 @@ function SideNav() {
 
   return (
     <nav className="side-nav" id="sideNav">
-      <div className="side-logo">
-        <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="13" stroke="#6EE7A0" strokeWidth="2.4" /><circle cx="16" cy="16" r="8" stroke="#6EE7A0" strokeWidth="1.4" opacity="0.5" /><circle cx="16" cy="16" r="3.2" fill="#33B98C" /><line x1="16" y1="1" x2="16" y2="7" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="16" y1="25" x2="16" y2="31" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="1" y1="16" x2="7" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="25" y1="16" x2="31" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><circle cx="27.5" cy="16" r="2.1" fill="#D9A25C" /></svg>
-        <div><div className="bn">知彼 Vantage</div><div className="sub">竞品信号雷达</div></div>
-      </div>
       {NAV_GROUPS.map((g) => (
         <div key={g.sec}>
           <div className="nav-sec">{g.sec}</div>
@@ -184,9 +180,11 @@ function TopBar() {
   }, []);
   return (
     <header className="topbar">
+      <div className="tb-brand">
+        <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="13" stroke="#6EE7A0" strokeWidth="2.4" /><circle cx="16" cy="16" r="8" stroke="#6EE7A0" strokeWidth="1.4" opacity="0.5" /><circle cx="16" cy="16" r="3.2" fill="#33B98C" /><line x1="16" y1="1" x2="16" y2="7" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="16" y1="25" x2="16" y2="31" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="1" y1="16" x2="7" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><line x1="25" y1="16" x2="31" y2="16" stroke="#6EE7A0" strokeWidth="1.6" /><circle cx="27.5" cy="16" r="2.1" fill="#D9A25C" /></svg>
+        <div><div className="bn">知彼 Vantage</div><div className="sub">竞品信号雷达</div></div>
+      </div>
       <div className="tb-title">
-        <span>知彼 Vantage</span>
-        <span className="crumb">/ {PANEL_TITLES[pathname] || ''}</span>
         {track ? <span className="tb-track"><span className="track-pill">{track}</span></span> : null}
       </div>
       <div className="tb-right">
@@ -221,11 +219,14 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
   return (
     <ZhibiStateProvider>
       {/* .logged-in：F-07 响应式钩子（≤820px 侧栏转底部标签栏） */}
-      <div className="logged-in" style={{ display: 'flex', minHeight: '100vh' }}>
-        <SideNav />
-        <div className="app-main">
-          <TopBar />
-          <main>{children}</main>
+      {/* 顶部贯穿标题栏 + 下方（侧栏 + 内容区）横向并排 */}
+      <div className="logged-in" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+        <TopBar />
+        <div className="logged-in-body">
+          <SideNav />
+          <div className="app-main">
+            <main>{children}</main>
+          </div>
         </div>
         {/* F-04 演示模式运行时提示条：数据来自本地 mock，非真实后端（复刻旧版 demoBanner） */}
         {demo && (

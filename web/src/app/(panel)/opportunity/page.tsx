@@ -70,6 +70,17 @@ const OPP_ZONE: Record<string, { label: string; color: string; fill: string; str
   served: { label: '已被满足', color: '#8b95a3', fill: 'rgba(107,118,132,0.08)', stroke: '#3a4452' },
 };
 
+// methodKey 英文标识 → 中文方法名映射（用于 .gid 标签显示）
+const METHOD_LABEL: Record<string, string> = {
+  adjacencyStruct: '邻接结构',
+  'importance+satisfaction': '重要性+满意度',
+  'speculative=true': '推测性痛点',
+};
+function methodLabel(oid?: string): string {
+  if (!oid) return '';
+  return METHOD_LABEL[oid] || oid;
+}
+
 const ZONE_ORDER = ['underserved', 'moderate', 'served'] as const;
 const ZONE_DESC: Record<string, string> = {
   underserved: '重要性高、满意度低：多家对手的用户都在抱怨同一件事，且无人被夸做得好。',
@@ -124,7 +135,7 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
               </div>
               <div className="opp-body">
                 <div className="opp-title">
-                  <span className="gid">{g.gid}</span> {g.value || ''} {silent ? <span className="tag warn">沉默需求·待验证</span> : null}
+                  <span className="gid">{methodLabel(g.gid)}</span> {g.value || ''} {silent ? <span className="tag warn">沉默需求·待验证</span> : null}
                 </div>
                 <div className="opp-metrics">
                   <span>置信度 <b>{conf}</b></span>
@@ -262,13 +273,8 @@ function OppItem({ t, hl }: { t: OppTheme; hl: boolean }) {
       </div>
       <div className="opp-body">
         <div className="opp-title">
-          <span className="gid">{t.oid}</span> {t.label}
+          <span className="gid">{methodLabel(t.oid)}</span> {t.label}
           {t.coverageInsufficient ? <span className="tag warn">覆盖率不足</span> : null}
-        </div>
-        <div className="opp-metrics">
-          <span>重要性 <b>{t.importance}</b></span>
-          <span>满意度 <b>{t.satisfaction}</b></span>
-          <span className="opp-denom-inline">{t.denominatorText}</span>
         </div>
         {t.mergedFrom && t.mergedFrom > 1 ? (
           <div className="opp-merged">
@@ -277,7 +283,6 @@ function OppItem({ t, hl }: { t: OppTheme; hl: boolean }) {
           </div>
         ) : null}
         {t.note ? <div className="ws-disclaimer">⚠️ {t.note}</div> : null}
-        <div className="ws-method"><span className="muted">推理：</span>{t.method}</div>
         <OppSourceTags sources={t.sources} />
       </div>
     </div>
@@ -356,15 +361,9 @@ export default function OpportunityPage() {
                     </div>
                     <div className="opp-body">
                       <div className="opp-title">
-                        <span className="gid">{t.oid}</span> {t.label} <span className="tag warn">初步·样本不足</span>
-                      </div>
-                      <div className="opp-metrics">
-                        <span>重要性 <b>{t.importance}</b></span>
-                        <span>满意度 <b>{t.satisfaction}</b></span>
-                        <span className="opp-denom-inline">{t.denominatorText}</span>
+                        <span className="gid">{methodLabel(t.oid)}</span> {t.label} <span className="tag warn">初步·样本不足</span>
                       </div>
                       <div className="ws-disclaimer">⚠️ {t.note}</div>
-                      <div className="ws-method"><span className="muted">推理：</span>{t.method}</div>
                       <OppSourceTags sources={t.sources} />
                     </div>
                   </div>

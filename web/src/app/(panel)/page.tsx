@@ -144,14 +144,14 @@ function MaterialCard({
         ) : null}
       </div>
       <div className="mat-acts">
-        <button className="btn-act act-keep" type="button" onClick={() => onSet(m.id, 'keep')}>✓ 收了</button>
+        <button className="btn-act act-keep" type="button" onClick={() => onSet(m.id, 'keep')}>✓ 收录</button>
         <button className="btn-act act-later" type="button" onClick={() => onSet(m.id, 'later')}>先放着</button>
         <button className="btn-act act-drop" type="button" onClick={() => onSet(m.id, 'ignore')}>忽略</button>
       </div>
       {done ? (
         <div className="mat-donebar">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 13l4 4 10-10" strokeLinecap="round" /></svg>
-          <span className="db-text">{decision === 'keep' ? '收了' : decision === 'ignore' ? '忽略' : '稍后'}</span>
+          <span className="db-text">{decision === 'keep' ? '收录' : decision === 'ignore' ? '忽略' : '稍后'}</span>
           <span className="undo" role="button" tabIndex={0} onClick={() => onSet(m.id, '')}>撤销</span>
         </div>
       ) : null}
@@ -266,7 +266,7 @@ function WorkbenchInner() {
       {errorBanner}
       {/* R6.2：顶部诚实条（实查/推测/未探测三色占比，点击展开字段清单） */}
       <EvidenceBar dist={evidenceDist} />
-      {/* 首页 Hero —— 对齐 Summarize 规格：薄荷绿渐变卡 + 近黑主操作 */}
+      {/* 首页 Hero —— 黑底卡片 + 纯白渐变文本 + 白底主操作 */}
       {state?.track ? (
         <section className="wb-hero">
           <div className="wbh-left">
