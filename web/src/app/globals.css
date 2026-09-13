@@ -769,8 +769,8 @@ input, select, textarea { font-family: inherit; }
 .report-body { display: flex; gap: 18px; flex: 1; min-height: 0; align-items: stretch; }
 .report-main { flex: 1 1 auto; min-width: 0; overflow-y: auto; height: 100%; }
 .progress-wrap { margin: 6px 0 16px; }
-.progress-track { height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
-.progress-bar { height: 100%; background: var(--brand); border-radius: 3px; transition: width .4s; }
+.progress-track { height: 6px; background: var(--bg3); border-radius: 999px; overflow: hidden; }
+.progress-bar { height: 100%; background: var(--brand); border-radius: 999px; transition: width .4s; }
 .progress-text { font-size:12.5px; color: var(--ink3); margin-top: 5px; display: block; }
 .add-brand-row { display: flex; gap: 8px; margin-bottom: 14px; }
 
@@ -2519,7 +2519,7 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .report-page { max-width: 860px; }
 .report-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
 .report-title { margin: 0; font-size: 18px; }
-.report-body { line-height: 1.8; font-size: 14px; color: #2f3d36; }
+.report-body { display: block; line-height: 1.8; font-size: 14px; color: #2f3d36; }
 .report-body h2, .report-body h3, .report-body h4 { margin: 18px 0 8px; color: #1f2a24; }
 .report-body blockquote.md-quote { border-left: 3px solid #33b98c; margin: 10px 0; padding: 6px 12px; background: #f4faf7; border-radius: 0 8px 8px 0; }
 .report-body blockquote.md-quote p { margin: 4px 0; }
@@ -2575,7 +2575,7 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .chip.on{background:#6EE7A0;color:#000;border:none}
 
 /* —— 证据条 / 导读（浅色） —— */
-.evidence-bar-wrap{margin:8px 0 14px}
+.evidence-bar-wrap{margin:8px 0 14px 10px}
 .evidence-bar{border:1px solid var(--line1);border-radius:10px;background:var(--bg2);overflow:hidden;display:flex;align-items:center;width:100%;gap:0;cursor:pointer;padding:0;min-height:26px}
 .eb-seg{display:block;height:10px}
 .eb-verified{background:var(--ok)}
