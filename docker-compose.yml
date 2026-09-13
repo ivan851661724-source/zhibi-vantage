@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: zhibi-vantage:1.4.0
+    image: zhibi-vantage:1.5.0
     container_name: zhibi-vantage
     restart: always                      # 崩溃/重启自动拉起
     # Phase 5：宿主机 3300 映射已移除（旧静态前端删除，纯 API 后端）。
@@ -44,7 +44,7 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
-    image: zhibi-web:0.1.0
+    image: zhibi-web:0.2.0
     container_name: zhibi-web
     restart: always
     depends_on:

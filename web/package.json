@@ -1,6 +1,6 @@
 {
   "name": "zhibi-vantage-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "知彼 Vantage · Next.js 前端（规范见 docs/01-前端架构规范.md）",
   "scripts": {
