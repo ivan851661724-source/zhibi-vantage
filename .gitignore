@@ -48,3 +48,8 @@ ui-redesign/
 # QA 临时数据（走查/复跑产物，不入库）
 .qa-data/
 qa-*.tmp.js
+
+# SSH/云厂商私钥（本地连接用，严禁入库）
+*.pem
+*.ppk
+*.key

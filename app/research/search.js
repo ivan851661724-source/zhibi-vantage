@@ -37,9 +37,9 @@ function providerConfigured(config, name) {
 }
 async function providerCall(name, query, config, gl) {
   if (name === 'serper') {
-    const { keys, disabled } = getSerperPool(config);
+    const { keys, disabled, budgetTotal } = getSerperPool(config);
     if (!keys.length) throw new Error('NO_SERPER_KEY');
-    return serperSearchWithFailover(query, keys, gl, { disabled });
+    return serperSearchWithFailover(query, keys, gl, { disabled, budgetTotal });
   }
   if (name === 'brave') {
     const k = config.search.braveKey;

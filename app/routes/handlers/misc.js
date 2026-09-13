@@ -5,6 +5,8 @@
 // 逻辑与原 server.js 实现逐行对应（纯搬运，不改行为）。
 // ============================================================
 
+const SerperBudget = require('../../services/providers/serper-budget.js'); // Serper 总额度预算（状态回显用）
+
 // ---------- /api/config（GET：密钥状态速览） ----------
 // ownBrands（自有品牌清单）属平台业务敏感信息：仅超管返回；租户只见键状态布尔。
 async function configGet(ctx, req, res, url, p) {
@@ -22,6 +24,8 @@ async function configGet(ctx, req, res, url, p) {
   return ctx.sendJSON(res, 200, {
     hasKeys, provider, hasTavily, hasSerper, hasBrave, hasBocha,
     serperKeyCount: serperPool.keys.length, serperKeysDisabled: serperPool.disabled.size,
+    // Serper 总额度预算回显（key 只出掩码；total=null = 未配置预算）
+    serperBudget: SerperBudget.status(c.search),
     // LLM 接入点/模型非机密，回传设置页回显（key 永不回传）
     llmModel: (c.llm && c.llm.model) || '', llmBaseUrl: (c.llm && c.llm.baseUrl) || '',
     ownBrands: isAdmin ? (c.ownBrands || []).filter(Boolean) : undefined,
@@ -61,6 +65,10 @@ async function configPost(ctx, req, res, url, p) {
       apiKey: (body.search && body.search.apiKey) || (cur.search && cur.search.apiKey) || '',
       serperKey: serperKeys[0] || (cur.search && cur.search.serperKey) || '',
       serperKeys: serperKeys.slice(),
+      // 总额度预算（lifetime，不按月重置）：设置页暂不编辑，保存时原样保留，避免被整对象重建丢掉
+      serperBudget: (body.search && body.search.serperBudget) || (cur.search && cur.search.serperBudget) || undefined,
+      // tavilyKey 此前会被本函数静默丢弃（provider=tavily 时保存设置即断源）——补上保留
+      tavilyKey: (body.search && body.search.tavilyKey) || (cur.search && cur.search.tavilyKey) || '',
       braveKey: (body.search && body.search.braveKey) || (cur.search && cur.search.braveKey) || '',
       bochaKey: (body.search && body.search.bochaKey) || (cur.search && cur.search.bochaKey) || ''
     },
@@ -88,8 +96,8 @@ async function searchtest(ctx, req, res, url, p) {
   const runners = [];
   if (sc.tavilyKey || sc.apiKey) runners.push(['tavily', () => ctx.tavilySearch(query, sc.tavilyKey || sc.apiKey)]);
   if (sc.serperKey || (sc.serperKeys && sc.serperKeys.length)) {
-    const { keys, disabled } = ctx.getSerperPool({ search: sc });
-    if (keys.length) runners.push(['serper', () => ctx.serperSearchWithFailover(query, keys, 'us', { disabled })]);
+    const { keys, disabled, budgetTotal } = ctx.getSerperPool({ search: sc });
+    if (keys.length) runners.push(['serper', () => ctx.serperSearchWithFailover(query, keys, 'us', { disabled, budgetTotal })]); // searchtest 也是真实消耗：同样走预算记账
   }
   if (sc.braveKey) runners.push(['brave', () => ctx.braveSearch(query, sc.braveKey, 'us')]);
   if (sc.bochaKey) runners.push(['bocha', () => ctx.bochaSearch(query, sc.bochaKey)]);

@@ -12,6 +12,8 @@
 // 测试：test/serper-failover.test.js 为独立复制版（注释注明），本模块为唯一实现。
 // ============================================================
 
+const Budget = require('./serper-budget.js'); // Serper key 总额度预算（总额度口径，不按月重置）
+
 // Serper：北美最便宜的真实 Google SERP 源；返回归一化为 {results:[{title,url,content}]}
 async function serperSearch(query, key, gl) {
   const r = await fetch('https://google.serper.dev/search', {
@@ -59,23 +61,38 @@ function classifySerperError(e) {
 }
 
 // 多 key 容错核心：逐个尝试，invalid/exhausted 的 key 写入 disabled 永久跳过（本次进程内），命中第一个成功即返回；全失败抛 SERPER_ALL_KEYS_EXHAUSTED
+// 总额度预算（serper-budget.js）：canSpend 不通过的 key 视同耗尽跳过；2xx 成功 / 5xx（到达即计费，metering 口径）各扣 1；
+// 全部可用 key 都被预算挡住时抛 SERPER_BUDGET_EXHAUSTED（区别于 key 本身失效）。
 // call 可注入（测试用），默认走真实 serperSearch
 async function serperSearchWithFailover(query, keys, gl, opts) {
   const o = opts || {};
   const disabled = o.disabled || new Set();
   const call = o.call || (k => serperSearch(query, k, gl));
+  const total = o.budgetTotal; // Infinity / undefined = 不设限
   if (!keys || !keys.length) throw new Error('NO_SERPER_KEY');
   let lastErr = null;
+  let budgetBlocked = 0;
+  let attempted = 0;
   for (let i = 0; i < keys.length; i++) {
     if (disabled.has(i)) continue;
+    if (!Budget.canSpend(keys[i], total)) { disabled.add(i); budgetBlocked++; continue; }
+    attempted++;
     try {
-      return await call(keys[i]);
+      const out = await call(keys[i]);
+      await Budget.recordSpend(keys[i]); // 2xx：真实消耗
+      return out;
     } catch (e) {
       lastErr = e;
+      if (e && e.status >= 500) await Budget.recordSpend(keys[i]); // 5xx 到达即计费
       const kind = classifySerperError(e);
       if (kind === 'invalid' || kind === 'exhausted') { disabled.add(i); continue; }
       throw e; // 网络/解析等其它错误：不屏蔽、不重试，直接抛出
     }
+  }
+  if (attempted === 0 && budgetBlocked > 0) {
+    const err = new Error('SERPER_BUDGET_EXHAUSTED'); // 一笔都没真实调用：全部被预算挡住
+    err.budgetExhausted = true;
+    throw err;
   }
   const err = new Error('SERPER_ALL_KEYS_EXHAUSTED');
   err.lastErr = lastErr;
@@ -89,7 +106,7 @@ function getSerperPool(config) {
   const keys = normalizeSerperKeys(config && config.search);
   const sig = keys.join('|');
   if (sig !== _serperKeySig) { _serperKeySig = sig; _serperDisabled = new Set(); }
-  return { keys, disabled: _serperDisabled };
+  return { keys, disabled: _serperDisabled, budgetTotal: Budget.budgetTotal(config && config.search) };
 }
 
 // Tavily：深度搜索（advanced + include_answer）；归一化同 serper
