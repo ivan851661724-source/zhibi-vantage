@@ -2110,21 +2110,75 @@ box-shadow: var(--shadow); color: var(--text2);
 .ws-map .quad-svg {
  background: var(--card); }
 
+/* ===== 机会视图散点图 · 多端适配 =====
+   设计基线 viewBox 700×400，所有文字尺寸以「viewBox 单位」衡量。
+   - 移动端：SVG 固定 700px 宽（= viewBox 宽），文字以 1:1 渲染为屏幕像素（≈12–13 屏素），
+     外层 .opp-chart 提供横向滚动；这是 SVG 在小屏保持文字清晰的标准做法。
+   - 平板：内容区 ≈770px，SVG 100% 宽（≈700px），文字 ≈12 屏素。
+   - 桌面：内容区 ≥1100px，SVG 限宽 880px，文字 ≈16 屏素（更大更易读，矩阵更舒展）。
+   - 跨端一致：font-family 显式声明并强制 SVG <text> 继承，避免小米/微信内置浏览器回落到无 CJK 字体。 */
 .opp-svg {
- width: 100%; max-width: 660px; height: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+ width: 100%; max-width: 880px; height: auto; display: block;
+ background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+ font-family: var(--font);
+ text-rendering: geometricPrecision; -webkit-font-smoothing: antialiased; }
+.opp-svg text { font-family: inherit; }
 
 .opp-chart {
- margin-top: 8px; }
+ margin-top: 8px; min-width: 0; }
 
+/* ----- 文字尺寸基线（桌面端） ----- */
 .qzone {
- font-size: 11px; font-weight: 700; }
-
+ font-size: 13px; font-weight: 700; font-family: inherit; }
 .opp-lbl {
- font-size:11px; fill: var(--ink); }
+ font-size: 12px; fill: var(--ink); font-family: inherit; }
+.opp-best {
+ font-size: 14px; font-weight: 700; font-family: inherit; }
+.opp-svg .qax {
+ font-size: 12px; fill: var(--ink-soft); font-family: inherit; }
+
+/* ----- 平板（≤900px）：side-nav 折叠为 64px 栏，内容区变宽，SVG 100% 撑到约 740-800px，
+   viewBox 单位换算到屏素 ≈ 12.5–13px，与基线相近，无需调整文字 ----- */
+@media (max-width: 900px) {
+ .opp-svg { max-width: 100%; }
+}
+
+/* ----- 手机（≤560px）：SVG 固定以 viewBox 原始宽 700px 渲染，外层横向滚动；
+   文字 1:1 映射到屏素 ≈ 12–14px，保证 CJK 清晰可读 ----- */
+@media (max-width: 560px) {
+ .opp-chart {
+ overflow-x: auto; -webkit-overflow-scrolling: touch;
+ padding-bottom: 6px; /* 滚动条占位，避免遮挡底部说明 */
+ margin-left: -8px; margin-right: -8px; padding-left: 8px; padding-right: 8px; }
+ .opp-svg {
+ width: 700px; max-width: 700px; flex-shrink: 0; }
+ /* 卡片在极窄屏改为上下排版：分数块顶在左、整体信息在右，保证可点选区域足够 */
+ .opp-item {
+ flex-direction: row; align-items: flex-start; gap: 10px; padding: 10px; }
+ .opp-score { flex-basis: 52px; }
+ .opp-title { font-size: 13px; line-height: 1.4; }
+ .opp-metrics { font-size: 11.5px; gap: 8px; }
+ .pano-tip { font-size: 11.5px; line-height: 1.55; }
+ .opp-denom-row { font-size: 11.5px; line-height: 1.55; }
+}
+
+/* ----- 大屏（≥1180px）：内容区宽到 1100+，SVG 撑到 880px，文字渲染到 16+ 屏素，
+   适当收紧字号防止过大 ----- */
+@media (min-width: 1180px) {
+ .opp-svg { max-width: 920px; }
+ .qzone { font-size: 12px; }
+ .opp-lbl { font-size: 11px; }
+ .opp-best { font-size: 12.5px; }
+ .opp-svg .qax { font-size: 11px; }
+}
+
+/* ----- 超宽屏（≥1600px）：保持视觉密度，不让矩阵无限放大 ----- */
+@media (min-width: 1600px) {
+ .opp-svg { max-width: 960px; }
+}
 
 .opp-dot {
  cursor: pointer; }
-
 .opp-dot:hover {
  stroke-width: 2.4; }
 

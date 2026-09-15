@@ -153,7 +153,9 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
 
 // ---------- 散点图（复刻 oppScatterSvg L1115-1168；点点击 → 高亮滚动 L1292-1299） ----------
 function OppScatter({ op, hl, onPick }: { op: Opportunity; hl: string | null; onPick: (oid: string) => void }) {
-  const W = 620, H = 380, padL = 54, padR = 22, padT = 22, padB = 48;
+  // 扩大画布宽度以容纳更长的中文图例（避免「蓝海 · 重点机会（机会分≥15）」在窄屏被裁切），
+  // 同时增加右侧留白给「已被满足」标签。
+  const W = 700, H = 400, padL = 60, padR = 60, padT = 26, padB = 54;
   const sx = (s: number) => padL + ((s - 1) / 9) * (W - padL - padR);
   const sy = (i: number) => padT + ((10 - i) / 9) * (H - padT - padB);
   const grid: number[] = [];
@@ -179,9 +181,10 @@ function OppScatter({ op, hl, onPick }: { op: Opportunity; hl: string | null; on
     let label: { x: number; y: number; text: string; anchor: 'start' | 'end' } | null = null;
     if (idx < 5) {
       const lx = cx + r + 4;
-      const right = lx > W - padR - 60;
-      const txt = (t.label || '').length > 9 ? (t.label || '').slice(0, 9) + '…' : t.label || '';
-      label = { x: right ? cx - r - 4 : lx, y: cy + 3.5, text: txt, anchor: right ? 'end' : 'start' };
+      const right = lx > W - padR - 80;
+      // 中文标签按"看起来像 7 个汉字"的视觉宽度截断（中文每个字约 = 1.1 个英文字宽）
+      const txt = (t.label || '').length > 12 ? (t.label || '').slice(0, 12) + '…' : t.label || '';
+      label = { x: right ? cx - r - 4 : lx, y: cy + 4, text: txt, anchor: right ? 'end' : 'start' };
     }
     return { t, cx, cy, r, z, solid, tip, label };
   });
@@ -245,9 +248,9 @@ function OppScatter({ op, hl, onPick }: { op: Opportunity; hl: string | null; on
       {bestStar ? (() => {
         const b = bestStar;
         const lx = b.x + b.r + 6;
-        const anchor = lx > W - padR - 70 ? 'end' : 'start';
+        const anchor = lx > W - padR - 90 ? 'end' : 'start';
         const tx = anchor === 'end' ? b.x - b.r - 6 : lx;
-        const txt = (b.t.label || '').length > 10 ? (b.t.label || '').slice(0, 10) + '…' : b.t.label || '';
+        const txt = (b.t.label || '').length > 12 ? (b.t.label || '').slice(0, 12) + '…' : b.t.label || '';
         return (
           <text x={tx.toFixed(1)} y={(b.y - b.r - 6).toFixed(1)} textAnchor={anchor} className="opp-best" fill="#FAC775">★ 最佳机会 · {txt}</text>
         );

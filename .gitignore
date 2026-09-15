@@ -53,3 +53,7 @@ qa-*.tmp.js
 *.pem
 *.ppk
 *.key
+
+# 黑客松/比赛产物（本地脚本与生成的提交材料）
+scripts/hackathon/
+*.docx
