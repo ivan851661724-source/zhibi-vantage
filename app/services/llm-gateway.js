@@ -3,7 +3,7 @@
 // LLM 统一网关（模块 0-2）—— 超时/重试/熔断/字段级降级 + 成本归因（1-1）
 // 零依赖：AbortController + 原生 fetch
 // 行为契约：
-//   · 超时 45s 有界返回（AbortSignal 计时器，无网络黑洞）
+//   · 超时 45s 有界返回（deadline 同时覆盖响应头与正文读取，无网络黑洞）
 //   · 仅网络错误/5xx/429 重试 ×2（指数退避 1s→2s）；400/401/403 等确定性 4xx 不重试
 //   · 熔断按 apiKey 分桶（连续 5 失败熔断 30s）——单个失效 key 不再拖垮全部租户
 //   · 配额类（ENRICH_QUOTA）→ 立即 throw（不该降级）
@@ -50,7 +50,11 @@ function breakerOf(key) {
 function circuitOpen(b) { return b.openedAt > 0 && Date.now() - b.openedAt < BREAK_MS; }
 function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
 
-async function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, thinking) {
+// deadline 计时器从发请求一直活着到调用方读完正文：fetch 返回 Response 只代表响应头到达，
+// 正文可能仍在传输（llm-body 埋点即为此排查而设）。返回 { response, release }，
+// release 必须在正文读取结束后调用；计时器触发 → ctrl.abort() → 未完成的正文读取以
+// AbortError 失败，与网络超时同路径走重试/熔断。
+function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, thinking) {
   const body = { model, messages, temperature: temperature == null ? 0.2 : temperature };
   if (json) body.response_format = { type: 'json_object' };
   // 模型分工配套（2026-09-12）：批量抽取类调用传 thinking=false 关思考链
@@ -58,14 +62,16 @@ async function rawCall(messages, key, model, json, temperature, baseUrl, timeout
   if (thinking === false) body.enable_thinking = false;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || TIMEOUT_MS);
-  try {
-    return await fetch(normalizeBaseUrl(baseUrl) || DEFAULT_BASE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-  } finally { clearTimeout(timer); }
+  const release = () => clearTimeout(timer);
+  return fetch(normalizeBaseUrl(baseUrl) || DEFAULT_BASE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+    body: JSON.stringify(body),
+    signal: ctrl.signal,
+  }).then(
+    r => ({ response: r, release }),
+    e => { release(); throw e; }
+  );
 }
 
 /**
@@ -103,42 +109,44 @@ async function call(messages, opts) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_BASE_MS * 2 ** (attempt - 1)));
     try {
-      const r = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs, o.thinking);
-      // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
+      const { response: r, release } = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs, o.thinking);
       try {
-        const logger = require('./logger.js');
-        logger && logger.info('llm-call', {
-          fieldKey: o.fieldKey, competitorId: o.competitorId || null, model,
-          attempt: attempt + 1, status: r.status, durationMs: Date.now() - _callStart,
-        });
-      } catch (e) { /* 日志不可用 */ }
-      if (!r.ok) {
-        // 计费口径与 metering.shouldBill 一致：5xx 供应商已受理计费；4xx 不计
-        if (tid) metering.recordCall(tid, 'enrichRuns', metering.shouldBill(r.status) ? 1 : 0);
-        throw new Error('DEEPSEEK_' + r.status);
-      }
-      const _bodyT0 = Date.now();
-      const j = await r.json(); // 200 已受理：本次调用必计费（解析失败也不重试，防双计费）
-      // 可观测性：body 读取耗时（排查 fetch headers 快但 body 挂起的问题）
-      try {
-        const logger = require('./logger.js');
-        logger && logger.info('llm-body', { fieldKey: o.fieldKey, bodyMs: Date.now() - _bodyT0, totalMs: Date.now() - _callStart });
-      } catch (e) { /* 日志不可用 */ }
-      if (tid) metering.recordCall(tid, 'enrichRuns', 1);
-      const content = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || (o.json ? '{}' : '');
-      // 1-1 成本归因（usage 驱动，三级归因）
-      if (j.usage && tid) {
-        cost.record({
-          tenantId: tid, projectId: o.projectId, competitorId: o.competitorId, fieldKey: o.fieldKey,
-          kind: 'llm', tokensIn: j.usage.prompt_tokens || 0, tokensOut: j.usage.completion_tokens || 0,
-          cached: j.usage.prompt_cache_hit_tokens || 0, calls: 1,
-          costYuan: cost.costOf(j.usage),
-        });
-      }
-      br.failures = 0; br.openedAt = 0;                   // 成功 → 复位该 key 的熔断计数
-      if (!o.json) return content;
-      try { return JSON.parse(content); }
-      catch { try { return JSON.parse(content.replace(/```json|```/g, '').trim()); } catch { return {}; } }
+        // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
+        try {
+          const logger = require('./logger.js');
+          logger && logger.info('llm-call', {
+            fieldKey: o.fieldKey, competitorId: o.competitorId || null, model,
+            attempt: attempt + 1, status: r.status, durationMs: Date.now() - _callStart,
+          });
+        } catch (e) { /* 日志不可用 */ }
+        if (!r.ok) {
+          // 计费口径与 metering.shouldBill 一致：5xx 供应商已受理计费；4xx 不计
+          if (tid) metering.recordCall(tid, 'enrichRuns', metering.shouldBill(r.status) ? 1 : 0);
+          throw new Error('DEEPSEEK_' + r.status);
+        }
+        const _bodyT0 = Date.now();
+        const j = await r.json(); // 200 已受理：解析失败不重试（防双计费）；body 挂起由同一 deadline abort 后按超时重试
+        // 可观测性：body 读取耗时（排查 fetch headers 快但 body 挂起的问题）
+        try {
+          const logger = require('./logger.js');
+          logger && logger.info('llm-body', { fieldKey: o.fieldKey, bodyMs: Date.now() - _bodyT0, totalMs: Date.now() - _callStart });
+        } catch (e) { /* 日志不可用 */ }
+        if (tid) metering.recordCall(tid, 'enrichRuns', 1);
+        const content = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || (o.json ? '{}' : '');
+        // 1-1 成本归因（usage 驱动，三级归因）
+        if (j.usage && tid) {
+          cost.record({
+            tenantId: tid, projectId: o.projectId, competitorId: o.competitorId, fieldKey: o.fieldKey,
+            kind: 'llm', tokensIn: j.usage.prompt_tokens || 0, tokensOut: j.usage.completion_tokens || 0,
+            cached: j.usage.prompt_cache_hit_tokens || 0, calls: 1,
+            costYuan: cost.costOf(j.usage),
+          });
+        }
+        br.failures = 0; br.openedAt = 0;                   // 成功 → 复位该 key 的熔断计数
+        if (!o.json) return content;
+        try { return JSON.parse(content); }
+        catch { try { return JSON.parse(content.replace(/```json|```/g, '').trim()); } catch { return {}; } }
+      } finally { release(); } // 正文读取完成/失败后统一解除 deadline（中间任何 return/throw 都会经过）
     } catch (e) {
       lastErr = e;
       if (e && (e.message === 'ENRICH_QUOTA' || e.message === 'NO_LLM_KEY')) throw e; // 配额/无 key 不重试

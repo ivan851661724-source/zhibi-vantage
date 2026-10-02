@@ -90,7 +90,9 @@ async function fetchPage(url, timeoutMs) {
   }
   finally { clearTimeout(timer); }
 }
-// Shopify 站结构化价格：/products.json 公开端点，零 LLM，verified 级
+// Shopify 站结构化价格：/products.json 公开端点，零 LLM，verified 级。
+// 同时探测 /cart.js 的店铺结账币种：products.json 价格以店铺币种计且 JSON 本身不带币种，
+// 店铺币种 ≠ 调研市场币种时（如日销店 ¥800），调用方不得把数值直接当市场价入带。
 async function fetchShopifyProducts(siteUrl) {
   const d = domainOf(siteUrl);
   if (!d) return { ok: false };
@@ -98,6 +100,10 @@ async function fetchShopifyProducts(siteUrl) {
   const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
     const u = await assertPublicUrl(`https://${d}/products.json?limit=100`);
+    const cartReq = fetch(`https://${d}/cart.js`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal })
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => (j && j.currency) ? String(j.currency).toUpperCase() : null)
+      .catch(() => null);
     const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal });
     if (!r.ok) return { ok: false, status: r.status };
     const j = await r.json();
@@ -110,7 +116,8 @@ async function fetchShopifyProducts(siteUrl) {
     // B-5a（2026-09-12 任务书）：total = 未截断的真实在售款数（products.length）。
     // items 被 .slice(0,60) 截断 + minPrice 有效过滤，不能当 SKU 数（模拟 S5 实证：
     // 用截断值会把 60 款目录型品牌算成 12，份额排名翻转 15%↔47%）。
-    return { ok: items.length > 0, items, total: products.length, url: `https://${d}/products.json` };
+    const currency = await cartReq;
+    return { ok: items.length > 0, items, total: products.length, url: `https://${d}/products.json`, currency };
   } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
   finally { clearTimeout(timer); }
 }

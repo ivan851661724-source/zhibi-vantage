@@ -185,15 +185,31 @@ async function deepResearchOne(comp, state, config) {
   if (shopify.ok) {
     // ▶ 报告-数据同源 §5：价格点前置过滤 $0 —— 免费品/赠品/错误条目不进价格点，
     // 单列 comp.freebies（不参与价格带聚合），避免 $0 脏值污染"全价格带覆盖"结论。
+    // 注意先取整再过滤：$0.49 这类小额价"先滤后取整"会归 0 漏进价格带下限。
     const rawPts = shopify.items.map(x => x.minPrice).filter(n => n != null);
     comp.freebies = Array.from(new Set(shopify.items.filter(x => x.minPrice === 0).map(x => x.title || '免费/赠品').filter(Boolean))).slice(0, 20);
-    comp.pricePoints = Array.from(new Set(rawPts.filter(n => n > 0).map(n => Math.round(n)))).sort((a, b) => a - b).slice(0, 40);
-    comp.priceVerified = true;
+    // ▶ 币种守卫（Ovalware 实证）：products.json 价格以店铺结账币种计且不带币种字段，
+    // 店铺币种 ≠ 市场币种（如日销店 ¥800 被当 $800）时无汇率源不换算 → 实抓价格不入带，
+    // 渠道证据（shopifyDTC 在售正证据）与款数保留，价格诚实降级回 LLM/官网正文路径。
+    const shopCur = String(shopify.currency || '').toUpperCase();
+    const mktCur = String(comp.currency || '').toUpperCase();
+    comp.shopCurrency = shopCur || null;
+    if (shopCur && mktCur && shopCur !== mktCur) {
+      comp.pricePoints = [];
+      comp.currencyMismatch = shopCur;
+      logAttempt(comp, 'shopify-currency', shopify.url, 'shopify', false, `店铺币种 ${shopCur} ≠ 市场币种 ${mktCur}，实抓价格不换算不入带（价格降级回推断路径）`);
+    } else {
+      comp.pricePoints = Array.from(new Set(rawPts.map(n => Math.round(n)).filter(n => n > 0))).sort((a, b) => a - b).slice(0, 40);
+    }
+    comp.priceVerified = comp.pricePoints.length > 0;
     // ▶ B-5b（2026-09-12 任务书）规模信号接线：products.json 实抓成功 = 最强 Shopify 正证据 +
     // 真实在售款数（未截断）。sizing.estimateScale 三输入之一（productCount）此前全仓零写入 → HHI 恒 0。
     comp.isShopify = true;              // 替代链接特征推断（shopifyDTC），实抓判定为准
     comp.productCount = shopify.total;  // 真实在售款数（未截断），非 items.length
-    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据', `共${shopify.total}款，${fmtMoney(Math.min(...rawPts.filter(n => n > 0)), comp.currency)}-${fmtMoney(Math.max(...rawPts.filter(n => n > 0)), comp.currency)}`, anchorDomain);
+    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据',
+      comp.pricePoints.length ? `共${shopify.total}款，${fmtMoney(comp.pricePoints[0], comp.currency)}-${fmtMoney(comp.pricePoints[comp.pricePoints.length - 1], comp.currency)}`
+        : (comp.currencyMismatch ? `共${shopify.total}款（店铺币种 ${shopCur}，价格未入带）` : `共${shopify.total}款`),
+      anchorDomain);
   }
   logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.total} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
 
@@ -212,6 +228,7 @@ async function deepResearchOne(comp, state, config) {
   const probeRaw = {};
   const probeKeys = Object.keys(probes);
   const probeFails = []; // 探测失败的 key（异常/超时，已重试仍失败）
+  const probeQuota = []; // 配额耗尽的 key（≠ 零命中：不得转成"确认缺席"负证据）
   // 信号量控制并发：复用 CONCURRENCY（原死变量）限制同时发起的搜索数，
   // 避免 9 路并发触发搜索 API 限流/超时导致批量失败（§1 根因）。
   let _pi = 0;
@@ -221,7 +238,15 @@ async function deepResearchOne(comp, state, config) {
       let lastErr = null;
       for (let attempt = 0; attempt < 2; attempt++) { // 失败重试 1 次
         try {
-          probeRaw[k] = (await searchProvider(probes[k], config, gl)).results || [];
+          const r = await searchProvider(probes[k], config, gl);
+          if (r && r.error) {
+            // error 哨兵（当前仅 quota，防御未来新增）≠ 搜索成功零命中：按"探测未完成"处理
+            //（results 里的空数组会伪装成零命中，经负证据分支变成 verified 级"确认缺席"）。哨兵类不重试。
+            probeRaw[k] = null; probeQuota.push(k);
+            lastErr = null;
+            break;
+          }
+          probeRaw[k] = (r && r.results) || [];
           lastErr = null;
           break;
         } catch (e) {
@@ -233,17 +258,23 @@ async function deepResearchOne(comp, state, config) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, probeKeys.length) }, () => probeWorker()));
-  // 记录每个定向探测的执行结果（hit 三态：true 命中 / false 零命中 / null 探测失败）
+  // 记录每个定向探测的执行结果（hit 四态：true 命中 / false 真实零命中 / null 探测失败或 error 哨兵）
   probeKeys.forEach(k => {
     const raw = probeRaw[k];
     const hit = raw == null ? null : raw.length > 0;
-    const reason = raw == null ? '定向探测失败（搜索异常/超时，已重试1次仍失败）' : (raw.length ? `命中 ${raw.length} 条` : '定向探测执行成功但零命中');
+    const reason = probeQuota.includes(k) ? '搜索返回错误哨兵（配额不足等），探测未执行（不等于零命中）'
+      : raw == null ? '定向探测失败（搜索异常/超时，已重试1次仍失败）'
+      : (raw.length ? `命中 ${raw.length} 条` : '定向探测执行成功但零命中');
     logAttempt(comp, 'probe.' + k, probes[k], sProvider, hit, reason);
   });
-  // 失败可见性：聚合本次探测失败率（不再静默）
-  comp.probeHealth = recordProbeHealth(probeFails.length, probeKeys.length) || { failed: probeFails.length, total: probeKeys.length };
+  // 失败可见性：聚合本次探测未完成率（失败+哨兵，不再静默）
+  const probeIncomplete = probeFails.length + probeQuota.length;
+  comp.probeHealth = recordProbeHealth(probeIncomplete, probeKeys.length) || { failed: probeIncomplete, total: probeKeys.length };
   if (probeFails.length) {
     console.warn(`[深研探测] ${comp.name}：定向探测失败 ${probeFails.length}/${probeKeys.length}（${probeFails.join(',')}）—— 渠道/口碑/雷达相关维度将缺证据`);
+  }
+  if (probeQuota.length) {
+    console.warn(`[深研探测] ${comp.name}：${probeQuota.length} 路探测因搜索 error 哨兵未执行（${probeQuota.join(',')}，多为配额不足）—— 相关维度保持"未探测"，不会被判"确认缺席"`);
   }
 
   // 官方店铺硬标准：店铺 URL 路径或标题本身含品牌名（防止"第三方卖同款的店"被误判为品牌官方店）
@@ -286,6 +317,11 @@ async function deepResearchOne(comp, state, config) {
         return { present: true, confidence: 'high', basis: 'verified', note: '官网含门店/实体店信息', since: null };
       }
       if (kept.offlineRetail != null && officialPage.ok) {
+        // 负证据必须建立在"真实执行且原始零命中"上：配额耗尽/失败已是 null 走不到这里；
+        // 有结果但没匹配上门店特征 → 只是"未能识别"，不是"确认不存在"
+        if ((probeRaw.offlineRetail || []).length > 0) {
+          return { present: false, confidence: 'low', basis: 'unverified', note: '定向检索有结果但未命中官方门店信息，未能确认', since: null };
+        }
         if (officialEv) comp.fieldSources['channels.offlineRetail'] = [{ id: officialEv.id, url: officialEv.url, tier: 1, kind: 'neg-check', title: '定向检索+官网双重核查' }];
         return { present: false, confidence: 'medium', basis: 'verified', note: '检索零命中且官网无门店信息 → 确认缺席', since: null };
       }
@@ -302,8 +338,12 @@ async function deepResearchOne(comp, state, config) {
       if (officialEv) comp.fieldSources['channels.' + chKey] = [{ id: officialEv.id, url: officialEv.url, tier: 1, kind: 'official', title: officialEv.title }];
       return { present: true, confidence: 'high', basis: 'verified', note: '官网页面含该渠道入口链接', since: null };
     }
-    // 负证据：定向查询成功执行且零命中 + 官网已抓取且无链接 → 才能标"确认缺席"
+    // 负证据：定向查询真实执行（非配额/失败，那两类已是 null）且原始结果零命中 + 官网已抓取且无链接
+    // → 才能标"确认缺席"。有结果但未见官方店 = 第三方售卖/命名差异，只是"未能识别"，不得确认缺席。
     if (kept[chKey] != null && officialPage.ok) {
+      if ((probeRaw[chKey] || []).length > 0) {
+        return { present: false, confidence: 'low', basis: 'unverified', note: '定向检索有结果但未见官方店铺/主页，未能确认（可能有第三方售卖或命名差异）', since: null };
+      }
       if (officialEv) comp.fieldSources['channels.' + chKey] = [{ id: officialEv.id, url: officialEv.url, tier: 1, kind: 'neg-check', title: '定向检索+官网双重核查' }];
       return { present: false, confidence: 'medium', basis: 'verified', note: '定向检索零命中且官网无该渠道入口 → 确认缺席', since: null };
     }
@@ -352,7 +392,7 @@ async function deepResearchOne(comp, state, config) {
  "audiences": [目标人群自由文本，中英文皆可，如 "年轻妈妈" / "健身人群" / "职场新人"，尽量贴合该品牌实际受众],
  "regions": [∈ ${REGIONS.join(', ')}],
  "products": [该品牌实际经营的品类/产品词，自由文本，中英文皆可，如 "面部精华" / "运动水壶" / "宠物零食"，按赛道抽取，不必受限], // 旧版扁平兜底词（仅当下方结构化字段缺失时前端回退），不再作为矩阵/布局唯一来源
- "productMatrix": {skuCount:数字或null(估算SKU总数), priceBandDist:"价格带分布简述,如 $20-50 为主、少数 $80+", heroSku:["1-2个代表性爆款/主打SKU名"], productLines:["产品线/系列名,如 基础款/联名款/节日限定"]}, // ▶ P2 #4 产品矩阵（纵向深度）：产品线内部结构，与品类布局数据源分离
+ "productMatrix": {skuCount:数字或null(估算SKU总数), priceBandDist:"价格带分布简述,如 $20-50 为主、少数 $80+", heroSku:["1-2个该品牌在当前赛道品类内的代表性爆款/主打SKU名，赛道外产品严禁选入（如赛道是冷萃壶就不选拌菜器）"], productLines:["产品线/系列名,如 基础款/联名款/节日限定"]}, // ▶ P2 #4 产品矩阵（纵向深度）：产品线内部结构，与品类布局数据源分离
  "categoryCoverage": [{"category":"市场品类(如 宠物服装)","subCategory":"子品类(如 雨衣)","count":数字或null(该品类下SKU数估算)}], // ▶ P2 #5 品类布局（横向广度）：跨品类覆盖，与产品矩阵数据源分离
  "reviews": {rating:数字或null, trend:"up"|"flat"|"down", posThemes:[], negThemes:[], reasoning:"", cite:[]}, // 需求轴：posThemes/negThemes 必须真实来自用户声音，严禁用品牌自述替代
  "reviewSnippets":[{"platform":"Trustpilot|Reddit|Amazon|Etsy|其他", "rating":数字或null, "sampleSize":数字或null, "url":"该条口碑/评论聚合页的原始链接(必须真实可点，无法确认则填空字符串)", "text":"一句代表性的用户原声(≤80字)", "sentiment":"pos"|"neg"|"neu"}], // ▶ P1 #7：每条带 url；无 url 不入库展示；评分带样本量
@@ -378,12 +418,15 @@ async function deepResearchOne(comp, state, config) {
 
   // ---- 合并：置信度由 deriveBasis 从引用证据推导，LLM 无权自评 ----
   const citedEvs = (cites) => (Array.isArray(cites) ? cites : []).map(id => evidences.find(e => e.id === id)).filter(Boolean);
+  const citeAudit = []; // verified 字段的引用复核清单：值必须真出自所引证据（见下方批量复核）
   const applyBasis = (obj, cites, fieldName) => {
     const evs = citedEvs(cites);
     const d = deriveBasis(evs);
-    obj.basis = evs.length ? d.basis : 'inferred';
+    obj.basis = evs.length ? d.basis : 'unverified'; // 无引用 = 未探测（对齐 deriveBasis 空值语义，纯猜测不再记为 inferred）
     obj.confidence = evs.length ? d.confidence : 'low';
     if (evs.length) comp.fieldSources[fieldName] = evs.map(e => ({ id: e.id, url: e.url, tier: e.tier, kind: e.kind, title: e.title }));
+    // verified 字段登记引用复核；{v:1} 占位对象仅用于取 basis（positioning/customization 等），不承载值，跳过
+    if (obj.basis === 'verified' && obj.v === undefined) citeAudit.push({ fieldName, obj, evs });
     return obj;
   };
   const fieldConfs = [];
@@ -556,6 +599,52 @@ async function deepResearchOne(comp, state, config) {
   // 优化五：LLM 语义召回层（第三层）——解析受控词过滤后的 demandAlignments
   comp.demandAlignments = Guard.parseDemandAlignments(j.demandAlignments, SELLING_POINTS);
   // 推算字段清单（自动生成，替代 LLM 自报）
+  // ---- 引用支持性复核：verified 字段的值必须真出自所引证据文本，否则降级 ----
+  // （此前 cite 只验"编号存在"，LLM 给猜测挂任意证据号即可升 verified/high）
+  try {
+    const audit = citeAudit.slice(0, 24); // 上限控 token，超出部分保持原判定
+    if (audit.length && dsKey) {
+      const items = audit.map((x, i) => {
+        const val = Object.assign({}, x.obj);
+        delete val.basis; delete val.confidence; delete val.cite; delete val.verifyNote;
+        return {
+          i,
+          field: x.fieldName,
+          value: JSON.stringify(val).slice(0, 400),
+          ev: x.evs.map(e => `[${e.id}] ${e.title}：${e.excerpt}`).join(' ').slice(0, 600),
+        };
+      });
+      const vr = await deepseekJSON([
+        { role: 'system', content: '你是审计员。逐条判断「字段值」是否被「所引证据文本」支持：值的核心内容能从证据文本直接读出才算支持；证据无关、证据里没有该信息、或与证据矛盾都算不支持。只输出 JSON：{"results":[{"i":编号,"supported":true或false}]}' },
+        { role: 'user', content: items.map(it => `#${it.i} 字段=${it.field}\n值=${it.value}\n证据=${it.ev}`).join('\n\n') },
+      ], dsKey, null, { fieldKey: 'cite-verify', competitorId: comp.id, thinking: false, maxAttempts: 2 });
+      const verdicts = new Map((Array.isArray(vr && vr.results) ? vr.results : []).map(v => [Number(v.i), v]));
+      let bad = 0;
+      audit.forEach((x, i) => {
+        const v = verdicts.get(i);
+        // 只有明确"不支持"才降级（字符串 'false' 同样采纳）；复核调用失败/降级返回 {} 时 fail-open
+        if (v && (v.supported === false || v.supported === 'false')) {
+          bad++;
+          // 渠道缺席沿用既有纪律：LLM 参与的"缺席"最多到未探测，不落到 inferred
+          const chanAbsent = x.fieldName.indexOf('channels.') === 0 && x.obj.present === false;
+          x.obj.basis = chanAbsent ? 'unverified' : 'inferred';
+          x.obj.confidence = 'low';
+          x.obj.verifyNote = '引用复核：所引证据未支持该值，已降级';
+        }
+      });
+      if (bad) logAttempt(comp, 'cite-verify', '', sProvider, false, `引用支持性复核：${bad}/${audit.length} 个 verified 字段因证据不支持降级`);
+      // 降级后按原 push 顺序重建 fieldConfs（渠道→价格带→口碑），让卡片置信度吃到复核结果
+      const rebuilt = [];
+      scopeChannels.forEach(k => {
+        if (codedChannels[k]) rebuilt.push(codedChannels[k].confidence);
+        else if (j.channels && j.channels[k]) rebuilt.push(ch[k].confidence);
+      });
+      if (comp.priceBand) rebuilt.push(comp.priceBand.confidence);
+      if (comp.reviews) rebuilt.push(comp.reviews.confidence);
+      fieldConfs.length = 0;
+      Array.prototype.push.apply(fieldConfs, rebuilt);
+    }
+  } catch (e) { /* 复核失败不阻断深研主链路（fail-open） */ }
   comp.inferred = [];
   if (comp.priceBand && comp.priceBand.basis !== 'verified') comp.inferred.push('价格带');
   if (comp.reviews && comp.reviews.basis !== 'verified') comp.inferred.push('口碑');
@@ -590,6 +679,7 @@ async function deepResearchOne(comp, state, config) {
     const _cursorAll = state.projectId ? voiceStore.loadCursor(state.tenantId, state.projectId) : {};
     const _since = _cursorAll[comp.id] || null;
     const voiceRaw = await VC.collectBrandVoice(comp.name, {
+      config, // 密钥型适配器（Trustpilot/Etsy/YouTube）从 config 取 key，漏传 = 全部按未配置处理
       maxItems: 30,
       since: _since,
       adapterOpts: { siteUrl: comp.url || '' },

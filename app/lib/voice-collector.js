@@ -61,13 +61,15 @@ function coerceVoiceItem(raw) {
   if (!raw || !raw.platform) return null;
   const sentiment = SENTIMENTS.has(raw.sentiment) ? raw.sentiment : 'neu';
   const iso = toISO(raw.date);
-  if (!iso) return null; // 无时间不可增量去重，丢弃（fail-safe）
+  // 无时间（独立站评论页等抽不到可靠日期）：保留条目并标 undated，不再整条丢弃——
+  // 去重走 URL/作者+文本，与日期无关；增量窗口对 undated 恒通过；游标推进只认有日期条目。
   return {
     platform: String(raw.platform),
     url: String(raw.url || '').slice(0, 2048),
     text: String(raw.text || '').trim().slice(0, 2000),
     author: anonymizeAuthor(raw.author),
     date: iso,
+    undated: !iso,
     sentiment,
     tier: (raw.tier === 1 || raw.tier === 2) ? raw.tier : 2
   };
@@ -124,12 +126,13 @@ class BaseVoiceAdapter {
     return out;
   }
 
-  // 增量过滤：date >= since（ISO 或 epoch ms），游标续传由子类实现
+  // 增量过滤：date >= since（ISO 或 epoch ms），游标续传由子类实现。
+  // undated 条目（抽不到可靠日期的源）无法归窗，恒通过——由 URL/作者+文本去重防重复。
   _afterSince(items, since) {
     if (!since) return items;
     const t = typeof since === 'number' ? (since < 1e12 ? since * 1000 : since) : new Date(since).getTime();
     if (isNaN(t)) return items;
-    return items.filter(it => new Date(it.date).getTime() >= t);
+    return items.filter(it => it.undated || new Date(it.date).getTime() >= t);
   }
 
   // 默认取数：单页即止（无 key 源可直接用；多步源重写本方法）

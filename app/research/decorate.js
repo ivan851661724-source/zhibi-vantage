@@ -94,8 +94,9 @@ function decorateState(s) {
       }
     });
   });
-  // S1-① 主推产品推理（两信号：verified=准 / inferred=推，禁空）——挂在每个对手上，情报库/卡片墙引用
-  s.competitors.forEach(c => { c.heroProduct = HeroProduct.heroProductInfer(c); });
+  // S1-① 主推产品推理（两信号：verified=准 / inferred=推，禁空）——挂在每个对手上，情报库/卡片墙引用。
+  // 传赛道词做主推候选锚定（OXO 实证：大牌 heroSku 混入赛道外产品时须按赛道词排前）
+  s.competitors.forEach(c => { c.heroProduct = HeroProduct.heroProductInfer(c, s.track); });
   // S1-② 雷达变化检测 + 群体异动（群体异动进战略信号条；每对手最近动作挂 recentActions）
   s.radar = Radar.computeRadar(_aggComps, { excluded: s.excluded || [] });
   s.competitors.forEach(c => {

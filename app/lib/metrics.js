@@ -324,8 +324,11 @@ function computeCalibration(snapshots, calibrations, now, windowDays) {
 // 抽检协议：每维度每周随机抽 ≥30 条，双人独立标注（correct 布尔），产出各维度/各来源通道滚动准确率。
 // 空白推理 input 门禁：一条 gap 可展示为 opportunity ⟺ confidenceNum≥40 ∧ 其依赖维度的滚动准确率≥红线。
 //   未达标的维度只「退出空白推理」（该维 gap 降为未探测区域展示），不阻塞整体上线。
-//   无数据（尚无抽检）→ fail-open（不降级），避免冷启动误杀。
+//   无数据/样本不足 → 同样退出（accuracyUnverified）：门禁必须在「有数据且差」和「没数据」两种
+//   情况下都不放行，否则零抽检的冷启动维度永远以高可信示人（2026-10-02 修订，v2 报告 P0-A#4）。
 // 输入字段红线 ≥90%、展示字段红线 ≥80%（gap 是展示产物，按 80% 门禁；机制同构）。
+// 门禁最少已评估样本数：低于此值视为「样本不足」而非「达标」。
+const ACC_GATE_MIN_SAMPLES = 5;
 // ============================================================
 // 准确率样本的「来源通道」取值集合。
 // 既包含种子来源通道（shopify-scrape/official，由 seedChannelOf 注入），
@@ -372,7 +375,14 @@ function recomputeAccuracySummary(capDays) {
   const samples = readArr(accSamplesFile()).filter(s => new Date(s.at).getTime() >= cutoff);
   const byDim = {}, byCh = {}, byErr = {}, byLayer = {};
   for (const s of samples) {
-    const d = byDim[s.dimension] || (byDim[s.dimension] = { n: 0, correct: 0 });
+    // 未评估样本（seed-pending：correct 非布尔）不进准确率分母，只记 pending 数——
+    // 「存在 tier1 来源」不等于「抽取正确」，不能冒充已标注
+    if (s.correct !== true && s.correct !== false) {
+      const p = byDim[s.dimension] || (byDim[s.dimension] = { n: 0, correct: 0, pending: 0 });
+      p.pending++;
+      continue;
+    }
+    const d = byDim[s.dimension] || (byDim[s.dimension] = { n: 0, correct: 0, pending: 0 });
     d.n++; if (s.correct) d.correct++;
     if (s.channel) { const c = byCh[s.channel] || (byCh[s.channel] = { n: 0, correct: 0 }); c.n++; if (s.correct) c.correct++; }
     if (s.errorType) { const e = byErr[s.errorType] || (byErr[s.errorType] = { n: 0, correct: 0 }); e.n++; if (s.correct) e.correct++; } // #1：按错误类型聚类
@@ -380,7 +390,7 @@ function recomputeAccuracySummary(capDays) {
   }
   const accOf = o => o.n ? Math.round((o.correct / o.n) * 1000) / 1000 : null;
   const sum = { byDimension: {}, byChannel: {}, byErrorType: {}, byLayer: {}, updatedAt: new Date().toISOString(), windowDays: capDays };
-  for (const k in byDim) sum.byDimension[k] = { accuracy: accOf(byDim[k]), n: byDim[k].n };
+  for (const k in byDim) sum.byDimension[k] = { accuracy: accOf(byDim[k]), n: byDim[k].n, pending: byDim[k].pending || 0 };
   for (const k in byCh) sum.byChannel[k] = { accuracy: accOf(byCh[k]), n: byCh[k].n };
   for (const k in byErr) sum.byErrorType[k] = { accuracy: accOf(byErr[k]), n: byErr[k].n };
   for (const k in byLayer) sum.byLayer[k] = { accuracy: accOf(byLayer[k]), n: byLayer[k].n };
@@ -394,9 +404,13 @@ function loadAccuracySummary() {
   } catch { return { byDimension: {}, byChannel: {} }; }
 }
 // input 门禁：依赖维度抽取准确率不足 → 该维空白推理退出（降为未探测区域，附免责声明）
+// 2026-10-02 修订（v2 报告 P0-A#4）：无数据维度不再 fail-open 默认放行——
+// 零抽检/样本不足的维度同样退出空白推理，标 accuracyUnverified（区别于 accuracyInsufficient），
+// 积累到足量已评估样本后自动恢复。否则门禁只在「有数据且差」时生效，「没数据」永远放行。
 function applyAccuracyGate(gaps, summary, opts) {
   opts = opts || {};
   const redline = (opts.displayRedline != null) ? opts.displayRedline : 0.8; // 展示字段红线 80%
+  const minSamples = (opts.minSamples != null) ? opts.minSamples : ACC_GATE_MIN_SAMPLES;
   const byDim = (summary && summary.byDimension) || {};
   if (!Array.isArray(gaps)) return gaps;
   for (const g of gaps) {
@@ -409,6 +423,17 @@ function applyAccuracyGate(gaps, summary, opts) {
       g.accuracyInsufficient = true;
       g.note = (g.note || '') + `（字段抽取准确率不足：维度「${g.dim}」历史抽检准确率 ${(a.accuracy * 100).toFixed(0)}% < 红线 ${(redline * 100).toFixed(0)}%，空白推理退出，仅作未探测区域展示）`;
       if (!g.disclaimer) g.disclaimer = DISCLAIMER;
+      continue;
+    }
+    const evaluated = (a && a.n) || 0;
+    if (!a || a.accuracy == null || evaluated < minSamples) {
+      g.confidence = 'low';
+      g.confidenceNum = 30;
+      g.basis = 'unverified';
+      g.level = 'undetected';
+      g.accuracyUnverified = true;
+      g.note = (g.note || '') + `（该维度抽检样本不足或尚未评估：已评估 ${evaluated} 条 < ${minSamples}${a && a.pending ? `，另有 ${a.pending} 条待标注` : ''}，空白推理暂不作为高可信机会展示）`;
+      if (!g.disclaimer) g.disclaimer = DISCLAIMER;
     }
   }
   return gaps;
@@ -416,13 +441,14 @@ function applyAccuracyGate(gaps, summary, opts) {
 
 // ============================================================
 // P1-7 · A2：金标集种子（从既有真实证据 fieldSources 抽取）
-// 把 competitors[].fieldSources[key] 中 **tier===1** 的真实来源抽为准确率抽检样本，
-// 使 P0-4 的 applyAccuracyGate 不再「空转 fail-open」，而是有数据可算（冷启动默认 pass，随 C 回流纠错收紧）。
-// 仅 seed tier-1（verified / official / shopify 真实来源）：tier-2（llm-band 等推断来源）跳过——
-// 若 tier-2 来源本身抽错（正是「数据源不准」根源场景），把它当 correct=true 基线会虚高准确率、放行门禁，
-// 与「防错不依赖用户纠错」策略冲突。纠正 tier-2 错误交给 C 回流（用户纠错）逐步校准，而非种子假装正确。
+// 把 competitors[].fieldSources[key] 中 **tier===1** 的真实来源登记为「待评估」抽检样本。
+// 2026-10-02 修订（v2 报告 P0-A#4）：不再写 correct=true 的 seed-auto 样本——
+// 「存在 tier1 来源」只证明来源真实，不证明字段抽取正确；用它冒充人工标注会把准确率
+// 冷启动成 100%、令 applyAccuracyGate 的 80% 红线形同虚设。现在样本以 correct=null、
+// judge='seed-pending' 入库：不进准确率分母（recomputeAccuracySummary 跳过），
+// 只让门禁看到 pending 体量；维度要过红线必须积累真实人工/独立抽检标注。
+// 仅登记 tier-1（verified / official / shopify 真实来源）；tier-2 来源连登记都不参与。
 // 幂等：同 (fieldKey|evidenceId) 已存在则跳过，可重复运行不重复注入。
-// 种子默认 correct=true（tier-1 真实来源即确认该字段抽取正确），judge='seed-auto' 与人工标注区分。
 // ============================================================
 const ACC_SEED_CHANNEL = { 1: 'official', 2: 'llm-band' };
 function dimensionOfFieldKey(key) {
@@ -460,7 +486,6 @@ function seedAccuracyFromFieldSources(state, opts) {
         const dedup = (c.id || 'x') + '|' + key + '|' + evId; // 证据 id 按竞品命名空间隔离
         if (seen.has(dedup)) { skipped++; continue; }
         seen.add(dedup);
-        const title = String(e.title || e.kind || '来源').slice(0, 200);
         out.push({
           id: 'seed-' + dim + '-' + evId + '-' + (c.id || 'x'),
           at,
@@ -469,10 +494,10 @@ function seedAccuracyFromFieldSources(state, opts) {
           evidenceId: evId,
           competitorId: c.id || null,
           channel: seedChannelOf(e.tier, e.kind),
-          algoValue: title,
-          humanValue: title,
-          correct: true,
-          judge: 'seed-auto'
+          algoValue: '',
+          humanValue: '',
+          correct: null,          // 未评估：待人工/独立抽检标注，不冒充已核验
+          judge: 'seed-pending'
         });
       }
     }
@@ -574,5 +599,5 @@ module.exports = {
   seedAccuracyFromFieldSources, dimensionOfFieldKey,
   readAccuracySamples, upsertAccuracySample, correctionToAccuracySample, deleteAccuracySample, mapErrorLayer,
   // 常量（供测试/调用方复用）
-  CONSUME_ACTIONS, VERDICTS, ACC_CHANNELS, DISCLAIMER, DAY
+  CONSUME_ACTIONS, VERDICTS, ACC_CHANNELS, DISCLAIMER, DAY, ACC_GATE_MIN_SAMPLES
 };

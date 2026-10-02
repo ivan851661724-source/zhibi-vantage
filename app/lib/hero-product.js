@@ -132,10 +132,26 @@ function coreBand(c) {
   };
 }
 
+// 赛道锚定（OXO 实证修复）：主推候选按赛道关键词命中排序——
+// 大牌（如 OXO）的官网置顶/heroSku 可能混入赛道外产品（拌菜器），
+// 与赛道词（如 cold brew coffee maker）相关的 SKU 必须排前；无命中时保持原序（禁空纪律不剔除）。
+function trackKeywords(track) {
+  const t = String(track || '').toLowerCase();
+  if (!t) return [];
+  const words = t.split(/[^a-z0-9\u4e00-\u9fff]+/).filter(w => w.length >= 3 || /[\u4e00-\u9fff]/.test(w));
+  return Array.from(new Set(words));
+}
+function trackRelevance(name, kws) {
+  const s = String(name || '').toLowerCase();
+  if (!s || !kws.length) return 0;
+  return kws.filter(k => s.includes(k)).length;
+}
+
 // 主推产品推理（单对手）
-function heroProductInfer(competitor) {
+function heroProductInfer(competitor, track) {
   const c = competitor || {};
   const name = c.name || '该品牌';
+  const kws = trackKeywords(track != null ? track : c.track);
 
   const ad = extractAdSkus(c);
   const hero = extractHeroSkus(c);
@@ -155,6 +171,9 @@ function heroProductInfer(competitor) {
   const candidates = [];
   ad.forEach(s => candidates.push({ name: s, signal: 'ad', basis: 'inferred' }));
   hero.forEach(s => candidates.push({ name: s, signal: 'hero', basis: 'verified' }));
+  if (candidates.length > 1 && kws.length) {
+    candidates.sort((a, b) => trackRelevance(b.name, kws) - trackRelevance(a.name, kws)); // 稳定排序：同分保持原序
+  }
 
   let heroProducts = [];
   let kind = 'inferred';
@@ -200,7 +219,7 @@ function computeHeroProducts(competitors, opts) {
   const excluded = (opts && opts.excluded) || [];
   return (competitors || [])
     .filter(c => c && !excluded.includes(c.id))
-    .map(c => heroProductInfer(c));
+    .map(c => heroProductInfer(c, opts && opts.track));
 }
 
 module.exports = { heroProductInfer, computeHeroProducts, extractAdSkus, extractHeroSkus, reviewSignal, promoSignal, launchSignal, coreBand };

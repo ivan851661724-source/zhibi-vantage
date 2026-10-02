@@ -75,6 +75,8 @@ async function main() {
     if (last.failed) break;
   }
   done = true;
+  // 修复：SSE 流由服务端保活，reader 不主动取消则 read() 永久挂起、进程不退出
+  try { await reader.cancel(); } catch {}
   await sseTask.catch(() => {});
 
   console.log('⑤ 最终结果 →', JSON.stringify({

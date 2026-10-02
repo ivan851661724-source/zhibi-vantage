@@ -187,7 +187,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
       })
     : Promise.resolve();
   const enumP = llmEnumerate(track, intent, dsKey).then(v => { _stage('llmEnumerate-done'); return v; });
-  await Promise.all([translateP, enumP]);
+  await translateP;
   _stage('translate');
   // 承接上一轮的学习信号（用户反馈）：按名字×赛道记的 suppressed / 用户补的对手，跨次 discover 保留
   const prevState = loadState() || {};
@@ -195,11 +195,13 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const carryAdded = Array.isArray(prevState.addedCompetitors) ? prevState.addedCompetitors : [];
   const carryRules = prevState.ruleDecisions && typeof prevState.ruleDecisions === 'object' ? prevState.ruleDecisions : {};
 
-  // SERP 扇出（依赖翻译结果构造查询；与枚举已并行，这里单独跑）
+  // SERP 扇出只依赖翻译结果构造查询：翻译完成即启动，与枚举重叠——
+  // 枚举结果到第二轮候选验证才需要，不让 90s 级的枚举挡住 15s 级的搜索
   const queries = buildFanoutQueries(trackWork, intent);
-
-  const fanout = await fanoutSearch(queries, config, gl).then(v => { _stage('fanout-done'); return v; });
+  const fanoutP = fanoutSearch(queries, config, gl).then(v => { _stage('fanout-done'); return v; });
+  fanoutP.catch(() => {}); // enumP 先失败时避免 fanout 成为未处理的 rejection
   const llmCands = await enumP;
+  const fanout = await fanoutP;
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'enumerating', label: '已枚举候选品牌，正在全网搜索…', pct: 15, found: llmCands.length });
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'searching', label: '正在多维度搜索对手（覆盖各体量）…', pct: 30, found: fanout.length });
   _stage('round1（total ' + ((Date.now() - _tR1) / 1000).toFixed(1) + 's）');

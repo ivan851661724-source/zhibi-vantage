@@ -1,7 +1,7 @@
 'use strict';
 // §7 红线 2「不编数据」单测：单源永不查证 / 无引用强制降级 / 报告删编造句与裸句
 const assert = require('node:assert');
-const { deriveBasis } = require('../research/evidence.js');
+const { deriveBasis, sourceTier } = require('../research/evidence.js');
 const SourceFusion = require('../lib/source-fusion.js');
 const FC = require('../lib/field-confidence.js');
 const { validateReport } = require('../research/report.js');
@@ -37,6 +37,20 @@ t('deriveBasis：tier1 官方来源 → verified/high', () => {
   const d = deriveBasis([{ tier: 1, url: 'https://brand.com' }]);
   assert.equal(d.basis, 'verified');
   assert.equal(d.confidence, 'high');
+});
+
+t('sourceTier：中文平台店铺页与英文平台同权为 tier1（渠道证据可到 verified）', () => {
+  assert.equal(sourceTier('https://www.xiaohongshu.com/user/profile/abc123', ''), 1);
+  assert.equal(sourceTier('https://brand.tmall.com/shop/view.htm', ''), 1);
+  assert.equal(sourceTier('https://shop123.taobao.com', ''), 1);
+  assert.equal(sourceTier('https://mall.jd.com/index-888.html', ''), 1);
+});
+
+t('sourceTier：京东非店铺域（www 子域/裸域）不升级 tier1，未列名域名维持默认二级', () => {
+  assert.equal(sourceTier('https://www.jd.com/news/1', ''), 2);
+  assert.equal(sourceTier('https://jd.com', ''), 2);
+  assert.equal(sourceTier('https://ordinary.example/article', ''), 2); // 未知名默认二级（不因中文白名单缺失而降级）
+  assert.equal(sourceTier('https://www.pinterest.com/pin/1', ''), 3);  // SEO 聚合仍不入库
 });
 
 t('source-fusion：单源 basis 永不 verified', () => {

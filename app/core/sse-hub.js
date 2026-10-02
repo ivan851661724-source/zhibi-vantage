@@ -9,6 +9,18 @@
 // ============================================================
 const { getTenantCtx } = require('./als.js');
 
+// 租户通道键统一归一：emitSSE 携带的 tenantId（state-store.resolveTenantId，已 sanitize，
+// 'tenant_8cf0…'）与 /api/stream 连接注册的 tid（ALS RAW，'tenant:8cf0…'）必须落进同一个桶——
+// 此前两侧键格式不一致（冒号 vs 下划线），scoped 业务事件全部投进无人订阅的桶（实证：前端
+// 进度只能靠轮询兜底，冒烟脚本 SSE 断言恒空）。
+// ⚠️ 此处必须内联实现、不能 require state-store：server.js 经 research/discover.js 加载本模块时
+// 存在加载环（state-store 完成时会整体替换 module.exports，环内捕获到的引用永远是空对象），
+// 解构和延迟属性访问都已实证失败。逻辑与 state-store.sanitizeNs 逐字一致，由 sse-hub.test.js 锁定行为一致。
+function normTid(tid) {
+  if (!tid) return tid;
+  return String(tid).replace(/[^a-z0-9_-]/gi, '_').slice(0, 64) || '_legacy';
+}
+
 // 每租户最大 SSE 连接数（防 FD/内存耗尽；超出返回 false 由调用方回 503）
 const MAX_CLIENTS_PER_TENANT = 5;
 // 每项目回放事件上限（防内存无界；新连客户端回放最近发现事件，消除 discover_error 错过竞态）
@@ -39,7 +51,7 @@ function broadcastChange() {
 // tenantId 解析顺序：payload.tenantId（后台队列显式带上）> 请求上下文 ALS。
 function emitSSE(type, payload) {
   const data = Object.assign({}, payload || {});
-  const tid = data.tenantId || getTenantCtx() || null;
+  const tid = normTid(data.tenantId || getTenantCtx());
   if (SCOPED_TYPES.has(type)) {
     const pid = data.projectId || (tid ? lastProjectByTenant.get(tid) : null);
     if (tid && pid) {
@@ -67,15 +79,16 @@ function emitSSE(type, payload) {
 // 建立 SSE 连接（res 已写好响应头）。tid 为该连接所属租户（调用方从鉴权态解出）。
 // 返回 cleanup 函数；超出租户连接上限时返回 null（调用方回 503）。
 function connect(res, tid) {
-  const set = clientsOf(tid);
+  const tidN = normTid(tid);
+  const set = clientsOf(tidN);
   if (set.size >= MAX_CLIENTS_PER_TENANT) return null;
   set.add(res);
   res.write('retry: 3000\n\n');
   res.write(': connected\n\n');
   // 回放本租户最近一次发现的事件（晚连不错过 discover_error 等）
   try {
-    const pid = lastProjectByTenant.get(tid);
-    const buf = pid && replay.get(tid) && replay.get(tid).get(pid);
+    const pid = lastProjectByTenant.get(tidN);
+    const buf = pid && replay.get(tidN) && replay.get(tidN).get(pid);
     if (buf && buf.length) {
       for (const ev of buf) {
         const wire = Object.assign({}, ev.payload || {});
@@ -90,8 +103,8 @@ function connect(res, tid) {
     if (done) return;
     done = true;
     clearInterval(ping);
-    const s = clients.get(tid);
-    if (s) { s.delete(res); if (!s.size) clients.delete(tid); }
+    const s = clients.get(tidN);
+    if (s) { s.delete(res); if (!s.size) clients.delete(tidN); }
   };
 }
 

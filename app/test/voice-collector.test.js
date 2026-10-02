@@ -55,5 +55,32 @@ t('collectBrandVoice：单平台异常不影响其他平台（失败静默）', 
   assert.ok(Array.isArray(items));
 });
 
+t('coerceVoiceItem：无日期条目保留并标 undated（不再整条丢弃）', () => {
+  // 独立站评论页抽不到可靠日期：此前 date:null 被 coerce 拒收，site 适配器整条产不出数据
+  const it = VC.coerceVoiceItem({ platform: 'site', url: 'https://brand.com/reviews', text: 'great product overall value', author: 'anon', date: null, sentiment: 'pos', tier: 2 });
+  assert.ok(it, '条目应保留');
+  assert.equal(it.date, null);
+  assert.equal(it.undated, true);
+});
+
+t('coerceVoiceItem：有日期条目 undated=false', () => {
+  const it = VC.coerceVoiceItem({ platform: 'reddit', text: 'solid quality', date: '2026-09-01T00:00:00Z' });
+  assert.equal(it.undated, false);
+  assert.ok(it.date);
+});
+
+t('_afterSince：undated 恒通过增量窗口，过期有日期条目被过滤', () => {
+  const ad = Object.create(VC.BaseVoiceAdapter.prototype);
+  const items = [
+    { text: 'undated one', date: null, undated: true },
+    { text: 'old dated', date: '2026-01-01T00:00:00Z' },
+    { text: 'new dated', date: '2026-09-20T00:00:00Z' },
+  ];
+  const out = ad._afterSince(items, '2026-09-01T00:00:00Z');
+  assert.equal(out.length, 2);
+  assert.ok(out.some(i => i.text === 'undated one'));
+  assert.ok(out.some(i => i.text === 'new dated'));
+});
+
 console.log('\n=== voice-collector.test: ' + passed + ' passed, ' + failed + ' failed ===');
 process.exit(failed ? 1 : 0);
