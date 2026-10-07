@@ -241,6 +241,7 @@ function recordEvidence(input) {
       brand_hint: input.brandHint || null,
     },
     entity_ref: input.entity_ref || null,   // 来源原生标识（product/variant/handle/domain），不造 Canonical 语义
+    entity_key: input.entity_key == null ? null : String(input.entity_key), // 实体定位键（已参与幂等身份；M0-03/04 分组比较必需，补持久化）
     source: input.source || null,           // 00 §1.5（如 'shopify'）
     provider: input.provider || null,
     source_snapshot_ids: snapshotIds,
