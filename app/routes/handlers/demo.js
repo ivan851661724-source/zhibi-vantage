@@ -124,17 +124,23 @@ async function aiInterpretation(ctx, req, res, url, p) {
     try { return ctx.sendJSON(res, 200, Object.assign(JSON.parse(fs.readFileSync(insightPath, 'utf8')), { cached: true })); } catch (e) {}
   }
 
-  // LLM 配置（优先级与网关一致：平台配置 cfg.llm > 环境变量 > 内置默认）。
+  // LLM 配置解析（P0-2）：复用 research/llm.js 既有解析语义（单一口径，不另立政策）：
+  //   key：cfg.llm.apiKey > env LLM_API_KEY（llmApiKey）
+  //   model：显式 > cfg.llm.model > 网关默认（resolveModel，含 legacy 模型名迁移）
+  //   端点：resolveBaseUrl——配置里只有「真自定义」接入点才生效（legacy DeepSeek 默认
+  //   地址视为未设置，不压制 env 显式配置的百炼端点）；'' 表示走网关默认（env LLM_BASE_URL > 内置）。
+  //   key 与 baseUrl 同源：空 config key + env 百炼 key 绝不会误配到 legacy DeepSeek 端点。
   // 未配置 key → 诚实 503，绝不返回假解读。
-  const cfg = ctx.loadConfig ? ctx.loadConfig() : {};
-  const llmCfg = (cfg && cfg.llm) || {};
-  const { normalizeBaseUrl, DEFAULT_MODEL } = require('../../services/llm-gateway.js');
-  const apiKey = String(llmCfg.apiKey || process.env.LLM_API_KEY || '').trim();
-  if (!apiKey) return ctx.sendJSON(res, 503, { error: 'LLM_NOT_CONFIGURED', message: 'LLM 未配置（平台设置 llm.apiKey 或环境变量 LLM_API_KEY）。Demo 不伪造 AI 解读。' });
-  const model = String(llmCfg.model || process.env.LLM_MODEL || DEFAULT_MODEL);
-  const baseUrl = normalizeBaseUrl(llmCfg.baseUrl || process.env.LLM_BASE_URL || '');
-
+  const cfg = (ctx.loadConfig ? ctx.loadConfig() : {}) || {};
+  const RLLM = require('../../research/llm.js');
   const LLM = require('../../services/llm-gateway.js');
+  const apiKey = String(RLLM.llmApiKey(cfg) || '').trim();
+  if (!apiKey) return ctx.sendJSON(res, 503, { error: 'LLM_NOT_CONFIGURED', message: 'LLM 未配置（平台设置 llm.apiKey 或环境变量 LLM_API_KEY）。Demo 不伪造 AI 解读。' });
+  const model = RLLM.resolveModel((cfg.llm && cfg.llm.model) || null);
+  const baseUrl = RLLM.resolveBaseUrl(apiKey, null);
+  // 汇报实际端点（§七 必录）：baseUrl 为空时网关用默认端点，这里如实还原，绝不上报空 URL。
+  const endpointUsed = LLM.normalizeBaseUrl(baseUrl) || LLM.DEFAULT_BASE_URL;
+
   const factPayload = {
     event_type: event.event_type,
     competitor_brand: (event.entity_ref && event.entity_ref.brand_name) || null,
@@ -167,7 +173,7 @@ async function aiInterpretation(ctx, req, res, url, p) {
     insight: text,
     model,                                   // 实际模型标识（§七 必录）
     endpoint_kind: 'openai_compatible',      // 端点类型（§七 必录）
-    endpoint_base_url: baseUrl,              // 完整端点（无凭据，可核验）
+    endpoint_base_url: endpointUsed,         // 实际完整端点（无凭据，可核验；绝不为空）
     purpose: 'DomainEvent -> AI Insight（价格变化业务解读）',
     created_at: new Date().toISOString(),
     cached: false,

@@ -168,4 +168,4 @@ async function call(messages, opts) {
   return o.json ? {} : '';
 }
 
-module.exports = { call, normalizeBaseUrl, TIMEOUT_MS, MAX_ATTEMPTS, BREAK_THRESHOLD, BREAK_MS, DEFAULT_MODEL };
+module.exports = { call, normalizeBaseUrl, TIMEOUT_MS, MAX_ATTEMPTS, BREAK_THRESHOLD, BREAK_MS, DEFAULT_MODEL, DEFAULT_BASE_URL };

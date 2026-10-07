@@ -92,6 +92,57 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     passed++; console.log('ok - 5. demo-fixture zero network / zero LLM');
   } catch (e) { failed++; console.error('FAIL - 5. fixture static: ' + String(e.message || e).split('\n')[0]); }
 
+  // ============ 6. P0-2 端点解析（用户点名场景）：config 空 key + legacy DeepSeek 默认 baseUrl
+  //                 不得压制 env 显式百炼端点 —— Demo AI 必须用/汇报百炼，而非 DeepSeek ============
+  try {
+    // 隔离环境：temp CONFIG_PATH 写入 legacy 配置（空 key + DeepSeek 默认端点）
+    const Paths = require('../core/paths.js');
+    fs.writeFileSync(Paths.CONFIG_PATH, JSON.stringify({ llm: { apiKey: '', baseUrl: 'https://api.deepseek.com/v1' } }));
+    process.env.LLM_API_KEY = 'env-bailian-key-for-test';
+    process.env.LLM_BASE_URL = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    process.env.LLM_MODEL = 'qwen-test-model';
+    // 重载解析链，让 llm-gateway 以当前 env 重算默认端点（与生产「env 先于进程启动」语义一致）
+    delete require.cache[require.resolve('../services/llm-gateway.js')];
+    delete require.cache[require.resolve('../research/llm.js')];
+    delete require.cache[require.resolve('../routes/handlers/demo.js')];
+    const H = require('../routes/handlers/demo.js');
+    const LLM = require('../services/llm-gateway.js');
+    let captured = null;
+    LLM.call = async (msgs, opts) => { captured = opts; return '测试解读：价格下降，建议关注。'; };
+    const als = require('../core/als.js');
+    const Config = require('../core/config.js');
+    const sent6 = [];
+    const ctx6 = { sendJSON: (res, code, obj) => { sent6.push({ code, obj }); return obj; }, loadConfig: () => Config.loadConfig() };
+    const evt6 = Events.listEvents(TA)[0];
+    await als.requestScope.run(TA, async () => {
+      await H.aiInterpretation(ctx6, { method: 'POST' }, {}, new URL('http://x/api/demo/ai-interpretation?id=' + evt6.event_id), '/api/demo/ai-interpretation');
+    });
+    assert.equal(sent6[sent6.length - 1].code, 200, 'handler should succeed: ' + JSON.stringify(sent6[sent6.length - 1].obj));
+    const body6 = sent6[sent6.length - 1].obj;
+    assert.ok(captured, 'gateway must be invoked');
+    assert.equal(captured.apiKey, 'env-bailian-key-for-test');            // env key（config key 为空）
+    assert.equal(captured.model, 'qwen-test-model');                      // env 百炼模型
+    assert.ok(String(body6.endpoint_base_url).startsWith('https://token-plan.cn-beijing.maas.aliyuncs.com/'),
+      'must report Bailian endpoint, got: ' + body6.endpoint_base_url);
+    assert.equal(/deepseek/i.test(body6.endpoint_base_url), false, 'legacy DeepSeek config must NOT suppress env Bailian endpoint');
+    assert.equal(body6.model, 'qwen-test-model');
+    assert.ok(body6.endpoint_base_url.length > 0, 'endpoint_base_url never empty');
+    assert.equal(JSON.stringify(body6).includes('env-bailian-key-for-test'), false, 'API key must never leak into response');
+    passed++; console.log('ok - 6. P0-2 resolution: env Bailian key+endpoint wins over legacy DeepSeek config baseUrl');
+  } catch (e) { failed++; console.error('FAIL - 6. P0-2 resolution: ' + String(e.message || e).split('\n')[0]); }
+
+  // ============ 7. P0-1 前端诚实币种：fmtMoney 无 '$' 兜底；null 币种就近标注「币种未确认」 ============
+  try {
+    const pageSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'app', '(panel)', 'demo', 'page.tsx'), 'utf8');
+    const fmtBlock = pageSrc.slice(pageSrc.indexOf('function fmtMoney'), pageSrc.indexOf('function fmtTime'));
+    assert.equal(fmtBlock.includes("'$'"), false, 'fmtMoney must NOT fabricate "$" when currency is null');
+    assert.ok(pageSrc.includes('币种未确认'), 'null currency must be labeled 币种未确认');
+    // recent-change 卡片与 Event Detail 两处价格渲染都要挂标注
+    const labels = (pageSrc.match(/币种未确认/g) || []).length;
+    assert.ok(labels >= 2, 'both recent-change card and Event Detail must label unknown currency (found ' + labels + ')');
+    passed++; console.log('ok - 7. P0-1 UI honesty: no fabricated "$", null currency labeled');
+  } catch (e) { failed++; console.error('FAIL - 7. P0-1 UI: ' + String(e.message || e).split('\n')[0]); }
+
   console.log('\ndemo-fixture.test: ' + passed + ' passed, ' + failed + ' failed');
   if (failed > 0) process.exit(1);
 })();

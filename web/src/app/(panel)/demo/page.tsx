@@ -8,6 +8,7 @@
 //   ai-interpretation）；AI 解读标注实际模型与端点；场景标记 Demo / Sample Data。
 // ============================================================
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { apiGet, apiPost } from '@/lib/api';
 
 type RecentResp = {
@@ -34,9 +35,11 @@ type EventDetail = {
 };
 type EvidenceDetail = { evidence: Record<string, unknown>; snapshots: Array<Record<string, unknown>> };
 
+// P0-1 诚实币种渲染：currency 为 null（products.json 快照未证明币种）时绝不伪造 '$'，
+// 只显示数字本身，并由调用方就近标注「币种未确认」；仅当快照携带真实币种时才显示。
 function fmtMoney(n: number | null, cur: string | null) {
   if (n == null) return '—';
-  return (cur ? cur + ' ' : '$') + n;
+  return cur ? cur + ' ' + n : String(n);
 }
 function fmtTime(iso: string | null) {
   if (!iso) return '—';
@@ -101,6 +104,7 @@ export default function DemoPage() {
         .demo-price-old { text-decoration: line-through; color: #9ca3af; font-size: 15px; }
         .demo-price-new { color: #d92d20; font-size: 26px; font-weight: 700; margin: 0 8px; }
         .demo-pct { color: #d92d20; font-weight: 700; }
+        .demo-cur-note { color: #9ca3af; font-size: 11px; border: 1px dashed #d1d5db; border-radius: 4px; padding: 0 6px; }
         .demo-kv { font-size: 12.5px; color: #555; margin: 2px 0; }
         .demo-kv b { color: #111; }
         .demo-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 60; }
@@ -143,6 +147,7 @@ export default function DemoPage() {
                 <span className="demo-price-old">{fmtMoney(ev.old_price, ev.currency)}</span>
                 <span>→</span>
                 <span className="demo-price-new">{fmtMoney(ev.new_price, ev.currency)}</span>
+                {!ev.currency && <span className="demo-cur-note">币种未确认</span>}
                 {ev.direction === 'decrease' && <span className="demo-pct">↓ {Math.abs(ev.pct ?? 0).toFixed(1)}%</span>}
                 {ev.direction === 'increase' && <span className="demo-pct" style={{ color: '#b26500' }}>↑ {Math.abs(ev.pct ?? 0).toFixed(1)}%</span>}
               </div>
@@ -169,7 +174,7 @@ export default function DemoPage() {
       <div className="demo-card demo-kv">
         输入自己的品牌 / 商品关键词 / 类目 / 目标市场，系统自动发现潜在竞争品牌（品牌名 · 官网 · 定位 · 为什么是竞品 · 一键关注）。
         <div style={{ marginTop: 8 }}>
-          <a className="demo-btn" style={{ textDecoration: 'none', display: 'inline-block' }} href="/">前往工作台·帮我找对手 →</a>
+          <Link className="demo-btn" style={{ textDecoration: 'none', display: 'inline-block' }} href="/">前往工作台·帮我找对手 →</Link>
         </div>
       </div>
 
@@ -178,7 +183,7 @@ export default function DemoPage() {
       <div className="demo-card demo-kv">
         统一档案：品牌定位 · 商品列表 · 价格区间 · 最近变化 · Evidence 来源入口。无可靠数据的模块自动隐藏，不伪造采集结果。
         <div style={{ marginTop: 8 }}>
-          <a className="demo-btn" style={{ textDecoration: 'none', display: 'inline-block' }} href="/intel">打开竞品档案 →</a>
+          <Link className="demo-btn" style={{ textDecoration: 'none', display: 'inline-block' }} href="/intel">打开竞品档案 →</Link>
         </div>
       </div>
 
@@ -192,6 +197,7 @@ export default function DemoPage() {
               <span className="demo-price-old">{fmtMoney(detail.event.old_price, detail.event.currency)}</span>
               <span>→</span>
               <span className="demo-price-new">{fmtMoney(detail.event.new_price, detail.event.currency)}</span>
+              {!detail.event.currency && <span className="demo-cur-note">币种未确认</span>}
               <span className="demo-pct">{detail.event.direction === 'decrease' ? '↓' : '↑'} {Math.abs(detail.event.pct ?? 0).toFixed(1)}%</span>
             </div>
             <div className="demo-kv">检出：{fmtTime(detail.event.occurred_at)}</div>
@@ -240,7 +246,7 @@ export default function DemoPage() {
                 <div>Snapshot ID：<b>{String(s.snapshot_id)}</b></div>
                 <div style={{ color: '#6b7280' }}>Source URL：{String(s.source_url || s.raw_payload_ref && (s.raw_payload_ref as Record<string, unknown>).source_url || '—')}</div>
                 <div style={{ color: '#6b7280' }}>source_status {String(s.source_status)} · collector {String(s.collector_version)} · content_hash {String(s.content_hash)}</div>
-                {s.raw_payload_ref && <div style={{ color: '#6b7280' }}>raw payload：{String((s.raw_payload_ref as Record<string, unknown>).path)}</div>}
+                {s.raw_payload_ref ? <div style={{ color: '#6b7280' }}>raw payload：{String((s.raw_payload_ref as Record<string, unknown>).path)}</div> : null}
               </div>
             ))}
             <div style={{ marginTop: 14, textAlign: 'right' }}>
