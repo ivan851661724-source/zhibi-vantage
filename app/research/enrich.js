@@ -213,6 +213,30 @@ async function deepResearchOne(comp, state, config) {
   }
   logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.total} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
 
+  // ---- M0-02：Evidence 基础层接线（additive，不改 legacy 契约）----
+  // 快照已落盘时，从快照 raw 原始字节确定性提取产品公开价格 Observation Evidence
+  // （verified）；失败态快照 → unavailable Evidence（source failure ≠ no_change，
+  // 00 §38）。best-effort：任何异常仅记运营错误，绝不影响 legacy 调研路径
+  // （修正 9 兼容规则）。规格锚点：00 v1.2 §1.5/§2/§5/§26/§37/§38；05 v0.3.1 §10/§19.6；06 v0.3 Traceability。
+  if (shopify.snapshotId && shopify._prov && shopify._prov.recorded) {
+    try {
+      const EvidenceExtract = require('./evidence-extract.js');
+      const evRes = EvidenceExtract.extractShopifyPriceEvidence({
+        tenantId: state.tenantId || undefined,   // 显式租户 > ALS 兜底（后台队列脱离请求上下文）
+        snapshotId: shopify.snapshotId,
+        currency: shopify.currency || null,      // 店铺结账币种（cart.js 探测），价格币种溯源
+        entityRef: { brand_name: comp.name || null, domain: anchorDomain || null, source_url: shopify.url || null },
+        projectRef: state.projectId || null,
+      });
+      if (evRes.ok) comp.evidenceExtract = { evidence_count: (evRes.evidence_ids || []).length, unavailable: !!evRes.unavailable, empty: !!evRes.empty, reason: null };
+      else comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: evRes.reason || null };
+    } catch (e) {
+      comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: 'error' };
+      logAttempt(comp, 'evidence', shopify.url || comp.url, 'shopify', false, 'Evidence 提取异常（不影响调研主链路）：' + String((e && e.message) || e).slice(0, 160));
+      try { require('../services/logger.js').error('evidence_extract_error', { competitor: comp.id, snapshot_id: shopify.snapshotId, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
+    }
+  }
+
   // ---- L2 意图分型定向查询（渠道存在性 / 口碑 / 动作），并行 ----
   const probes = {
     etsy: `site:etsy.com/shop "${comp.name}"`,
