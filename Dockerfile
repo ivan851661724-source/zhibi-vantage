@@ -22,7 +22,7 @@ COPY app/routes ./routes
 COPY app/middleware ./middleware
 COPY app/scripts ./scripts
 
-# 预置配置种子（含 API 密钥；首次启动由 entrypoint 播种进数据卷，已存在则跳过）
+# 预置配置种子（模板，不含密钥；密钥通过环境/平台安全配置注入）
 COPY config-seed /app/config-seed
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
