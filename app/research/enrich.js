@@ -231,6 +231,24 @@ async function deepResearchOne(comp, state, config) {
       });
       if (evRes.ok) comp.evidenceExtract = { evidence_count: (evRes.evidence_ids || []).length, unavailable: !!evRes.unavailable, empty: !!evRes.empty, reason: null };
       else comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: evRes.reason || null };
+      // ---- M0-03：Fact 最小层接线（additive）----
+      // verified 价格 Evidence → public_product_price Fact（值逐字继承自
+      // Evidence，unavailable 不产 Fact——02 原则 4 unavailable≠0）。规格锚点：
+      // 00 v1.2 §1.3/§5/§37/§50；02 v0.3 §1/§2.1；06 v0.3 Traceability。
+      if (evRes.ok && evRes.evidence_ids && evRes.evidence_ids.length) {
+        try {
+          const FactStore = require('./fact-store.js');
+          let factCount = 0;
+          for (const eid of evRes.evidence_ids) {
+            const fr = FactStore.recordPriceFactFromEvidence({ tenantId: state.tenantId || undefined, evidenceId: eid });
+            if (fr.recorded && !fr.duplicate) factCount++;
+          }
+          comp.factExtract = { fact_count: factCount, evidence_count: evRes.evidence_ids.length, reason: null };
+        } catch (fe) {
+          comp.factExtract = { fact_count: 0, evidence_count: (evRes.evidence_ids || []).length, reason: 'error' };
+          try { require('../services/logger.js').error('fact_extract_error', { competitor: comp.id, error: String((fe && fe.message) || fe).slice(0, 200) }); } catch (_) {}
+        }
+      }
     } catch (e) {
       comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: 'error' };
       logAttempt(comp, 'evidence', shopify.url || comp.url, 'shopify', false, 'Evidence 提取异常（不影响调研主链路）：' + String((e && e.message) || e).slice(0, 160));
