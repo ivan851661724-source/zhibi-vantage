@@ -242,3 +242,14 @@ data/snapshots/<tenantNs>/<YYYYMMDD>/<snapshot_id>.raw    ← 不可变原始字
 | P1-2 | raw 写入须防静默覆盖 | `source-snapshot.js`：blob 与 meta 均改独占创建（`flag:'wx'`）；冲突显式抛错（可见运营错误），不落半截快照（blob 失败则无 meta） | #18（预置 sentinel 文件→record 抛错→字节不变→无 meta） |
 
 测试增补后共 18 用例（15 原有全保持 + 3 新增），18/18 绿。全量回归 17 套件 16 绿（static-check.test.js 为沙箱 spawn EBUSY 本底，干净 main 同败，实证记录在案）。
+
+## §12 PR#2 二审修正附录（2026-10-07，一审 5 项已验证通过；二审 4 项修正）
+
+| # | 二审问题 | 修正落点 | 测试 |
+|---|---|---|---|
+| P0（retention） | RETENTION_INITIAL 一律 P1/30d/90d 与 03 §16 冲突（product_catalog/evidence_url 是 05 §1 P0 能力，应为 90d hot + 365d 归档） | `source-snapshot.js`：`RETENTION_BY_TIER`（P0=90/365，P1=30/90）+ `TIER_BY_CAPABILITY`（product_catalog/evidence_url→P0）；按 capability 取初始档 | #19（双能力断言 tier/hot/archive 精确区间）+ #1 修正 |
+| P0（partial_scan） | 自造 `scan.complete` 平行词汇，违反 05 §5.2/§19.6 冻结术语 `partial_scan` | 快照元数据改冻结字段：`partial_scan`（null=不适用/boolean）+ `partial_scan_reason` + `partial_scan_observed_count`；net.js Shopify 首页满额→partial_scan=true | #16（partial_scan=true+reason+count）、#13（完整枚举=false）、禁 `scan` 字段断言 |
+| P1（SC-01） | 05 原文 parser_version 必填与采集层未解析矛盾，须走正式 Spec Change | **05 v0.3 → v0.3.1**：§4 增 collector_version、parser_version 标 nullable；§10 同步；§19.5「parser_version 必填」→「collector_version 必填；parser_version 可空」。提案全文 `spec/changes/SC-01_collector_version_vs_parser_version.md`；CHANGELOG_v0.3 增 v0.3.1 节 | #1（collector_version 在、parser_version 不得出现） |
+| P1（orphan） | blob wx 成功后 meta wx 失败会留孤儿 .raw | record 跟踪 `createdBlobPath`；meta 失败→显式抛错+仅回滚本次创建的 blob（unlink），绝不删既有文件，append-only 保持 | #20（强制 meta 失败：显式抛错/无 meta/孤儿清理/既有 sentinel 完好） |
+
+二审后套件 20 用例（18 + 2 新增），20/20 绿；全量回归 17 套件 16 绿（static-check EBUSY 沙箱本底不变）。

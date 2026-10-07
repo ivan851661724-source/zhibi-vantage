@@ -1,8 +1,9 @@
 'use strict';
 // ============================================================
-// M0-01 SourceSnapshot 单测（计划 v0.2 §6 + PR#2 评审增补，18 用例）
-// 评审增补：16=P0-1 部分扫描诚实语义 / 17=P0-3 无业务 Coverage / 18=P1-2 独占创建；
-// 9=P0-2 跨租户缓存不串溯源；11=P1-1 parse_failed body 已接收 → observed_at 非空
+// M0-01 SourceSnapshot 单测（计划 v0.2 §6 + PR#2 一审/二审评审增补，20 用例）
+// 一审：16=P0-1 部分扫描诚实语义 / 17=P0-3 无业务 Coverage / 18=P1-2 独占创建；
+//       9=P0-2 跨租户缓存不串溯源；11=P1-1 parse_failed body 已接收 → observed_at 非空
+// 二审：16=冻结术语 partial_scan / 19=P0 能力初始保留档（03 §16）/ 20=meta 失败回滚孤儿 blob
 // 隔离：ZB_DATA_DIR 指向临时目录（必须在 require 业务模块前设置）
 // 网络隔离：stub global.fetch + dns.promises.lookup（SSRF 守卫按公网 IP 放行）
 // 规格锚点：/spec 05 v0.3 §11（八态字面量）/§13；00 v1.2 §38/§54/§56
@@ -94,7 +95,8 @@ const BASE = 'http://example.com';
     assert.equal(meta.content_hash, 'sha256:' + sha256hex(Buffer.from('<html>hello page1</html>', 'utf8')));
     assert.equal(meta.tenant.tenant_id, TENANT_A);
     assert.equal(meta.trigger, 'enrich');
-    assert.ok(meta.retention && meta.retention.tier === 'P1');
+    // P0 终审：evidence_url 为 05 §1 P0 能力 → 初始档 P0（90d hot + 365d 归档）
+    assert.ok(meta.retention && meta.retention.tier === 'P0');
     assert.equal(meta.raw_payload_ref.kind, 'fs_blob');
     assert.equal(meta.raw_truncated, false);
   });
@@ -265,10 +267,11 @@ const BASE = 'http://example.com';
     const m2 = Snapshot.getById(TENANT_A, shopify.snapshotId);
     assert.ok(m1 && m1.capability === 'evidence_url');
     assert.ok(m2 && m2.capability === 'product_catalog' && m2.provider === 'shopify_products_json');
-    // P0-1 对照面：首页不满额（1 < 100）= 完整目录观察 → success + scan.complete=true
+    // P0 终审对照面：首页不满额（1 < 100）= 完整枚举 → success + partial_scan=false（05 §5.2 冻结术语）
     assert.equal(m2.source_status, 'success', '首页 < 100 款即全部 → success');
-    assert.equal(m2.scan.complete, true, 'scan.complete=true');
-    assert.equal(m2.scan.observed_first_page, 1);
+    assert.equal(m2.partial_scan, false, 'partial_scan=false（完整枚举）');
+    assert.equal(m2.partial_scan_reason, null);
+    assert.equal(m2.partial_scan_observed_count, 1);
     assert.ok(new Date(m2.observed_at) <= new Date(m2.collected_at), 'observed_at <= collected_at');
   });
 
@@ -299,8 +302,8 @@ const BASE = 'http://example.com';
     assert.throws(() => Snapshot.record({ capability: 'x', provider: 'x', source_status: 'partial_success', tenantId: TENANT_A }), /invalid source_status/, '别名 partial_success 必须被拒');
   });
 
-  // 16. P0-1：Shopify 首页满额不得宣称完整目录 → partial + scan.complete=false
-  await t('16 P0-1：首页满额（100 款）→ partial，绝不宣称 success+完整目录', async () => {
+  // 16. P0 终审：Shopify 首页满额不得宣称完整枚举 → partial + 冻结术语 partial_scan=true
+  await t('16 P0：首页满额（100 款）→ partial + partial_scan=true（05 §5.2 冻结术语）', async () => {
     const hundred = { products: Array.from({ length: 100 }, (_, i) => ({ title: 'P' + i, product_type: 'fig', variants: [{ price: '9.9' }] })) };
     fetchRoutes = {
       [BASE + '/big-site']: () => jsonResponse('<p>site</p>'),
@@ -311,11 +314,12 @@ const BASE = 'http://example.com';
     assert.ok(out.ok && out.total === 100, '业务行为不变（items/total 契约兼容）');
     const meta = Snapshot.getById(TENANT_A, out.snapshotId);
     assert.equal(meta.source_status, 'partial', 'M0-04 分页落地前不得记 success');
-    assert.equal(meta.scan.complete, false, '不宣称完整目录');
-    assert.equal(meta.scan.observed_first_page, 100);
-    assert.ok(meta.scan.reason, '不完整原因显式可读');
+    assert.equal(meta.partial_scan, true, 'partial_scan=true（枚举不完整，冻结术语）');
+    assert.equal(meta.partial_scan_reason, 'products_json_first_page_limit_100_pagination_pending_m0_04');
+    assert.equal(meta.partial_scan_observed_count, 100);
     assert.ok(meta.observed_at, 'body 已接收 → observed_at 非空（P1-1 同样适用）');
     assert.ok(!('coverage' in meta), '无业务 Coverage 字段（P0-3）');
+    assert.ok(!('scan' in meta), '不得存在平行词汇 scan.*（P0 终审）');
   });
 
   // 17. P0-3：失败观察（unavailable/timeout）无 body 也绝不隐含任何 Coverage complete
@@ -346,6 +350,52 @@ const BASE = 'http://example.com';
     assert.equal(fs.readFileSync(bPath, 'utf8'), 'sentinel-do-not-overwrite', '既有 blob 字节不变');
     const mPath = path.join(nsDir(TENANT_A), day, id + '.json');
     assert.ok(!fs.existsSync(mPath), 'blob 失败时不得落 meta（无半截快照）');
+  });
+
+  // 19. P0 终审：product_catalog / evidence_url 初始保留 = P0 档（03 §16：90d hot + 365d 归档）
+  await t('19 P0 终审：P0 能力初始保留档 = tier P0 / 90d hot / 365d 归档，不得一律 P1', async () => {
+    const before = Date.now();
+    const cases = [
+      ['product_catalog', 'shopify_products_json', 'success', new Date().toISOString(), Buffer.from('ret-p0-1')],
+      ['evidence_url', 'generic_web_fetch', 'unavailable', null, null],
+    ];
+    for (const [capability, provider, status, observed, body] of cases) {
+      const r = Snapshot.record({ capability, provider, source_url: BASE + '/ret-' + capability, source_status: status, observed_at: observed, bodyBytes: body, tenantId: TENANT_A });
+      const m = r.meta;
+      assert.equal(m.retention.tier, 'P0', capability + ' 为 05 §1 P0 能力，初始档必须 P0');
+      assert.equal(m.retention.evidence_bearing, false, '入库时刻尚无 Evidence 引用');
+      const hotMs = new Date(m.retention.hot_until) - before;
+      const arcMs = new Date(m.retention.archive_until) - before;
+      assert.ok(hotMs > 89.9 * 86400e3 && hotMs <= 90.1 * 86400e3, '90 天 hot（实际 ' + Math.round(hotMs / 86400e3) + 'd）');
+      assert.ok(arcMs > 364.9 * 86400e3 && arcMs <= 365.1 * 86400e3, '365 天归档（实际 ' + Math.round(arcMs / 86400e3) + 'd）');
+    }
+  });
+
+  // 20. P1 终审：meta 写失败 → 显式失败 + 回滚本次创建的 blob + 绝不删既有文件
+  await t('20 P1 终审：meta 写失败回滚孤儿 blob，既有文件不受影响', async () => {
+    const realWrite = fs.writeFileSync;
+    const id = 'ss_unit_orphan_0001_ab12cd';
+    const fetchedAt = new Date().toISOString();
+    const day = String(fetchedAt).slice(0, 10).replace(/-/g, '');
+    const dirD = path.join(nsDir(TENANT_A), day);
+    fs.mkdirSync(dirD, { recursive: true });
+    const preExisting = path.join(dirD, 'pre-existing-sentinel.raw');
+    fs.writeFileSync(preExisting, 'pre-existing-do-not-delete');
+    // 只拦截本次 meta（.json）写入；blob（.raw）照常创建 —— 复现「blob 成功后 meta 失败」
+    fs.writeFileSync = function (p, data, opts) {
+      if (String(p).endsWith(id + '.json')) { const e = new Error('E_META_FORCED'); e.code = 'E_META_FORCED'; throw e; }
+      return realWrite.call(fs, p, data, opts);
+    };
+    try {
+      assert.throws(
+        () => Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: BASE + '/orphan', source_status: 'success', observed_at: fetchedAt, fetched_at: fetchedAt, bodyBytes: Buffer.from('orphan-body'), tenantId: TENANT_A, snapshot_id: id }),
+        /metadata write failed/,
+        'meta 失败必须显式抛错（可见运营错误）'
+      );
+    } finally { fs.writeFileSync = realWrite; }
+    assert.ok(!fs.existsSync(path.join(dirD, id + '.json')), '无 meta 提交（append-only 不破坏）');
+    assert.ok(!fs.existsSync(path.join(dirD, id + '.raw')), '本次创建的孤儿 blob 已回滚清理');
+    assert.equal(fs.readFileSync(preExisting, 'utf8'), 'pre-existing-do-not-delete', '既有文件绝不被删除');
   });
 
   // 还原全局 stub（跑回归时防止泄漏到其他用例——本文件独立进程执行，此为防御性收尾）

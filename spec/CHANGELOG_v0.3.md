@@ -15,3 +15,7 @@
 - 不建议为了本轮治理先重写 UI。04 只补 freshness/backfill/degraded 的表达要求。
 - 不建议同时扩展 Meta/TikTok/Trends。先完成 Canonical data truth + low-cost monitoring loop。
 - 不建议把 WorkspaceCostBudget 作为运行时“偷偷漏扫”的开关；plan admission 应先限制承诺范围。
+
+## v0.3.1 修订（2026-10-07，SC-01，随 M0-01 PR#2 二审裁决生效）
+
+- 05：SC-01 落地——Raw Snapshot 层 `collector_version` 必填、`parser_version` nullable（未解析时 null，不得伪造）；结构化 Adapter/Evidence/Fact 层 parser/extractor 版本必填。影响 05 §4 / §10 / §19.5。提案全文见 `spec/changes/SC-01_collector_version_vs_parser_version.md`。

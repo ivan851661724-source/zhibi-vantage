@@ -186,16 +186,16 @@ async function fetchShopifyProducts(siteUrl, opts) {
     }
     const products = Array.isArray(j.products) ? j.products : [];
     let sid, prov = { recorded: false };
-    // P0-1（PR#2 评审）：M0-04 完整分页落地前，products.json?limit=100 首页即全部
-    // （products.length < 100）才允许记完整目录观察（success）；≥100 视为已知不完整
-    // 采集 → source_status=partial（05 §11 冻结字面量）+ scan.complete=false，
-    // 绝不宣称 success + 完整目录。业务返回值（items/total）契约不变。
-    const scanComplete = products.length < 100;
-    const scanStatus = scanComplete ? Snapshot.SOURCE_STATUS.SUCCESS : Snapshot.SOURCE_STATUS.PARTIAL;
-    const scan = { complete: scanComplete, reason: scanComplete ? null : 'products_json_first_page_limit_100_pagination_pending_m0_04', observed_first_page: products.length };
+    // P0（PR#2 二审）：使用 05 v0.3 §5.2/§19.6 冻结术语 partial_scan，不再另造词汇。
+    // M0-04 完整分页落地前，products.json?limit=100 首页满额（≥100）即枚举不完整 →
+    // partial_scan=true + source_status=partial；首页即全部（<100）→ 完整枚举。
+    // 业务返回值（items/total）契约不变。
+    const partialScan = products.length >= 100;
+    const scanStatus = partialScan ? Snapshot.SOURCE_STATUS.PARTIAL : Snapshot.SOURCE_STATUS.SUCCESS;
+    const partialScanReason = partialScan ? 'products_json_first_page_limit_100_pagination_pending_m0_04' : null;
     const recordSuccess = (note) => {
       try {
-        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: scanStatus, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), source_updated_at: r.headers.get('last-modified'), trigger: o.trigger, tenantId: o.tenantId, scan: scan, note: note || null });
+        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: scanStatus, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), source_updated_at: r.headers.get('last-modified'), trigger: o.trigger, tenantId: o.tenantId, partial_scan: partialScan, partial_scan_reason: partialScanReason, partial_scan_observed_count: products.length, note: note || null });
         if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
       } catch (e) { loggerError('fetchShopifyProducts', e, d); }
     };

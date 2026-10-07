@@ -31,9 +31,20 @@ const logger = require('../services/logger.js');
 
 const COLLECTOR_VERSION = 'net-1';
 const SCHEMA_VERSION = 1;
-// 03 §16 非 Evidence-bearing 档（入库时刻初始分类；后续 Evidence 引用导致的
-// 升级走外部 retention reference/index，绝不改写本 JSON —— Snapshot 不可变）
-const RETENTION_INITIAL = { tier: 'P1', evidence_bearing: false, hot_days: 30, archive_days: 90 };
+// 03 v0.3 §16 Raw Snapshot 默认保留策略（入库时刻初始分类；后续 Evidence/Judgment/
+// Challenge 引用导致的升级走外部 retention reference/index，绝不改写本 JSON —— Snapshot 不可变）：
+//   P0 / Evidence-bearing：90 天 hot + 冷归档至 365 天
+//   P1/P2 非 Evidence-bearing：30 天 hot + 冷归档至 90 天
+// 05 v0.3 §1 Capability Map：product_catalog / evidence_url 均为 P0 能力（终审 P0 修正：
+// 不得把全部 SourceSnapshot 一律归 P1 档）
+const RETENTION_BY_TIER = {
+  P0: { tier: 'P0', evidence_bearing: false, hot_days: 90, archive_days: 365 },
+  P1: { tier: 'P1', evidence_bearing: false, hot_days: 30, archive_days: 90 },
+};
+const TIER_BY_CAPABILITY = { product_catalog: 'P0', evidence_url: 'P0' };
+function initialRetention(capability) {
+  return RETENTION_BY_TIER[TIER_BY_CAPABILITY[capability] || 'P1'] || RETENTION_BY_TIER.P1;
+}
 
 // 05 v0.3 §11 冻结字面量（禁别名）
 const SOURCE_STATUS = Object.freeze({
@@ -129,10 +140,11 @@ function record(input) {
   fs.mkdirSync(dir, { recursive: true });
   let relRef = null;
   let refByteSize = 0;
+  let createdBlobPath = null;                // 本次调用创建的 blob（终审 P1：meta 失败时仅回滚它）
   if (store) {
     const bPath = blobPathOf(ns, day, id);
     // P1-2：独占创建（wx）——目标已存在（竞态/孤儿）时显式失败，绝不静默覆盖既有 raw
-    try { fs.writeFileSync(bPath, store, { flag: 'wx' }); }
+    try { fs.writeFileSync(bPath, store, { flag: 'wx' }); createdBlobPath = bPath; }
     catch (e) { throw new Error('source-snapshot: raw blob write failed (exclusive-create, no overwrite): ' + (e.code || e.message) + ' :: ' + id); }
     relRef = path.relative(DATA, bPath).replace(/\\/g, '/');
     refByteSize = store.length;
@@ -163,19 +175,34 @@ function record(input) {
     trigger: input.trigger || 'enrich',
     tenant: { tenant_id: tenantId, project_ref: input.projectRef || null, brand_hint: input.brandHint || null },
     call_ledger_id: null,                      // ExternalCallLedger 并行 track 预留（正交，OQ-3）
-    // P0-3：无 coverage 字段。raw_truncated/raw_size/raw_payload_ref 仅描述 raw 存储属性；
-    // scan = 采集扫描完整性（如 Shopify 首页分页限制），与 raw 截断正交，二者均非业务 Coverage
-    scan: input.scan || null,
+    // P0-3：无 coverage 字段。raw_truncated/raw_size/raw_payload_ref 仅描述 raw 存储属性，
+    // 与业务 Coverage 正交；一等 Coverage 对象归后续 Coverage 票。
+    // P0 终审（PR#2 二审）：partial_scan 为 05 v0.3 §5.2/§19.6 冻结术语（目录枚举不完整
+    // 必须标 true），不得另造 scan.complete 等平行词汇；reason/count 为补充说明，
+    // null = 该维度不适用（如 evidence_url 单页观察）。
+    partial_scan: input.partial_scan == null ? null : Boolean(input.partial_scan),
+    partial_scan_reason: input.partial_scan_reason || null,
+    partial_scan_observed_count: input.partial_scan_observed_count == null ? null : Number(input.partial_scan_observed_count),
     note: input.note || null,
-    retention: {
-      tier: RETENTION_INITIAL.tier,
-      evidence_bearing: RETENTION_INITIAL.evidence_bearing,
-      hot_until: new Date(Date.now() + RETENTION_INITIAL.hot_days * 86400e3).toISOString(),
-      archive_until: new Date(Date.now() + RETENTION_INITIAL.archive_days * 86400e3).toISOString(),
-    },
+    retention: (() => {
+      const ret = initialRetention(input.capability);
+      return {
+        tier: ret.tier,
+        evidence_bearing: ret.evidence_bearing,
+        hot_until: new Date(Date.now() + ret.hot_days * 86400e3).toISOString(),
+        archive_until: new Date(Date.now() + ret.archive_days * 86400e3).toISOString(),
+      };
+    })(),
   };
 
-  fs.writeFileSync(mPath, JSON.stringify(meta, null, 1), { flag: 'wx' }); // P1-2：meta 同样独占创建
+  // P1 终审（PR#2 二审）：meta 写失败 → 显式抛错 + 只回滚本次调用创建的 blob；
+  // 绝不删除任何既有文件（append-only 语义保持），不落「有 blob 无 meta」的孤儿
+  try {
+    fs.writeFileSync(mPath, JSON.stringify(meta, null, 1), { flag: 'wx' });
+  } catch (e) {
+    if (createdBlobPath) { try { fs.unlinkSync(createdBlobPath); } catch (_) {} }
+    throw new Error('source-snapshot: metadata write failed, created raw blob rolled back: ' + (e.code || e.message) + ' :: ' + id);
+  }
   return { recorded: true, meta };
 }
 
