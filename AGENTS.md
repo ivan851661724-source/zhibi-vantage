@@ -198,3 +198,10 @@ For implementation tasks report:
 - Open Issues
 
 If acceptance criteria are not fully satisfied, report PARTIAL instead of PASS.
+
+## Secret Hygiene（2026-10-07 安全事件后生效，最高纪律）
+
+- `config-seed/` 目录**必须保持零密钥**：只允许空值/占位符模板入库。密钥一律经环境变量或平台安全配置注入，严禁写进 Git、部署包、PR、日志、截图或任何明文产物。
+- 历史教训（2026-10-07 审计）：`config-seed/config.json` 曾在初始提交（9bd9b1e）与部署 zip（b2ab988，blob c51969c5）中携带真实 DeepSeek/Serper 密钥进入公开仓库历史，触发全量轮换 + filter-repo 历史重写。
+- 提交前跑 `node scripts/secret-scan.js`（零依赖，git 跟踪文件全扫，potentially real 命中即 exit 1）；误报在脚本 WHITELIST_HASH_PREFIXES 登记哈希前缀，禁止放宽正则。
+- `.zip` 归档禁止入库（.gitignore 已拦）；`.env`、`*.pem/*.ppk/*.key`、运行时数据库、本地密钥文件继续排除。
