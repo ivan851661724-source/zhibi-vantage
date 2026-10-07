@@ -239,13 +239,31 @@ async function deepResearchOne(comp, state, config) {
         try {
           const FactStore = require('./fact-store.js');
           let factCount = 0;
+          const newFactIds = [];
           for (const eid of evRes.evidence_ids) {
             const fr = FactStore.recordPriceFactFromEvidence({ tenantId: state.tenantId || undefined, evidenceId: eid });
-            if (fr.recorded && !fr.duplicate) factCount++;
+            if (fr.recorded && !fr.duplicate) { factCount++; newFactIds.push(fr.meta.fact_id); }
           }
-          comp.factExtract = { fact_count: factCount, evidence_count: evRes.evidence_ids.length, reason: null };
+          // ---- M0-05：Diff → price_change_observed 检测接线（additive）----
+          // 新 Fact 落盘后找同 entity 上一观察 → Diff；仅 changed Diff 产事件
+          // （02 v0.3 §10.1）。规格锚点：00 v1.2 §37/§50；02 §10.1；06 Traceability。
+          let eventCount = 0; let diffCount = 0; let detectReason = null;
+          if (newFactIds.length) {
+            try {
+              const DomainEvent = require('./domain-event.js');
+              for (const fid of newFactIds) {
+                const dr = DomainEvent.detectPriceChangeFromFact({ tenantId: state.tenantId || undefined, factId: fid });
+                if (dr.ok && dr.diff_id) diffCount++;
+                if (dr.ok && dr.event_id) eventCount++;
+                if (dr.ok && !dr.diff_id && dr.reason) detectReason = dr.reason; // no_previous_fact 等诚实记录
+              }
+            } catch (de) {
+              try { require('../services/logger.js').error('event_detect_error', { competitor: comp.id, error: String((de && de.message) || de).slice(0, 200) }); } catch (_) {}
+            }
+          }
+          comp.factExtract = { fact_count: factCount, evidence_count: evRes.evidence_ids.length, diff_count: diffCount, event_count: eventCount, detect_reason: detectReason, reason: null };
         } catch (fe) {
-          comp.factExtract = { fact_count: 0, evidence_count: (evRes.evidence_ids || []).length, reason: 'error' };
+          comp.factExtract = { fact_count: 0, evidence_count: (evRes.evidence_ids || []).length, diff_count: 0, event_count: 0, detect_reason: null, reason: 'error' };
           try { require('../services/logger.js').error('fact_extract_error', { competitor: comp.id, error: String((fe && fe.message) || fe).slice(0, 200) }); } catch (_) {}
         }
       }

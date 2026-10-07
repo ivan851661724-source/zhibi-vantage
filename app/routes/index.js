@@ -18,6 +18,7 @@ const CorrectionH = require('./handlers/correction.js');
 const MiscH = require('./handlers/misc.js');
 const TelemetryH = require('./handlers/telemetry.js');
 const AuthH = require('./handlers/auth.js'); // P0 恢复：login/register
+const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
 
 function registerAll() {
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
@@ -35,6 +36,10 @@ function registerAll() {
   registry.register('GET', '/api/materials', 'tenant', ReadH.materials);
   registry.register('GET', '/api/heroes', 'tenant', ReadH.heroes);
   registry.register('GET', '/api/radar-changes', 'tenant', ReadH.radarChanges);
+  // —— M0-05 Demo 最小 REST（真值链只读；Stage 3） ——
+  registry.register('GET', '/api/demo/recent-changes', 'tenant', DemoH.recentChanges);
+  registry.register('GET', '/api/demo/event-detail', 'tenant', DemoH.eventDetail);
+  registry.register('GET', '/api/demo/evidence-detail', 'tenant', DemoH.evidenceDetail);
   registry.register('POST', '/api/quadrant', 'tenant', ReadH.quadrant);
   registry.register('POST', '/api/compare', 'tenant', ReadH.compare);
   // —— 度量层组（P0-2/3/4） ——
