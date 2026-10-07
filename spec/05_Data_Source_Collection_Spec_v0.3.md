@@ -1,6 +1,6 @@
 # Vantage · 05 Data Source & Collection Spec
 
-**版本：v0.3**  
+**版本：v0.3.1（SC-01 修订，2026-10-07；基线 v0.3 + 本修订，见 CHANGELOG 与 spec/changes/SC-01）**  
 **状态：评审稿**  
 **上位依赖：00 v1.2 / 01 v1.3.3 / 02 v0.3 / 03 v0.3**  
 **所有权：Provider、采集能力、字段、频率、失败、fallback、成本与上线状态**
@@ -125,7 +125,8 @@ Raw Snapshot 至少记录：
 - status_code
 - fetched_at
 - content_hash
-- parser_version
+- collector_version
+- parser_version（SC-01：nullable——原始采集时刻 parser 未运行时必须为 null，不得以 collector 版本冒充；结构化解析发生时由解析层写入实际版本）
 - source_status
 
 ---
@@ -314,7 +315,8 @@ currency?
 fields
 source_status
 freshness
-parser_version
+collector_version
+parser_version?（SC-01：nullable，未解析时 null；结构化 Adapter/Evidence/Fact 层必填实际版本）
 error_code?
 ```
 
@@ -589,7 +591,7 @@ Source Quality 不直接决定用户结论，但用于：
 - 每跳 DNS/IP 检查
 - SSRF 防护
 - public URL only
-- parser_version 必填
+- collector_version 必填；parser_version 可空（SC-01：原始采集层未解析时 null，不得伪造；结构化 Adapter/Evidence/Fact 提取层必填实际 parser/extractor 版本）
 
 ## 19.6 Shopify Public Catalog Adapter
 
