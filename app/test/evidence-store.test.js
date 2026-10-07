@@ -60,7 +60,7 @@ function recSnapshot(tenantId, opts) {
   assert.equal(r.recorded, true, 'fixture snapshot must record');
   return r.meta;
 }
-const EXTRACT_ARGS = (tenantId, sid) => ({ tenantId, snapshotId: sid, currency: 'USD', entityRef: { brand_name: 'SnapFig', domain: 'example-shop.com' }, projectRef: 'proj-1' });
+const EXTRACT_ARGS = (tenantId, sid) => ({ tenantId, snapshotId: sid, entityRef: { brand_name: 'SnapFig', domain: 'example-shop.com' }, projectRef: 'proj-1' });
 
 // ============ 1. 合法快照 → verified Evidence 创建 ============
 t('1. Evidence created from valid persisted SourceSnapshot (verified price observation)', () => {
@@ -216,6 +216,8 @@ t('10. EvidenceStatus accepts only frozen values; unavailable requires frozen re
   assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'partially_verified', extracted_value: { x: 1 } })), /invalid evidence_status/);
   assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'unavailable' })), /requires frozen reason_code/); // 无 reason_code
   assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'unavailable', reason_code: 'kind_of_failed' })), /requires frozen reason_code/);
+  assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'unavailable', reason_code: 'timeout' })), /requires frozen reason_code/);       // P0-3：未冻结枚举拒绝
+  assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'unavailable', reason_code: 'internal_error' })), /requires frozen reason_code/); // P0-3：同上
   assert.throws(() => Store.recordEvidence(Object.assign({}, base, { evidence_status: 'verified', reason_code: 'fetch_failed', extracted_value: { x: 1 } })), /unavailable-only/);
 });
 
@@ -269,16 +271,17 @@ t('12. No automatic legacy basis -> EvidenceStatus mapping', () => {
 });
 
 // ============ 13. 失败态快照 → unavailable Evidence（≠ verified 业务值） ============
-t('13. Failed SourceStatus produces unavailable Evidence, never a verified business value', () => {
+t('13. Failed SourceStatus produces unavailable Evidence, never a verified business value (P0-3: timeout/internal_error -> fetch_failed, detail kept in provenance)', () => {
   const cases = [
     { status: 'unavailable', reason: 'fetch_failed' },
     { status: 'blocked', reason: 'blocked' },
     { status: 'rate_limited', reason: 'rate_limited' },
-    { status: 'timeout', reason: 'timeout' },
+    { status: 'timeout', reason: 'fetch_failed' },          // P0-3：枚举收口，不私自扩充
+    { status: 'internal_error', reason: 'fetch_failed' },   // P0-3：同上
     { status: 'parse_failed', reason: 'parse_failed' },
   ];
   for (const c of cases) {
-    const snap = recSnapshot(TA, { status: c.status, observed_at: null, body: null });
+    const snap = recSnapshot(TA, { status: c.status, observed_at: null, body: null, error_code: 'http:' + c.status });
     const r = Extract.extractShopifyPriceEvidence(EXTRACT_ARGS(TA, snap.snapshot_id));
     assert.equal(r.ok, true, c.status);
     assert.equal(r.unavailable, true, c.status);
@@ -287,28 +290,37 @@ t('13. Failed SourceStatus produces unavailable Evidence, never a verified busin
     assert.equal(meta.reason_code, c.reason, c.status);
     assert.equal(meta.extracted_value, null, c.status);        // 绝不从失败编造值
     assert.equal(meta.observed_at, null, c.status);            // retrieval 前失败如实 null
+    // P0-3：底层失败细节经 provenance 保留（不丢失 timeout/internal_error 事实）
+    assert.equal(meta.provenance.snapshots[0].source_status, c.status, c.status + ' detail preserved in provenance');
+    assert.ok(/source_status=/.test(meta.note) && /error_code|error=/.test(meta.note), c.status + ' error detail in note');
   }
 });
 
-// ============ 14. Shopify 公开价格观察：保价保币种，禁 AOV 语义 ============
-t('14. Shopify price Evidence preserves price + currency identity, never AOV', () => {
+// ============ 14. Shopify 公开价格观察：$0 如实保留、币种诚实缺失、禁 AOV 语义 ============
+t('14. Price Evidence preserves source-observed values incl. $0; currency null without snapshot backing (P0-1); never AOV', () => {
   const snap = recSnapshot(TA);
   const r = Extract.extractShopifyPriceEvidence(EXTRACT_ARGS(TA, snap.snapshot_id));
   assert.equal(r.ok, true);
   const all = r.evidence_ids.map(id => Store.getEvidenceById(TA, id));
   const fig = all.find(m => m.entity_ref.product_id === '9001');
-  assert.equal(fig.extracted_value.price_min, 29);      // $0 免费变体已滤，不影响 min
+  // P1-1：$0 变体（variant 13 免费品）如实保留——业务过滤归后续阶段
+  assert.equal(fig.extracted_value.prices.length, 3);
+  assert.equal(fig.extracted_value.prices[2].variant_id, '13');
+  assert.equal(fig.extracted_value.prices[2].price, 0);
+  assert.equal(fig.extracted_value.price_min, 0);      // 含 $0 的真实观察下限
   assert.equal(fig.extracted_value.price_max, 49.5);
-  assert.equal(fig.extracted_value.prices.length, 2);   // 变体粒度明细保留
-  assert.equal(fig.extracted_value.prices[0].variant_id, '11');
-  assert.equal(fig.currency, 'USD');                    // 币种溯源
+  assert.equal(fig.currency, null);                     // P0-1：cart.js 币种无快照背书 → 诚实缺失
   assert.equal(fig.claim.scope, 'public_price_observation');
   assert.equal(fig.claim.field, 'product.price');
   assert.equal(fig.entity_ref.handle, 'fig-zero');      // 来源原生标识保留
   assert.equal(fig.source, 'shopify');
   const plush = all.find(m => m.entity_ref.product_id === '9002');
   assert.equal(plush.extracted_value.price_min, 19.9);
-  assert.ok(!all.some(m => m.entity_ref.product_id === '9003')); // 无有效价产品不产证
+  const noPrice = all.find(m => m.entity_ref.product_id === '9003'); // P1-1：仅 $0 变体的产品也产证
+  assert.ok(noPrice, 'zero-only product must still produce observation');
+  assert.equal(noPrice.extracted_value.price_min, 0);
+  assert.equal(noPrice.extracted_value.price_max, 0);
+  assert.equal(noPrice.extracted_value.prices.length, 1);
   for (const m of all) assert.equal(/aov/i.test(JSON.stringify(m)), false); // 禁 AOV 语义
 });
 
@@ -401,6 +413,83 @@ t('20. No tenant context refuses evidence; missing snapshot reports honestly', (
   assert.equal(ex.reason, 'snapshot_not_found');
   const exBad = Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: 'ss_x', currency: 'USD' });
   assert.equal(exBad.ok, false); // 非法快照 id 同样诚实报因
+});
+
+// ============ 21. P0-2：完整语义身份幂等——语义不同绝不坍缩 ============
+t('21. Canonical semantic idempotency: identical->duplicate; currency/scope/status-reason/version differences->distinct', () => {
+  const snap = recSnapshot(TA);
+  const base = {
+    tenantId: TA, source_snapshot_ids: [snap.snapshot_id],
+    source: 'shopify', provider: 'shopify_products_json',
+    claim: { field: 'product.price', scope: 'public_price_observation' },
+    extracted_value: { price_min: 29, price_max: 29 }, evidence_status: 'verified',
+    entity_key: 'shopify_product:9001',
+    parser_version: Extract.PARSER_VERSION, extractor_version: Extract.EXTRACTOR_VERSION,
+    observed_at: snap.observed_at,
+  };
+  const first = Store.recordEvidence(base);
+  assert.equal(first.duplicate, false);
+  // 同语义重试 → duplicate（完整身份一致）
+  assert.equal(Store.recordEvidence(Object.assign({}, base)).duplicate, true);
+  // USD vs EUR → 不同身份（P0-2 要求；币种差异不得坍缩）
+  const eur = Store.recordEvidence(Object.assign({}, base, { currency: 'EUR' }));
+  assert.equal(eur.duplicate, false);
+  assert.notEqual(eur.meta.evidence_id, first.meta.evidence_id);
+  // claim.scope 不同 → 不同身份
+  const scoped = Store.recordEvidence(Object.assign({}, base, { claim: { field: 'product.price', scope: 'promo_price_observation' } }));
+  assert.equal(scoped.duplicate, false);
+  assert.notEqual(scoped.meta.evidence_id, first.meta.evidence_id);
+  // EvidenceStatus / reason 语义不同 → 不同身份
+  const unavail = Store.recordEvidence(Object.assign({}, base, { evidence_status: 'unavailable', reason_code: 'fetch_failed', extracted_value: null }));
+  assert.equal(unavail.duplicate, false);
+  assert.notEqual(unavail.meta.evidence_id, first.meta.evidence_id);
+  // parser/extractor 版本不同 → 不同身份（回归 T9 语义，纳入统一身份断言）
+  const v2 = Store.recordEvidence(Object.assign({}, base, { parser_version: 'shopify-products-json-2' }));
+  assert.equal(v2.duplicate, false);
+  assert.notEqual(v2.meta.evidence_id, first.meta.evidence_id);
+  // market / unit / source / provider 差异同样进身份
+  const mk = Store.recordEvidence(Object.assign({}, base, { market: 'US' }));
+  assert.notEqual(mk.meta.evidence_id, first.meta.evidence_id);
+  const src = Store.recordEvidence(Object.assign({}, base, { source: 'other' }));
+  assert.notEqual(src.meta.evidence_id, first.meta.evidence_id);
+  // 禁止任意覆盖身份：meta.idempotency_key 必与规范导出一致（无 override 通道）
+  const canonical = Store.buildIdempotencyKey({
+    tenantId: TA, sourceSnapshotIds: [snap.snapshot_id], source: 'shopify', provider: 'shopify_products_json',
+    claim: base.claim, entityKey: base.entity_key,
+    valueDigest: Store.stableStringify(base.extracted_value), // 直接以稳定串作摘要输入与内部 sha256 口径一致性不跨越——此处仅验证导出存在
+    unit: null, currency: null, market: null,
+    evidenceStatus: 'verified', reasonCode: null,
+    parserVersion: Extract.PARSER_VERSION, extractorVersion: Extract.EXTRACTOR_VERSION,
+  });
+  assert.ok(/^[0-9a-f]{64}$/.test(canonical));
+  const dupAgain = Store.recordEvidence(Object.assign({}, base, { idempotency_key: 'attacker-chosen-key' }));
+  assert.equal(dupAgain.duplicate, true); // 传入未知键不影响身份：仍按语义命中既有记录
+  assert.equal(dupAgain.meta.idempotency_key, first.meta.idempotency_key); // 身份未被覆盖
+});
+
+// ============ 22. P1-2：快照集合身份校验——非 Shopify 快照不得产 Shopify 价格证据 ============
+t('22. Non-Shopify snapshot must not produce Shopify price Evidence (snapshot_source_mismatch)', () => {
+  const webSnap = Snapshot.record({
+    tenantId: TA, capability: 'evidence_url', provider: 'generic_web_fetch',
+    source_url: 'https://example-shop.com/', source_status: 'success',
+    observed_at: '2026-10-07T03:00:00.000Z', bodyBytes: Buffer.from('<html>not a products.json</html>'),
+  });
+  assert.equal(webSnap.recorded, true);
+  const r = Extract.extractShopifyPriceEvidence(EXTRACT_ARGS(TA, webSnap.meta.snapshot_id));
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'snapshot_source_mismatch');   // 内部提取失败，非新 EvidenceStatus/reason_code
+  assert.equal(Store.findEvidenceBySnapshot(TA, webSnap.meta.snapshot_id).length, 0); // 零 Evidence 产出
+});
+
+// ============ 23. P1-3：computed_at 必填且为合法 ISO（00 §8 可回算要求） ============
+t('23. computed_at present and valid ISO timestamp; algorithm/config_version remain explicit nulls', () => {
+  const snap = recSnapshot(TA);
+  const r = Extract.extractShopifyPriceEvidence(EXTRACT_ARGS(TA, snap.snapshot_id));
+  const meta = Store.getEvidenceById(TA, r.evidence_ids[0]);
+  assert.ok(typeof meta.computed_at === 'string' && meta.computed_at.length > 0, 'computed_at present');
+  assert.ok(!isNaN(Date.parse(meta.computed_at)), 'computed_at is valid ISO');
+  assert.equal(meta.algorithm_version, null); // M0-02 无算法层（00 §8 保留显式 null）
+  assert.equal(meta.config_version, null);
 });
 
 // ============ 汇总 ============

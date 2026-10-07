@@ -218,13 +218,14 @@ async function deepResearchOne(comp, state, config) {
   // （verified）；失败态快照 → unavailable Evidence（source failure ≠ no_change，
   // 00 §38）。best-effort：任何异常仅记运营错误，绝不影响 legacy 调研路径
   // （修正 9 兼容规则）。规格锚点：00 v1.2 §1.5/§2/§5/§26/§37/§38；05 v0.3.1 §10/§19.6；06 v0.3 Traceability。
+  // P0-1（PR#5 评审）：不传 currency——cart.js 探测币种无快照背书，Evidence 币种
+  // 恒 null（诚实缺失），cart.js 快照化属后续票。
   if (shopify.snapshotId && shopify._prov && shopify._prov.recorded) {
     try {
       const EvidenceExtract = require('./evidence-extract.js');
       const evRes = EvidenceExtract.extractShopifyPriceEvidence({
         tenantId: state.tenantId || undefined,   // 显式租户 > ALS 兜底（后台队列脱离请求上下文）
         snapshotId: shopify.snapshotId,
-        currency: shopify.currency || null,      // 店铺结账币种（cart.js 探测），价格币种溯源
         entityRef: { brand_name: comp.name || null, domain: anchorDomain || null, source_url: shopify.url || null },
         projectRef: state.projectId || null,
       });

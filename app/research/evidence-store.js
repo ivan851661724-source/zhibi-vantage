@@ -15,8 +15,8 @@
 //
 // 硬规则：
 //   · EvidenceStatus 冻结四值 verified/derived/conflicted/unavailable，禁别名；
-//     unavailable 必带 reason_code（00 §2.1 冻结九值 + 显式登记扩展），非
-//     unavailable 恒 null（不吞失败原因，也不伪造失败原因）
+//     unavailable 必带 reason_code（00 §2.1 冻结九值，实现层不私自扩充——
+//     P0-3 PR#5 评审），非 unavailable 恒 null（不吞失败原因，也不伪造失败原因）
 //   · evidence_status ≠ evidence_strength ≠ source_quality：三个正交字段，
 //     互不派生；本层绝不从 status/strength/quality 任一字段推导另一字段
 //   · 与 legacy research/evidence.js（sourceTier/deriveBasis 的 basis 语义）
@@ -53,27 +53,29 @@ const EVIDENCE_STATUS = Object.freeze({
 const VALID_EVIDENCE_STATUS = new Set(Object.values(EVIDENCE_STATUS));
 
 // 00 v1.2 §2.1 冻结九值（后续可扩展，但不得用 generic unavailable 吞失败原因）。
-// 显式扩展登记两项（规范允许的扩展路径，逐项可审计，非 generic 归并）：
-//   · 'internal_error' ← SourceStatus.internal_error（保留失败原因而非归并 fetch_failed）
-//   · 'timeout'        ← SourceStatus.timeout（同上；九值冻结清单未含，吞并进
-//     fetch_failed 会丢失"超时"这一失败原因，违反 §2.1 扩展条款本意）
+// 🔴 P0-3（PR#5 评审）：timeout/internal_error 不在本清单内——未经正式 Spec Change
+// 不得在实现层私自扩充枚举。SourceStatus timeout/internal_error 统一映射
+// fetch_failed，底层失败细节经 provenance.snapshots[].source_status + error_code
+// 溯源保留（不丢失"曾超时/内部错误"这一事实）。若产品侧要升为一等 reason_code，
+// 走正式 Spec Change。
 const UNAVAILABLE_REASON_CODES = Object.freeze([
   'not_supported', 'source_not_integrated', 'fetch_failed', 'blocked',
   'rate_limited', 'parse_failed', 'insufficient_history', 'insufficient_sample',
-  'not_applicable', 'internal_error', 'timeout',
+  'not_applicable',
 ]);
 const VALID_REASON_CODES = new Set(UNAVAILABLE_REASON_CODES);
 
 // SourceStatus（05 §11 失败态）→ unavailable.reason_code 映射。仅用于
 // evidence-extract 提取层；source failure ≠ no_change ≠ no_change（00 §38），
-// 失败观察绝不转成 verified 业务主张。
+// 失败观察绝不转成 verified 业务主张。P0-3：timeout/internal_error → fetch_failed
+// （枚举冻结收口），失败细节不丢——provenance 保留 source_status 原值。
 const SOURCE_FAILURE_REASON = Object.freeze({
   unavailable: 'fetch_failed',
   blocked: 'blocked',
   rate_limited: 'rate_limited',
-  timeout: 'timeout',
+  timeout: 'fetch_failed',        // P0-3：枚举未冻结 timeout，细节走 provenance
   parse_failed: 'parse_failed',
-  internal_error: 'internal_error', // 00 §2.1 允许的扩展登记
+  internal_error: 'fetch_failed', // P0-3：同上
 });
 const SOURCE_FAILURE_STATUSES = Object.freeze(Object.keys(SOURCE_FAILURE_REASON));
 
@@ -86,18 +88,29 @@ function stableStringify(x) {
   return '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + stableStringify(x[k])).join(',') + '}';
 }
 
-// 幂等键（00 §37）：稳定证据身份的组合。输入组合在调用方文档化：
-//   tenant ‖ source_snapshot_ids(排序) ‖ claim.field ‖ entity_key ‖
-//   extracted_value 摘要 ‖ parser_version ‖ extractor_version
-// 同键重试 = 同一提取结果 → 复用既有记录；parser/extractor 版本进键 →
-// 新版本解析产生真实差异时自然成新记录，旧记录不可变。
+// 幂等键（00 §37，P0-2 PR#5 评审收口）：**完整规范语义身份**的组合，缺一不可——
+//   tenant ‖ source_snapshot_ids(排序) ‖ source ‖ provider ‖
+//   claim.field ‖ claim.scope ‖ entity_key ‖ extracted_value 摘要 ‖
+//   unit ‖ currency ‖ market ‖ evidence_status ‖ reason_code ‖
+//   parser_version ‖ extractor_version
+// 同键重试 = 同一语义证据 → 复用既有记录；任一语义维度不同（含币种/market/
+// claim.scope/status/reason/版本）→ 不同键 → 独立记录，语义不同的证据绝不坍缩。
+// 🔴 P0-2：禁止调用方覆盖键值——身份只能由本函数从语义字段确定性导出。
 function buildIdempotencyKey(o) {
   const parts = [
     String(o.tenantId || ''),
     (o.sourceSnapshotIds || []).slice().sort(),
+    String(o.source || ''),
+    String(o.provider || ''),
     String((o.claim && o.claim.field) || ''),
+    String((o.claim && o.claim.scope) || ''),
     o.entityKey == null ? null : String(o.entityKey),
     o.valueDigest == null ? null : String(o.valueDigest),
+    o.unit == null ? null : String(o.unit),
+    o.currency == null ? null : String(o.currency),
+    o.market == null ? null : String(o.market),
+    String(o.evidenceStatus || ''),
+    o.reasonCode == null ? null : String(o.reasonCode),
     String(o.parserVersion || ''),
     String(o.extractorVersion || ''),
   ];
@@ -196,22 +209,32 @@ function recordEvidence(input) {
   const extractedValue = status === EVIDENCE_STATUS.UNAVAILABLE ? null
     : (input.extracted_value === undefined ? null : input.extracted_value);
 
-  const idempotencyKey = input.idempotency_key
-    || buildIdempotencyKey({
-      tenantId,
-      sourceSnapshotIds: snapshotIds,
-      claim: input.claim,
-      entityKey: input.entity_key,
-      valueDigest: extractedValue == null ? null : sha256hex(stableStringify(extractedValue)),
-      parserVersion,
-      extractorVersion,
-    });
+  // P0-2：幂等键只由规范语义身份确定性导出，禁止调用方覆盖（input.idempotency_key
+  // 已移除——任意覆盖会让语义不同的证据坍缩成 duplicate）
+  const idempotencyKey = buildIdempotencyKey({
+    tenantId,
+    sourceSnapshotIds: snapshotIds,
+    source: input.source,
+    provider: input.provider,
+    claim: input.claim,
+    entityKey: input.entity_key,
+    valueDigest: extractedValue == null ? null : sha256hex(stableStringify(extractedValue)),
+    unit: input.unit,
+    currency: input.currency,
+    market: input.market,
+    evidenceStatus: status,
+    reasonCode,
+    parserVersion,
+    extractorVersion,
+  });
 
   const observedAt = input.observed_at == null ? null : String(input.observed_at);
+  const nowIso = new Date().toISOString();
   const meta = {
-    evidence_id: input.evidence_id || ('ev_' + idempotencyKey.slice(0, 20)),
+    evidence_id: 'ev_' + idempotencyKey.slice(0, 20), // 确定性导出，不接受调用方指定
     schema_version: SCHEMA_VERSION,
-    created_at: new Date().toISOString(),
+    created_at: nowIso,
+    computed_at: nowIso, // 00 §8：Evidence 是 Snapshot+parser/extractor 的可回算输出；M0-02 无算法层，algorithm/config_version 恒 null
     tenant: {
       tenant_id: tenantId,
       project_ref: input.projectRef || null,

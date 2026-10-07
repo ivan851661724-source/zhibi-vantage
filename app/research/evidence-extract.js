@@ -17,14 +17,22 @@
 // 硬规则：
 //   · 只从快照 raw 原始字节重放解析——绝不消费业务层已裁剪的 items/pricePoints，
 //     保证 Evidence 与原始捕获字节可对账（06 Traceability）
-//   · verified 证据必须快照存在 + 同租户 + raw 可解析 + JSON 可重放，任一不满足
-//     即拒绝产证并显式报因——绝不把断链/损坏伪装成证据
+//   · verified 证据必须快照存在 + 同租户 + 集合身份匹配（capability=product_catalog
+//     且 provider=shopify_products_json，P1-2 PR#5 评审）+ raw 可解析 + JSON 可重放，
+//     任一不满足即拒绝产证并显式报因——绝不把断链/损坏/错配伪装成证据
 //   · 失败态快照（unavailable/blocked/rate_limited/timeout/parse_failed/
-//     internal_error）→ unavailable Evidence + 冻结 reason_code，extracted_value
-//     恒 null；绝不从失败观察编造业务值
+//     internal_error）→ unavailable Evidence + 冻结 reason_code（P0-3：timeout/
+//     internal_error → fetch_failed，细节经 provenance source_status 保留），
+//     extracted_value 恒 null；绝不从失败观察编造业务值
 //   · 公开商品价格只是 public price observation：claim.scope 冻结为
 //     'public_price_observation'，禁 AOV/销量/成交价语义（05 §19.6）
-//   · $0/负价变体不入价格观察（免费品/赠品/脏值，与 legacy 价格口径一致）
+//   · P1-1（PR#5 评审）：Evidence 记录来源真实返回——保留 $0 价格变体（freebie/
+//     促销/无效等业务解读归后续 Validation/Tagging/Fact/Core Product 阶段，
+//     M0-02 不做业务过滤）；仅跳过无法解析为数字的变体
+//   · P0-1（PR#5 评审）：currency 不落值——products.json 快照本身不带币种，
+//     cart.js 探测无快照背书；重放引用快照无法证明币种 = Traceability 断链。
+//     当前单快照路径 currency 恒 null（诚实缺失 ≠ 伪造币种）；未来 cart.js
+//     快照化后可双快照引用再恢复币种
 //   · SC-01：parser_version / extractor_version 为本层实际版本，恒非空，
 //     不复制 collector_version
 // ============================================================
@@ -42,10 +50,12 @@ const CLAIM_FIELD = 'product.price';
 const CLAIM_SCOPE = 'public_price_observation';
 
 // 解析 products.json 原始字节 → 每产品价格观察候选（纯函数，便于单测）。
+// P1-1（PR#5 评审）：保留来源真实返回的全部数字价格（含 $0——免费品/赠品的
+// 业务解读归后续阶段），仅跳过无法解析为数字的变体；数字解析失败不是"观察到 0"。
 // 返回 { products: [...], empty: bool }；products[] 元素：
 //   { entity_key, entity_ref:{product_id,handle,title,product_type,variant_count},
 //     prices:[{variant_id,title,price}], price_min, price_max }
-// 无有效价格变体的产品跳过（无主张不产证，不编造）。
+// 无任何数字价格变体的产品跳过（无可记录的数字观察，不编造）。
 function parseProductPriceObservations(rawText) {
   let j;
   try { j = JSON.parse(String(rawText)); } catch (e) { return { error: 'raw_json_parse_failed' }; }
@@ -57,11 +67,11 @@ function parseProductPriceObservations(rawText) {
     const prices = [];
     for (const v of variants) {
       const n = parseFloat(v && v.price);
-      if (Number.isFinite(n) && n > 0) {
+      if (Number.isFinite(n)) { // P1-1：含 $0；NaN（非数字字符串）除外
         prices.push({ variant_id: v.id == null ? null : String(v.id), title: v.title == null ? null : String(v.title).slice(0, 200), price: n });
       }
     }
-    if (!prices.length) continue; // 全部变体无有效价 → 该产品不产价格主张
+    if (!prices.length) continue; // 全部变体均非数字 → 该产品无数字观察可记录
     const sorted = prices.map(x => x.price).sort((a, b) => a - b);
     out.push({
       entity_key: 'shopify_product:' + (p.id == null ? String(p.handle || p.title || '') : String(p.id)),
@@ -82,9 +92,12 @@ function parseProductPriceObservations(rawText) {
 }
 
 // 从一张已落盘快照提取 Evidence。同步、零网络、零 LLM。
-// 入参：{ tenantId?, snapshotId, currency?, market?, unit?, entityRef?, projectRef?, brandHint?, note? }
+// 入参：{ tenantId?, snapshotId, market?, unit?, entityRef?, projectRef?, brandHint?, note? }
+// P0-1（PR#5 评审）：不接受/不落 currency——当前唯一引用快照（products.json）不带
+// 币种，重放无法证明币种；诚实缺失，待 cart.js 快照化后双快照引用再恢复。
 // 返回：{ ok:true, evidence_ids:[...], unavailable?:bool, duplicate_count?, empty? }
-//    或 { ok:false, reason } —— reason ∈ snapshot_not_found | raw_unresolvable | raw_json_parse_failed
+//    或 { ok:false, reason } —— reason ∈ snapshot_not_found | snapshot_source_mismatch |
+//        snapshot_tenant_mismatch | raw_unresolvable | raw_json_parse_failed
 //    或 { recorded:false, reason:'no_tenant_context' }（存储层同规透传）
 function extractShopifyPriceEvidence(input) {
   const tenantId = input.tenantId || undefined; // undefined → 存储层走 ALS 兜底
@@ -92,6 +105,13 @@ function extractShopifyPriceEvidence(input) {
   if (!meta) {
     logger.warn('evidence_extract_skip', { reason: 'snapshot_not_found', snapshot_id: input.snapshotId || null });
     return { ok: false, reason: 'snapshot_not_found' };
+  }
+  // P1-2（PR#5 评审）：提取前必须校验快照集合身份——不得解析任意快照后贴 Shopify
+  // 标签。capability/provider 不匹配 → 拒绝产证（内部提取失败，非新 EvidenceStatus/
+  // reason_code）；该失败仅是本提取器的能力边界声明。
+  if (meta.capability !== 'product_catalog' || meta.provider !== PROVIDER) {
+    logger.warn('evidence_extract_skip', { reason: 'snapshot_source_mismatch', snapshot_id: meta.snapshot_id, capability: meta.capability, provider: meta.provider });
+    return { ok: false, reason: 'snapshot_source_mismatch' };
   }
   // 快照归属租户必须与 Evidence 租户一致（getById 按租户 ns 解析已保证；
   // 此处显式复核，防御 getById 未来放宽）
@@ -115,7 +135,7 @@ function extractShopifyPriceEvidence(input) {
       provider: PROVIDER,
       entity_ref: input.entityRef || null,
       entity_key: null,
-      currency: input.currency || null,
+      currency: null,   // P0-1：单 products.json 快照路径无币种快照背书，恒 null（诚实缺失）
       market: input.market || null,
       unit: null,
       observed_at: meta.observed_at,   // 失败观察 observed_at 可为 null（M0-01 语义），如实继承
@@ -162,7 +182,7 @@ function extractShopifyPriceEvidence(input) {
       provider: PROVIDER,
       entity_ref: Object.assign({}, input.entityRef || {}, obs.entity_ref),
       entity_key: obs.entity_key,
-      currency: input.currency || null,   // 店铺结账币种（cart.js 探测），products.json 本身不带币种
+      currency: null,     // P0-1：单 products.json 快照路径无币种快照背书，恒 null（诚实缺失）
       market: input.market || null,
       unit: null,
       observed_at: meta.observed_at,
