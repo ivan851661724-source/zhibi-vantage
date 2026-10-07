@@ -22,7 +22,7 @@ function SignalStrip({ gs }: { gs: GroupSignal[] }) {
           <div className="ico">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /></svg>
           </div>
-          <div><b>近阶段暂无跨对手集体异动</b><span className="t">持续观测中</span></div>
+          <div><b>近阶段暂无跨品牌集体异动</b><span className="t">持续观测中</span></div>
         </div>
       </div>
     );
@@ -57,7 +57,7 @@ function RivalCard({ c, onCorrect }: { c: Record<string, unknown>; onCorrect: (i
     action?: { label?: string; desc?: string; when?: string };
   };
   const rel = ((c.relationship && (c.relationship as { code?: string }).code) || 'undetermined') as string;
-  const relZh = rel === 'indirect' ? '高价参考' : rel === 'unrelated' ? '低价走量' : '直接对手';
+  const relZh = rel === 'indirect' ? '高价参考' : rel === 'unrelated' ? '低价走量' : '直接竞争品牌';
   const relCls = rel === 'indirect' ? 'rrel-ref' : rel === 'unrelated' ? 'rrel-cheap' : 'rrel-direct';
   const heroName = fmtHero(c);
   const osLine = [c.category as string, fmtChannels(c)].filter(Boolean).join(' · ') || '—';
@@ -155,7 +155,7 @@ export default function RadarPage() {
         <div>
           <h2>竞品雷达</h2>
           <p className="desc">
-            当前赛道在观测的全部对手，按「与你位置的接近程度」排序。觉得哪家不算对手，闸门移掉即可，空白视图自动重算。
+            当前赛道在观测的全部竞争品牌，按「与你位置的接近程度」排序。觉得哪家不算竞争品牌，闸门移掉即可，空白视图自动重算。
           </p>
         </div>
       </div>
@@ -164,16 +164,16 @@ export default function RadarPage() {
         <div className="radar-lead-banner" id="radarLeadBanner">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
           <div className="rlb-main">
-            <b>当前仅 {cs.length} 家对手，样本偏薄</b>
-            <span>信号聚合与空白视图需要 ≥3 家对手数据才可靠。补录几个你真在盯的品牌，雷达与机会视图会自动重算。</span>
+            <b>当前仅 {cs.length} 家竞争品牌，样本偏薄</b>
+            <span>信号聚合与空白视图需要 ≥3 家竞争品牌数据才可靠。补录几个你真在盯的品牌，雷达与机会视图会自动重算。</span>
           </div>
-          <Link className="btn-ghost" href="/?new=1">＋ 补录对手</Link>
+          <Link className="btn-ghost" href="/?new=1">＋ 补录竞争品牌</Link>
         </div>
       ) : null}
       <div id="radarWall">
         {cs.length === 0 ? (
           <div className="empty">
-            <div className="big">暂无可展示的对手</div>
+            <div className="big">尚未添加竞争品牌</div>
             <div className="sub">完成一次调研后，这里会列出竞品卡墙。</div>
           </div>
         ) : (

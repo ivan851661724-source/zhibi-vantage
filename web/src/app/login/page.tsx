@@ -137,7 +137,7 @@ function LoginPageInner() {
         </div>
         <div className="auth-card">
           <p className="auth-tagline">
-            你盯着的对手一有动作——<b>降价 · 上新 · 开新店 · 差评暴涨</b>，它替你整理成一份能直接看的材料。
+            你盯着的竞争品牌一有动作——<b>降价 · 上新 · 开新店 · 差评暴涨</b>，它替你整理成一份能直接看的材料。
           </p>
           <div className="auth-tabs" id="authTabs">
             <button

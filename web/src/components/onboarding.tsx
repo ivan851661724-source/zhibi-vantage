@@ -4,11 +4,11 @@ import { useState } from 'react';
 import { lbl } from '@/lib/labels';
 
 export const GOALS = [
-  { k: 'channel', t: '进新渠道' },
-  { k: 'pricing', t: '看定价' },
-  { k: 'newlaunch', t: '看上新' },
-  { k: 'reviews', t: '看口碑' },
-  { k: 'whitespace', t: '找空位' },
+  { k: 'channel', t: '渠道机会' },
+  { k: 'pricing', t: '价格策略' },
+  { k: 'newlaunch', t: '新品动态' },
+  { k: 'reviews', t: '消费者反馈' },
+  { k: 'whitespace', t: '市场机会' },
 ];
 export const REGIONS = ['us', 'uk', 'eu', 'cn', 'jp', 'sea'];
 export const PLATFORM_GROUPS: { label: string; keys: string[] }[] = [
@@ -97,7 +97,7 @@ export function Onboarding({
           <span className="ob-badge">知彼</span>
           <h1>先告诉我，你要做哪个赛道？</h1>
           <p className="ob-sub">
-            我会替你去把对手摸清楚，给你一份带收据的全景简报，并标出他们留的空位。不止玩具——任何消费品赛道都行。
+            我会替你把竞争品牌摸清楚，给你一份带数据依据的全景简报，并标出值得关注的市场机会。不止玩具——任何消费品赛道都行。
           </p>
         </div>
         <div className="ob-card">
@@ -113,7 +113,7 @@ export function Onboarding({
           />
           <div className="ob-more">
             <details className="ob-details">
-              <summary>＋ 告诉我更多，报告更准（可选）</summary>
+              <summary>＋ 补充分析条件（可选）</summary>
               <div className="ob-extra">
                 <label className="field-label">你当前最关心什么？（可多选，决定先给你看什么）</label>
                 <Chips
@@ -145,10 +145,10 @@ export function Onboarding({
             </details>
           </div>
           <button id="btnDiscover" className="btn-primary" type="button" disabled={busy} onClick={goDiscover}>
-            {busy ? '研究中…' : '帮我找对手 →'}
+            {busy ? '正在发现竞争品牌…' : '发现竞争品牌 →'}
           </button>
           <div className="divider"><span>或</span></div>
-          <label className="field-label" htmlFor="lookupInput">指定一个具体品牌（防止漏掉关键对手）</label>
+          <label className="field-label" htmlFor="lookupInput">指定一个具体品牌（防止漏掉关键竞争品牌）</label>
           <div className="lookup-row">
             <input
               id="lookupInput"
@@ -165,7 +165,7 @@ export function Onboarding({
           </div>
           <p className="ob-status" id="obStatus">{status}</p>
         </div>
-        <p className="ob-foot">你的数据只在本地本机处理；结论的每条都带来源与置信度，决策权始终在你。</p>
+        <p className="ob-foot">你的数据只在本地本机处理；结论的每一条都带数据依据与来源，判断权始终在你。</p>
       </div>
     </section>
   );

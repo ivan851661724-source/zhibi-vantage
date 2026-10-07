@@ -59,7 +59,7 @@ export function OverviewCards({
         <span className="ov-badge">知彼</span>
         <h2 className="ov-h">先告诉我，你要做哪个赛道？</h2>
         <p className="ov-sub">
-          我会替你把对手摸清楚，给你一份带收据的全景简报，并标出他们留的空位。不止玩具——任何消费品赛道都行。
+          我会替你把竞争品牌摸清楚，给你一份带数据依据的全景简报，并标出值得关注的市场机会。不止玩具——任何消费品赛道都行。
         </p>
         <input
           className="track-input"
@@ -70,7 +70,7 @@ export function OverviewCards({
           onChange={(e) => setTrack(e.target.value)}
         />
         <details className="ov-details">
-          <summary>＋ 告诉我更多，报告更准（可选）</summary>
+          <summary>＋ 补充分析条件（可选）</summary>
           <div className="ov-extra">
             <label className="field-label">你当前最关心什么？（可多选，决定先给你看什么）</label>
             <Chips
@@ -101,7 +101,7 @@ export function OverviewCards({
           </div>
         </details>
         <button className="ov-btn-green" type="button" disabled={busy} onClick={goDiscover}>
-          {busy ? '研究中…' : '帮我找对手 →'}
+          {busy ? '正在发现竞争品牌…' : '发现竞争品牌 →'}
         </button>
         <p className="ov-status">{status}</p>
       </div>
@@ -110,7 +110,7 @@ export function OverviewCards({
       <div className="ov-card ov-brand">
         <div className="ov-brand-main">
           <span className="ov-label">指定品牌</span>
-          <p className="ov-sub">快捷检索，防止漏掉你心里那个关键对手。</p>
+          <p className="ov-sub">快捷检索，防止漏掉你心里那个关键竞争品牌。</p>
         </div>
         <div className="ov-brand-row">
           <input
@@ -134,7 +134,7 @@ export function OverviewCards({
         <div className="ov-radar-head">
           <span className="ov-pulse" /> 雷达运行中
         </div>
-        <div className="ov-radar-row">实时监控</div>
+        <div className="ov-radar-row">持续监测</div>
         <div className="ov-radar-row">数据本地处理 · 结论带来源</div>
         <div className="ov-radar-actions">
           <Link href="/radar" className="ov-link">竞品雷达 →</Link>

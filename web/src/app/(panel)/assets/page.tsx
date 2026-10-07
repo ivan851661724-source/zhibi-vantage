@@ -188,7 +188,7 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
     name: '痛点机会表',
     status: painOpp ? '已算出' : '未触发',
     cls: painOpp ? 'ok' : 'idle',
-    finding: painOpp ? '已聚合对手抱怨点，标「未解决 = 机会」' : '暂无对手抱怨点',
+    finding: painOpp ? '已聚合竞争品牌抱怨点，标「未解决 = 机会」' : '暂无竞争品牌抱怨点',
     coverage: painOpp ? '已算出' : '未触发',
   });
   const chRows = (sec.channelMatrix && sec.channelMatrix.rows) || [];
@@ -200,7 +200,7 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
     coverage: `${chRows.length} 渠道`,
   });
   rows.push({
-    name: '赛道空白（对手留的空位）',
+    name: '赛道空白（竞争品牌未覆盖的空间）',
     status: wsGaps.length > 0 ? '已算出' : '未触发',
     cls: wsGaps.length > 0 ? 'ok' : 'idle',
     finding: wsGaps.length ? `共 ${wsGaps.length} 条候选空位` : '暂无',
@@ -242,7 +242,7 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
     name: '雷达群体异动',
     status: '已算出',
     cls: 'ok',
-    finding: gs.length ? `${gs.length} 条跨对手集体异动信号` : '近阶段暂无集体异动',
+    finding: gs.length ? `${gs.length} 条跨品牌集体异动信号` : '近阶段暂无集体异动',
     coverage: `${gs.length} 条`,
   });
   rows.push({
@@ -252,7 +252,7 @@ function buildRows(state: ZhibiState, r: SectorResp | null): AssetRowData[] {
     finding: cs.length ? `${heroCount}/${cs.length} 家识别到主推（推算）` : '无',
     coverage: `${heroCount} 家`,
   });
-  rows.push({ name: '对手时间线', status: '按需触发', cls: 'idle', finding: '点击品牌卡展开时间线', coverage: '按需' });
+  rows.push({ name: '竞争品牌时间线', status: '按需触发', cls: 'idle', finding: '点击品牌卡展开时间线', coverage: '按需' });
   const oppComputed = !!(opp && !opp.hidden);
   rows.push({
     name: '机会地图（旗舰·空白视图）',

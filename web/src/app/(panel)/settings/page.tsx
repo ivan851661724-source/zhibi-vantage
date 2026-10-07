@@ -165,7 +165,7 @@ function SettingsPageInner() {
 
       <div className="modal-card" style={{ maxWidth: 720, margin: '0 auto' }}>
         <h3>设置 API 密钥</h3>
-        <p className="modal-sub">用于自动搜索对手与综合情报。密钥仅存于本机 <code>data/config.json</code>。</p>
+        <p className="modal-sub">用于自动发现竞争品牌与综合情报分析。密钥仅存于本机 <code>data/config.json</code>。</p>
         <label className="field-label">LLM API Key <span className="field-hint">DeepSeek / 阿里云百炼 Token Plan 等 OpenAI 兼容服务</span></label>
         <input className="text-input" type="password" placeholder="sk-…（留空则保持已配置；也可由环境变量 LLM_API_KEY 下发）" value={ds} onChange={(e) => setDs(e.target.value)} />
         <label className="field-label">LLM 接入点（基地址）<span className="field-hint">留空 = DeepSeek 官方或环境变量 LLM_BASE_URL</span></label>

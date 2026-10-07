@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: '知彼 Vantage',
-  description: '竞品信号雷达 —— 降价 · 上新 · 开新店 · 差评暴涨，替你盯着的对手',
+  description: 'Vantage · AI 竞争情报分析师 —— 持续监测竞争品牌 · 记录历史 · 发现变化 · 分析影响 · 关键判断可追溯',
   icons: { icon: '/logo.svg' },
 };
 

@@ -48,7 +48,7 @@ export function AlertsCenter() {
     () =>
       subscribe((evt) => {
         if (evt.type === 'discover_complete') {
-          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${trackRef.current}」对手材料已整理完成，去工作台处理吧。` });
+          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${trackRef.current}」竞争品牌材料已整理完成，去工作台处理吧。` });
           refresh();
         } else if (evt.type === 'discover_error') {
           const msg = (evt.message as string | undefined) || '请稍后重试';
@@ -102,7 +102,7 @@ export function AlertsCenter() {
             </div>
             <div className="alert-list">
               {alerts.length === 0 ? (
-                <p className="alert-empty muted">暂无异动。对手一有动作（降价 / 上新 / 开新店 / 差评暴涨），会出现在这里等你处理。</p>
+                <p className="alert-empty muted">暂无异动。竞争品牌一有动作（降价 / 上新 / 开新店 / 差评暴涨），会出现在这里等你处理。</p>
               ) : (
                 alerts.map((a: ZbAlert) => (
                   <div key={a.id} className={'alert-item' + (a.read ? ' read' : '')}>

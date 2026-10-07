@@ -99,7 +99,7 @@ function HistoryPageInner() {
       {err ? <p className="err">{err}</p> : null}
 
       {list === null ? (
-        <p className="muted">加载中…</p>
+        <p className="muted">正在载入调研记录…</p>
       ) : !list.length ? (
         <div className="empty">
           <div className="big">还没有任何调研档案</div>

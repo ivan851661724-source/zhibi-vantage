@@ -83,7 +83,7 @@ function methodLabel(oid?: string): string {
 
 const ZONE_ORDER = ['underserved', 'moderate', 'served'] as const;
 const ZONE_DESC: Record<string, string> = {
-  underserved: '重要性高、满意度低：多家对手的用户都在抱怨同一件事，且无人被夸做得好。',
+  underserved: '重要性高、满意度低：多个竞争品牌的用户都在抱怨同一件事，且无人被夸做得好。',
   moderate: '有一定普遍性、满意度中等：值得盯，但先确认它是否是你的目标人群真正在乎的。',
   served: '要么已经被做好，要么只有零星提及——不建议作为切入点。',
 };
@@ -121,7 +121,7 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
   if (!market.length) return null;
   return (
     <div className="ws-section opp-section opp-market">
-      <h4><span className="opp-zone-dot" style={{ background: '#1f6fb2' }} />卖点空缺 / 市场空缺（对手没占的空位 · 来自空白视图）</h4>
+      <h4><span className="opp-zone-dot" style={{ background: '#1f6fb2' }} />卖点空缺 / 市场空缺（竞争品牌未覆盖的空位 · 来自空白视图）</h4>
       <p className="ws-desc">下列空位来自「空白视图」：供给侧无人占据、且（需求侧有证据，或薄样本下不定为无需求）。这是最该盯的切入线索；口碑驱动的补充机会见下方「口碑机会」层。</p>
       <div className="opp-list">
         {market.map((g, i) => {
@@ -330,8 +330,8 @@ export default function OpportunityPage() {
     const pt = op.preliminaryThemes || [];
     const reasonLine =
       op.reason === 'need_more_voice'
-        ? <>需要至少 <b>3</b> 家对手采到评论主题或抱怨点。当前 <b>{op.brandsWithVoice}</b> / {op.doneBrands} 家有声音（{op.coveragePct}%）。</>
-        : <>需要至少 <b>3</b> 家已就绪对手，当前 <b>{op.doneBrands}</b> 家。</>;
+        ? <>需要至少 <b>3</b> 家竞争品牌采到评论主题或抱怨点。当前 <b>{op.brandsWithVoice}</b> / {op.doneBrands} 家有声音（{op.coveragePct}%）。</>
+        : <>需要至少 <b>3</b> 家已就绪竞争品牌，当前 <b>{op.doneBrands}</b> 家。</>;
     return (
       <div ref={wrapRef}>
         <div className="page-head">
@@ -349,7 +349,7 @@ export default function OpportunityPage() {
         {pt.length ? (
           <>
             <div className="opp-denom">
-              <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪对手采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
+              <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
               <div className="opp-denom-row"><b>推理</b>：{op.method || ''}</div>
             </div>
             <div className="ws-section opp-section">
@@ -375,7 +375,7 @@ export default function OpportunityPage() {
             </div>
           </>
         ) : (
-          <p className="hint">当前还没有对手留出可识别的用户声音（评论主题 / 抱怨点），暂无可展示的初步信号。继续补齐对手或补采口碑后即可生成正式机会图。</p>
+          <p className="hint">当前还没有竞争品牌留出可识别的用户声音（评论主题 / 抱怨点），暂无可展示的初步信号。继续补齐竞争品牌或补采反馈后即可生成正式机会图。</p>
         )}
         <div className="opp-caveats">
           {(op.caveats || []).map((c, i) => (
@@ -406,7 +406,7 @@ export default function OpportunityPage() {
       </div>
       <MarketGapSection state={state!} />
       <div className="opp-denom">
-        <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪对手采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
+        <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
         <div className="opp-denom-row"><b>推理</b>：{op.method}</div>
         <div className="opp-caveats">
           {(op.caveats || []).map((c, i) => (
@@ -417,7 +417,7 @@ export default function OpportunityPage() {
       <div className="pano-quad-wrap opp-chart">
         <div className="pano-sec-title">机会分布 · 满意度 × 重要性</div>
         <OppScatter op={op} hl={hl} onPick={onPick} />
-        <p className="pano-tip">点的大小＝提及广度（多少家对手的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝很多人在乎、但普遍被抱怨，是最值得下注的位置；右侧＝已经被做好了，硬挤是红海。</p>
+        <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝很多人在乎、但普遍被抱怨，是最值得下注的位置；右侧＝已经被做好了，硬挤是红海。</p>
       </div>
       {ZONE_ORDER.map((zk) => {
         const list = (op.themes || []).filter((t) => t.zone === zk);

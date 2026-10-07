@@ -131,14 +131,14 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     passed++; console.log('ok - 6. P0-2 resolution: env Bailian key+endpoint wins over legacy DeepSeek config baseUrl');
   } catch (e) { failed++; console.error('FAIL - 6. P0-2 resolution: ' + String(e.message || e).split('\n')[0]); }
 
-  // ============ 7. P0-1 前端诚实币种：fmtMoney 无 '$' 兜底；null 币种就近标注「币种未确认」 ============
+  // ============ 7. P0-1 前端诚实币种：fmtMoney 无 '$' 兜底；null 币种就近标注「币种信息暂不可用」 ============
   try {
     const pageSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'app', '(panel)', 'demo', 'page.tsx'), 'utf8');
     const fmtBlock = pageSrc.slice(pageSrc.indexOf('function fmtMoney'), pageSrc.indexOf('function fmtTime'));
     assert.equal(fmtBlock.includes("'$'"), false, 'fmtMoney must NOT fabricate "$" when currency is null');
-    assert.ok(pageSrc.includes('币种未确认'), 'null currency must be labeled 币种未确认');
+    assert.ok(pageSrc.includes('币种信息暂不可用'), 'null currency must be labeled 币种信息暂不可用');
     // recent-change 卡片与 Event Detail 两处价格渲染都要挂标注
-    const labels = (pageSrc.match(/币种未确认/g) || []).length;
+    const labels = (pageSrc.match(/币种信息暂不可用/g) || []).length;
     assert.ok(labels >= 2, 'both recent-change card and Event Detail must label unknown currency (found ' + labels + ')');
     passed++; console.log('ok - 7. P0-1 UI honesty: no fabricated "$", null currency labeled');
   } catch (e) { failed++; console.error('FAIL - 7. P0-1 UI: ' + String(e.message || e).split('\n')[0]); }

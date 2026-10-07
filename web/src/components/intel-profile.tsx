@@ -11,8 +11,8 @@ import type { Competitor, ZhibiState } from '@/types/state';
 
 // ---- 基础字典（移植 app.js 顶部常量） ----
 const REL_LABEL: Record<string, string> = {
-  direct: '直接对手',
-  indirect: '间接对手',
+  direct: '直接竞争品牌',
+  indirect: '间接竞争品牌',
   unrelated: '暂不直接相关',
   undetermined: '关系待定',
 };
@@ -484,7 +484,7 @@ function NoteBox({ cid }: { cid: string }) {
     <div className="note-box">
       <div className="lbl">私有备注（只在本机生效，不进公共库）</div>
       <textarea className="note-ta" placeholder="例：这家「可动关节」卖点与我们方向重合，重点盯它的新品定价…" value={text} onChange={(e) => setText(e.target.value)} maxLength={5000} />
-      <div className="note-hint">你补充的信息只在你自己的页面生效——这是忠实助理的底线，防对手投假数据。</div>
+      <div className="note-hint">你补充的信息只在你自己的页面生效——这是忠实助理的底线，防止干扰数据。</div>
       <div className="notes-actions" style={{ marginTop: 8 }}>
         <button className="btn-mini" type="button" disabled={saving || !loaded} onClick={() => void save()}>保存备注</button>
         <span className="notes-saved">{saved}</span>
@@ -641,6 +641,6 @@ function BlankItems({ c }: { c: Competitor }) {
       );
     }
   });
-  if (!items.length) return <p className="hint">六维字段已全部覆盖，暂无「未探测」项。</p>;
+  if (!items.length) return <p className="hint">档案字段已全部覆盖，暂无「未探测」项。</p>;
   return <div className="fb-flow">{items}</div>;
 }

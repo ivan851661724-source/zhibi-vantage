@@ -35,7 +35,7 @@ export function useDiscover() {
           case 'discover_stage': {
             setProgress({
               pct: typeof evt.pct === 'number' ? evt.pct : 10,
-              label: (evt.label as string) || '正在搜索对手…',
+              label: (evt.label as string) || '正在发现竞争品牌…',
               found: typeof evt.found === 'number' ? evt.found : 0,
             });
             break;

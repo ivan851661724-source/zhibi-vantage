@@ -47,7 +47,7 @@ function LiveBrandCard({ card, lead }: { card: DiscoverCard; lead: boolean }) {
         </div>
       </div>
       {card.why ? <p className="why">{card.why}</p> : null}
-      <p className="hint">{lead ? '正在确认是否为对手…' : '已识别，等待 AI 逐家深研…'}</p>
+      <p className="hint">{lead ? '正在确认是否为竞争品牌…' : '已识别，等待 AI 逐家深研…'}</p>
     </article>
   );
 }
@@ -234,7 +234,7 @@ function WorkbenchInner() {
     } catch (e) {
       discover.reset();
       // 失败原地展示（由下方 error 面板兜底）
-      window.alert('检索失败：' + (e instanceof Error ? e.message : String(e)));
+      window.alert('暂时无法完成品牌检索，请稍后重试。');
     }
   }
 
@@ -246,7 +246,7 @@ function WorkbenchInner() {
           ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
           : discover.error.code === 'NO_KEYS'
             ? '尚未配置 API 密钥：请到「设置」填写搜索源与 LLM 密钥后重试。'
-            : '研究未完成：' + discover.error.message}
+            : '⚠ 本次发现未完成，系统将在后续监测中重新确认。'}
       </p>
       {discover.error.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
     </div>
@@ -270,9 +270,9 @@ function WorkbenchInner() {
       {state?.track ? (
         <section className="wb-hero">
           <div className="wbh-left">
-            <div className="wbh-kicker">竞品信号雷达</div>
+            <div className="wbh-kicker">AI 竞争情报分析师</div>
             <div className="wbh-title">{state.track}</div>
-            <div className="wbh-sub">实时捕捉竞品动态与价格异动</div>
+            <div className="wbh-sub">持续监测竞争品牌动态与价格变化</div>
           </div>
           <div className="wbh-right">
             <div className="wbh-stats">
@@ -298,7 +298,7 @@ function WorkbenchInner() {
           <span className="progress-text">
             {discover.error
               ? '⚠ 研究未完成：' + discover.error.message
-              : (discover.progress?.label || '正在搜索对手…') +
+              : (discover.progress?.label || '正在发现竞争品牌…') +
                 (discover.progress?.found ? `（已发现 ${discover.progress.found} 个）` : '') +
                 (evidenceDist && evidenceDist.total
                   ? `（已查实 ${evidenceDist.verified}/${evidenceDist.total} 项）`

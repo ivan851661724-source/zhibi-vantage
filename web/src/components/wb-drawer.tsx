@@ -152,7 +152,7 @@ export function MaterialDrawer({ m, decision, onSet, onClose }: MaterialDrawerPr
                 <span className="n">4</span>推算影响面
               </div>
               <div className="sec-b">
-                <p className="hint">影响面推算待接入（需对手价格带 + 你的定位锚点），当前不臆测。</p>
+                <p className="hint">影响面推算待接入（需竞争品牌价格带 + 你的定位锚点），当前不臆测。</p>
               </div>
             </div>
           )}

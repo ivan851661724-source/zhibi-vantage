@@ -48,13 +48,13 @@ function IntelInner() {
       <div>
         <div className="page-head">
           <div>
-            <h2>情报库 · 对手档案</h2>
-            <p className="desc">每个对手的六维档案：价格 / 渠道 / 品类 / 上新节奏 / 口碑 / 空白。每个字段都带证据等级与来源，可逐条核对。</p>
+            <h2>情报库 · 竞争品牌档案</h2>
+            <p className="desc">品牌定位、价格、渠道、上新节奏与消费者反馈等竞争品牌档案，每个字段都带数据依据与来源，可逐条核对。</p>
           </div>
         </div>
         <div className="empty">
-          <div className="big">暂无可展示的对手档案</div>
-          <div className="sub">完成调研后，这里会展示每家对手的六维档案。</div>
+          <div className="big">尚未添加竞争品牌</div>
+          <div className="sub">发现并添加竞争品牌后，Vantage 将开始建立竞争档案。</div>
         </div>
       </div>
     );
@@ -64,8 +64,8 @@ function IntelInner() {
     <div>
       <div className="page-head">
         <div>
-          <h2>情报库 · 对手档案</h2>
-          <p className="desc">每个对手的六维档案：价格 / 渠道 / 品类 / 上新节奏 / 口碑 / 空白。每个字段都带证据等级与来源，可逐条核对。</p>
+          <h2>情报库 · 竞争品牌档案</h2>
+          <p className="desc">品牌定位、价格、渠道、上新节奏与消费者反馈等竞争品牌档案，每个字段都带数据依据与来源，可逐条核对。</p>
         </div>
         <div className="actions">
           <div className="filters" style={{ marginBottom: 0 }}>
