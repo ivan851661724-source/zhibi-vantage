@@ -16,6 +16,10 @@
 //     不存在 _legacy 共享命名空间
 //   · collector_version ≠ parser_version：快照层 parser 未运行，不伪造 parser_version
 //   · content_hash 基于「解析/规范化之前的原始响应字节」
+//   · P0-3（PR#2 评审）：不产业务 Coverage 语义——raw_truncated 只是 raw 存储截断标记，
+//     timeout/blocked 等无 body 观察绝不因此宣称"完整"；采集扫描完整性走 scan 字段，
+//     一等 Coverage 对象归后续 Coverage 票
+//   · P1-2（PR#2 评审）：raw blob 独占创建（wx）——竞态/孤儿场景绝不静默覆盖既有文件
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -127,7 +131,9 @@ function record(input) {
   let refByteSize = 0;
   if (store) {
     const bPath = blobPathOf(ns, day, id);
-    fs.writeFileSync(bPath, store);            // 新文件一次性写，无覆盖路径
+    // P1-2：独占创建（wx）——目标已存在（竞态/孤儿）时显式失败，绝不静默覆盖既有 raw
+    try { fs.writeFileSync(bPath, store, { flag: 'wx' }); }
+    catch (e) { throw new Error('source-snapshot: raw blob write failed (exclusive-create, no overwrite): ' + (e.code || e.message) + ' :: ' + id); }
     relRef = path.relative(DATA, bPath).replace(/\\/g, '/');
     refByteSize = store.length;
   }
@@ -157,7 +163,10 @@ function record(input) {
     trigger: input.trigger || 'enrich',
     tenant: { tenant_id: tenantId, project_ref: input.projectRef || null, brand_hint: input.brandHint || null },
     call_ledger_id: null,                      // ExternalCallLedger 并行 track 预留（正交，OQ-3）
-    coverage: { complete: truncated ? false : true, partial_scan: false, note: input.note || null },
+    // P0-3：无 coverage 字段。raw_truncated/raw_size/raw_payload_ref 仅描述 raw 存储属性；
+    // scan = 采集扫描完整性（如 Shopify 首页分页限制），与 raw 截断正交，二者均非业务 Coverage
+    scan: input.scan || null,
+    note: input.note || null,
     retention: {
       tier: RETENTION_INITIAL.tier,
       evidence_bearing: RETENTION_INITIAL.evidence_bearing,
@@ -166,7 +175,7 @@ function record(input) {
     },
   };
 
-  fs.writeFileSync(mPath, JSON.stringify(meta, null, 1));
+  fs.writeFileSync(mPath, JSON.stringify(meta, null, 1), { flag: 'wx' }); // P1-2：meta 同样独占创建
   return { recorded: true, meta };
 }
 

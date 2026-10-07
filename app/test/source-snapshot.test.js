@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================
-// M0-01 SourceSnapshot 单测（计划 v0.2 §6，15 用例）
+// M0-01 SourceSnapshot 单测（计划 v0.2 §6 + PR#2 评审增补，18 用例）
+// 评审增补：16=P0-1 部分扫描诚实语义 / 17=P0-3 无业务 Coverage / 18=P1-2 独占创建；
+// 9=P0-2 跨租户缓存不串溯源；11=P1-1 parse_failed body 已接收 → observed_at 非空
 // 隔离：ZB_DATA_DIR 指向临时目录（必须在 require 业务模块前设置）
 // 网络隔离：stub global.fetch + dns.promises.lookup（SSRF 守卫按公网 IP 放行）
 // 规格锚点：/spec 05 v0.3 §11（八态字面量）/§13；00 v1.2 §38/§54/§56
@@ -180,21 +182,24 @@ const BASE = 'http://example.com';
   });
 
   // 9. 租户规则：隔离 + ALS 兜底 + 双缺拒绝（无 _legacy）
-  // 注：fetch-page 缓存为进程级公共内容缓存（既有行为，键不含租户）——跨租户命中时
-  // 溯源指向首次观察的快照（与 00 §52 Canonical Reuse 方向一致）；跨租户 id 解析
-  // 归 M0-02 接口决策（OQ-4）。本用例对 B 用独立 URL 触发真实网络观察。
-  await t('9 租户隔离 / ALS 兜底 / 双缺拒绝且无 _legacy 目录', async () => {
-    fetchRoutes = { [BASE + '/t1']: () => jsonResponse('<p>tenants</p>'), [BASE + '/t1b']: () => jsonResponse('<p>tenants-b</p>') };
+  // P0-2（PR#2 评审）：fetch-page 缓存键按租户隔离——同 URL 跨租户时 B 缓存不命中（B 键独立），
+  // 触发真实网络观察并落 B 自己的快照；B 永不接收 A 的租户级快照溯源。
+  // Canonical 跨工作区复用归 Canonical track 显式实现（00 §52），不得借公共缓存模拟。
+  await t('9 租户隔离 / 跨租户缓存不串溯源 / ALS 兜底 / 双缺拒绝且无 _legacy 目录', async () => {
+    fetchRoutes = { [BASE + '/t1']: () => jsonResponse('<p>tenants</p>') };
     const outA = await net.fetchPage(BASE + '/t1', 5000, { tenantId: TENANT_A });
-    const outB = await net.fetchPage(BASE + '/t1b', 5000, { tenantId: TENANT_B });
-    assert.ok(outA._prov.recorded && outB._prov.recorded, '双租户各自落盘');
+    const outB = await net.fetchPage(BASE + '/t1', 5000, { tenantId: TENANT_B });
+    assert.ok(outA._prov.recorded && outB._prov.recorded, '双租户各自真实观察并落盘');
+    assert.notEqual(outB._prov.source_snapshot_id, outA._prov.source_snapshot_id, 'P0-2：B 永不接收 A 的快照溯源');
     assert.ok(fs.existsSync(nsDir(TENANT_A)), 'A 目录存在');
     assert.ok(fs.existsSync(nsDir(TENANT_B)), 'B 目录存在');
-    assert.equal(Snapshot.getById(TENANT_B, outA.snapshotId), null, '跨租户不可见');
-    assert.equal(Snapshot.getById(TENANT_A, outB.snapshotId), null, '跨租户不可见（反向）');
-    // 同 URL 跨租户：B 命中公共缓存 → 溯源指向 A 的首次观察快照（诚实透传，不伪造）
-    const viaCache = await net.fetchPage(BASE + '/t1', 5000, { tenantId: TENANT_B });
-    assert.equal(viaCache._prov.source_snapshot_id, outA._prov.source_snapshot_id, '跨租户缓存命中溯源指向首次观察');
+    assert.equal(Snapshot.getById(TENANT_B, outA.snapshotId), null, 'A 的快照对 B 不可见');
+    assert.equal(Snapshot.getById(TENANT_A, outB.snapshotId), null, 'B 的快照对 A 不可见（反向）');
+    assert.ok(Snapshot.getById(TENANT_B, outB.snapshotId), 'B 自己的快照可读回（溯源可解析）');
+    assert.equal(outB._prov.tenant_id, undefined, '无租户关系元数据泄漏');
+    // 同租户重复抓取：仍走缓存命中路径，修正 2 语义不变
+    const againA = await net.fetchPage(BASE + '/t1', 5000, { tenantId: TENANT_A });
+    assert.equal(againA._prov.source_snapshot_id, outA._prov.source_snapshot_id, '同租户命中保留原快照 id');
     const alsOut = await als.requestScope.run(TENANT_A, () => net.fetchPage(BASE + '/t1', 5000));
     assert.ok(alsOut._prov && alsOut._prov.recorded, 'ALS 上下文内无需显式 tenantId（缓存命中路径亦带溯源）');
     const skipped = als.requestScope.run(undefined, () => Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: BASE + '/t1', source_status: 'unavailable', observed_at: null, bodyBytes: null }));
@@ -222,7 +227,9 @@ const BASE = 'http://example.com';
     assert.equal(out.error, 'parse_failed');
     const meta = Snapshot.getById(TENANT_A, out.snapshotId);
     assert.equal(meta.source_status, 'parse_failed');
-    assert.equal(meta.observed_at, null, '内容未有效观察');
+    // P1-1（PR#2 评审）：2XX body 已成功接收 = 内容已被真实观察 → observed_at 非空
+    assert.ok(meta.observed_at, 'P1-1：body 接收后 parse_failed 的 observed_at 非空');
+    assert.ok(new Date(meta.observed_at) <= new Date(meta.collected_at), 'observed_at <= collected_at');
     assert.ok(Snapshot.readRawPayload(meta).equals(Buffer.from(bad)), '原始字节保留');
   });
 
@@ -237,7 +244,7 @@ const BASE = 'http://example.com';
       assert.equal(meta.raw_size, 1000);
       assert.equal(meta.raw_payload_ref.byte_size, 64);
       assert.equal(Snapshot.readRawPayload(meta).length, 64);
-      assert.equal(meta.coverage.complete, false, '截断不宣称完整');
+      assert.ok(!('coverage' in meta), 'P0-3：截断仅是 raw 存储属性，不得产生业务 Coverage 语义');
     } finally { delete process.env.ZB_SNAPSHOT_MAX_BYTES; }
   });
 
@@ -258,6 +265,10 @@ const BASE = 'http://example.com';
     const m2 = Snapshot.getById(TENANT_A, shopify.snapshotId);
     assert.ok(m1 && m1.capability === 'evidence_url');
     assert.ok(m2 && m2.capability === 'product_catalog' && m2.provider === 'shopify_products_json');
+    // P0-1 对照面：首页不满额（1 < 100）= 完整目录观察 → success + scan.complete=true
+    assert.equal(m2.source_status, 'success', '首页 < 100 款即全部 → success');
+    assert.equal(m2.scan.complete, true, 'scan.complete=true');
+    assert.equal(m2.scan.observed_first_page, 1);
     assert.ok(new Date(m2.observed_at) <= new Date(m2.collected_at), 'observed_at <= collected_at');
   });
 
@@ -286,6 +297,55 @@ const BASE = 'http://example.com';
     for (const s of [400, 404, 500, 503]) assert.equal(Snapshot.mapHttpStatus(s), 'unavailable');
     assert.throws(() => Snapshot.record({ capability: 'x', provider: 'x', source_status: 'source_unavailable', tenantId: TENANT_A }), /invalid source_status/, '别名 source_unavailable 必须被拒');
     assert.throws(() => Snapshot.record({ capability: 'x', provider: 'x', source_status: 'partial_success', tenantId: TENANT_A }), /invalid source_status/, '别名 partial_success 必须被拒');
+  });
+
+  // 16. P0-1：Shopify 首页满额不得宣称完整目录 → partial + scan.complete=false
+  await t('16 P0-1：首页满额（100 款）→ partial，绝不宣称 success+完整目录', async () => {
+    const hundred = { products: Array.from({ length: 100 }, (_, i) => ({ title: 'P' + i, product_type: 'fig', variants: [{ price: '9.9' }] })) };
+    fetchRoutes = {
+      [BASE + '/big-site']: () => jsonResponse('<p>site</p>'),
+      'https://example.com/cart.js': () => jsonResponse({ currency: 'USD' }),
+      'https://example.com/products.json': () => jsonResponse(hundred),
+    };
+    const out = await net.fetchShopifyProducts(BASE, { tenantId: TENANT_A });
+    assert.ok(out.ok && out.total === 100, '业务行为不变（items/total 契约兼容）');
+    const meta = Snapshot.getById(TENANT_A, out.snapshotId);
+    assert.equal(meta.source_status, 'partial', 'M0-04 分页落地前不得记 success');
+    assert.equal(meta.scan.complete, false, '不宣称完整目录');
+    assert.equal(meta.scan.observed_first_page, 100);
+    assert.ok(meta.scan.reason, '不完整原因显式可读');
+    assert.ok(meta.observed_at, 'body 已接收 → observed_at 非空（P1-1 同样适用）');
+    assert.ok(!('coverage' in meta), '无业务 Coverage 字段（P0-3）');
+  });
+
+  // 17. P0-3：失败观察（unavailable/timeout）无 body 也绝不隐含任何 Coverage complete
+  await t('17 P0-3：失败观察不携带 coverage；raw 属性诚实为空', async () => {
+    fetchRoutes = { [BASE + '/nf2']: () => new Response('nope', { status: 404 }) };
+    const nf = await net.fetchPage(BASE + '/nf2', 5000, { tenantId: TENANT_A });
+    const meta = Snapshot.getById(TENANT_A, nf.snapshotId);
+    assert.equal(meta.source_status, 'unavailable');
+    assert.ok(!('coverage' in meta), 'unavailable 快照不得隐含 coverage.complete=true');
+    assert.equal(meta.raw_truncated, false, 'raw_truncated 仅为 raw 存储属性（无 body 自然 false）');
+    assert.equal(meta.raw_payload_ref, null, '无 body 即无 blob 引用');
+    assert.equal(meta.observed_at, null, '内容从未被观察');
+  });
+
+  // 18. P1-2：raw blob 独占创建——既有文件绝不被静默覆盖（竞态/孤儿场景）
+  await t('18 P1-2：blob 独占创建，冲突显式失败且原文件字节不变', async () => {
+    const id = 'ss_unit_xcreate_0001_ddeeff';
+    const fetchedAt = new Date().toISOString();
+    const day = String(fetchedAt).slice(0, 10).replace(/-/g, '');
+    const bPath = path.join(nsDir(TENANT_A), day, id + '.raw');
+    fs.mkdirSync(path.dirname(bPath), { recursive: true });
+    fs.writeFileSync(bPath, 'sentinel-do-not-overwrite');
+    assert.throws(
+      () => Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: BASE + '/xc', source_status: 'success', observed_at: fetchedAt, fetched_at: fetchedAt, bodyBytes: Buffer.from('new-bytes'), tenantId: TENANT_A, snapshot_id: id }),
+      /exclusive-create/,
+      '独占创建冲突必须显式抛错（可见运营错误）'
+    );
+    assert.equal(fs.readFileSync(bPath, 'utf8'), 'sentinel-do-not-overwrite', '既有 blob 字节不变');
+    const mPath = path.join(nsDir(TENANT_A), day, id + '.json');
+    assert.ok(!fs.existsSync(mPath), 'blob 失败时不得落 meta（无半截快照）');
   });
 
   // 还原全局 stub（跑回归时防止泄漏到其他用例——本文件独立进程执行，此为防御性收尾）

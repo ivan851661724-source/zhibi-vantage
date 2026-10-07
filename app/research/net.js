@@ -11,7 +11,18 @@ const net = require('net');
 const { Buffer } = require('buffer');
 
 const Cache = require('../services/cache.js');
+const als = require('../core/als.js');
 const Snapshot = require('./source-snapshot.js');
+
+// 租户解析（P0-2，PR#2 评审）：显式参数 > ALS > null。fetch-page 缓存键按租户隔离——
+// B 永不命中 A 的缓存条目、永不接收 A 的租户级快照溯源；Canonical 跨工作区复用归
+// Canonical Brand / Collection track 显式实现（00 §52），不得借公共缓存模拟。
+// 迁移说明：旧全局键条目随 72h TTL 自然淘汰，无清理动作。
+function tenantOf(o) {
+  const t = o && o.tenantId;
+  if (t) return String(t);
+  try { const c = als.getTenantCtx(); return c ? String(c) : null; } catch (_) { return null; }
+}
 
 // 修正 7：net-1 标识的是 fetch/采集实现版本（collector_version），不是 parser_version——
 // 快照层 parser 未运行，不伪造 parser_version（Spec Change 候选 SC-01）
@@ -76,7 +87,9 @@ async function assertPublicUrl(rawUrl) {
 // opts（可选）：{ trigger, tenantId } —— 快照归因；业务返回值不受影响
 async function fetchPage(url, timeoutMs, opts) {
   const o = opts || {};
-  const hit = Cache.get('fetch-page', url);
+  const tenant = tenantOf(o);
+  const ck = tenant ? 't:' + tenant + '|' + url : url; // P0-2：缓存键租户隔离
+  const hit = Cache.get('fetch-page', ck);
   if (hit) return Snapshot.decorateCacheHit(hit);
   const fetchedAt = new Date().toISOString();
   // 旁路记录失败观察（00 §38：fetch_failed ≠ no_change）；业务返回值原样
@@ -120,7 +133,7 @@ async function fetchPage(url, timeoutMs, opts) {
     } catch (e) { loggerError('fetchPage', e, url); }
     const html = buf.toString('utf8');
     const out = { ok: true, url: r.url || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
-    Cache.set('fetch-page', url, out);
+    Cache.set('fetch-page', ck, out);
     return out;
   } catch (e) {
     const cls = Snapshot.classifyError(e);
@@ -160,20 +173,29 @@ async function fetchShopifyProducts(siteUrl, opts) {
       const sid = recFail(st, 'http:' + r.status, r.status);
       return { ok: false, status: r.status, snapshotId: sid };
     }
-    // 原始 JSON 字节截获（解析之前），再 JSON.parse——parse 失败时字节仍落 blob 供重放
+    // 原始 JSON 字节截获（解析之前），再 JSON.parse——parse 失败时字节仍落 blob 供重放。
+    // P1-1（PR#2 评审）：2XX body 已接收 = 来源内容已被真实观察 → observed_at 非空；
+    // observed_at=null 仅保留给"内容从未被观察"的 retrieval 前失败（pre-body timeout/SSRF/blocked 等）
     const buf = Buffer.from(await r.arrayBuffer());
+    const observedAt = new Date().toISOString();
     let j;
     try { j = JSON.parse(buf.toString('utf8')); } catch (pe) {
       let sid;
-      try { const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: null, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), trigger: o.trigger, tenantId: o.tenantId, note: 'json parse failed; raw kept for replay' }); if (s.recorded) sid = s.meta.snapshot_id; } catch (e) { loggerError('fetchShopifyProducts', e, d); }
+      try { const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), trigger: o.trigger, tenantId: o.tenantId, note: 'json parse failed after body receipt; raw kept for replay' }); if (s.recorded) sid = s.meta.snapshot_id; } catch (e) { loggerError('fetchShopifyProducts', e, d); }
       return { ok: false, error: 'parse_failed', snapshotId: sid };
     }
     const products = Array.isArray(j.products) ? j.products : [];
-    const observedAt = new Date().toISOString();
     let sid, prov = { recorded: false };
+    // P0-1（PR#2 评审）：M0-04 完整分页落地前，products.json?limit=100 首页即全部
+    // （products.length < 100）才允许记完整目录观察（success）；≥100 视为已知不完整
+    // 采集 → source_status=partial（05 §11 冻结字面量）+ scan.complete=false，
+    // 绝不宣称 success + 完整目录。业务返回值（items/total）契约不变。
+    const scanComplete = products.length < 100;
+    const scanStatus = scanComplete ? Snapshot.SOURCE_STATUS.SUCCESS : Snapshot.SOURCE_STATUS.PARTIAL;
+    const scan = { complete: scanComplete, reason: scanComplete ? null : 'products_json_first_page_limit_100_pagination_pending_m0_04', observed_first_page: products.length };
     const recordSuccess = (note) => {
       try {
-        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), source_updated_at: r.headers.get('last-modified'), trigger: o.trigger, tenantId: o.tenantId, note: note || null });
+        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: u.href, final_url: null, redirect_hops: 0, http_status: r.status, source_status: scanStatus, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), source_updated_at: r.headers.get('last-modified'), trigger: o.trigger, tenantId: o.tenantId, scan: scan, note: note || null });
         if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
       } catch (e) { loggerError('fetchShopifyProducts', e, d); }
     };

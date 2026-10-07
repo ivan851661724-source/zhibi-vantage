@@ -226,3 +226,19 @@ data/snapshots/<tenantNs>/<YYYYMMDD>/<snapshot_id>.raw    ← 不可变原始字
 2. `net.js` 旁路接线（成功/失败/缓存命中三分支 + arrayBuffer 原始字节）
 3. 15 用例 + 全量回归 + static-check
 4. PR：`feat(m0-01): SourceSnapshot foundation — evidence-grade raw capture`（Spec/Acceptance/Tests/DoD 四段式），**不含 M0-02**
+
+---
+
+## §11 PR#2 评审修正附录（2026-10-07，评审结论 PARTIAL → 修正后待复审）
+
+评审 5 项问题逐条落点（全部实现并有测试锁定）：
+
+| # | 评审问题 | 修正落点 | 测试 |
+|---|---|---|---|
+| P0-1 | Shopify 首页扫描（limit=100/slice 60）不得记 success+完整目录 | `net.js` fetchShopifyProducts：`products.length < 100` 才算完整观察（success）；≥100 → `source_status=partial`（05 §11 冻结字面量）+ `scan={complete:false, reason, observed_first_page}`；业务 items/total 契约不变 | #16（满额→partial）、#13 对照（不满额→success+complete） |
+| P0-2 | 跨租户缓存命中不得把 A 的快照溯源交给 B | `net.js`：fetch-page 缓存键租户隔离（`t:<tenant>|<url>`，显式>ALS）；B 永不命中 A 条目、永不收 A 的 snapshot id；Canonical 跨工作区复用归 Canonical track（00 §52），不得借公共缓存模拟；OQ-4 就此关闭 | #9 重写（同 URL 双租户各自落盘、id 不同、互不可见） |
+| P0-3 | `coverage.complete=!raw_truncated` 语义无效 | `source-snapshot.js`：删除 coverage 字段；快照只描述 raw 存储属性（raw_truncated/raw_size/raw_payload_ref）+ 采集扫描描述 scan；一等 Coverage 对象归后续 Coverage 票 | #12/#16/#17（失败/截断/满额三种形态均断言无 coverage 字段） |
+| P1-1 | 2XX body 已接收但 parse 失败 → observed_at 不得为 null | `net.js`：body 接收时刻即 observedAt（arrayBuffer 之后），parse_failed 与 success 路径共用；observed_at=null 仅保留给 retrieval 前失败（pre-body timeout/SSRF/blocked/404 等内容未送达） | #11 改断言（非空 + ≤ collected_at） |
+| P1-2 | raw 写入须防静默覆盖 | `source-snapshot.js`：blob 与 meta 均改独占创建（`flag:'wx'`）；冲突显式抛错（可见运营错误），不落半截快照（blob 失败则无 meta） | #18（预置 sentinel 文件→record 抛错→字节不变→无 meta） |
+
+测试增补后共 18 用例（15 原有全保持 + 3 新增），18/18 绿。全量回归 17 套件 16 绿（static-check.test.js 为沙箱 spawn EBUSY 本底，干净 main 同败，实证记录在案）。
