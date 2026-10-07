@@ -40,6 +40,8 @@ function registerAll() {
   registry.register('GET', '/api/demo/recent-changes', 'tenant', DemoH.recentChanges);
   registry.register('GET', '/api/demo/event-detail', 'tenant', DemoH.eventDetail);
   registry.register('GET', '/api/demo/evidence-detail', 'tenant', DemoH.evidenceDetail);
+  registry.register('POST', '/api/demo/seed', 'tenant', DemoH.seed);
+  registry.register('POST', '/api/demo/ai-interpretation', 'tenant', DemoH.aiInterpretation);
   registry.register('POST', '/api/quadrant', 'tenant', ReadH.quadrant);
   registry.register('POST', '/api/compare', 'tenant', ReadH.compare);
   // —— 度量层组（P0-2/3/4） ——

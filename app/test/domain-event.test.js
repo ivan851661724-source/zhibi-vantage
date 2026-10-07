@@ -209,12 +209,13 @@ t('10. Demo routes registered in registry', () => {
   }
 });
 
-// ============ 11. 零 LLM 零网络（静态断言） ============
-t('11. No LLM / no network in event+handler layer (static assertion)', () => {
-  for (const f of ['research/domain-event.js', 'routes/handlers/demo.js']) {
-    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-    assert.equal(/fetch\(|XMLHttpRequest|axios|node-fetch|openai|deepseek|dashscope|bailian/i.test(src), false, f);
-  }
+// ============ 11. 零直连网络（静态断言）：Event 层零网络；demo.js 禁裸 fetch，LLM 必须经 gateway ============
+t('11. Event layer zero-network; demo handler routes LLM via gateway only (static assertion)', () => {
+  const evSrc = fs.readFileSync(path.join(__dirname, '..', 'research', 'domain-event.js'), 'utf8');
+  assert.equal(/fetch\(|XMLHttpRequest|axios|node-fetch|openai|deepseek|dashscope|bailian/i.test(evSrc), false, 'domain-event.js');
+  const demoSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'handlers', 'demo.js'), 'utf8');
+  assert.equal(/fetch\(|XMLHttpRequest|axios|node-fetch/i.test(demoSrc), false, 'demo.js must not raw-fetch');
+  assert.ok(/require\('\.\.\/\.\.\/services\/llm-gateway\.js'\)/.test(demoSrc), 'demo.js LLM must go through gateway');
 });
 
 // ============ 12. Event 无业务判断语义（分层不越权） ============

@@ -159,7 +159,7 @@ function detectPriceChangeFromFact(input) {
   if (dr.meta.status !== Diff.DIFF_STATUS.CHANGED) {
     return { ok: true, diff_id: dr.meta.diff_id, status: dr.meta.status, event_id: null, reason: 'no_event_for_' + dr.meta.status };
   }
-  const er = recordPriceChangeEvent({ tenantId, diffId: dr.meta.diff_id });
+  const er = recordPriceChangeEvent({ tenantId, diffId: dr.meta.diff_id, note: input.note || null });
   if (!er.recorded) return { ok: false, diff_id: dr.meta.diff_id, reason: er.reason };
   return { ok: true, diff_id: dr.meta.diff_id, status: dr.meta.status, event_id: er.meta.event_id, duplicate: !!er.duplicate };
 }
