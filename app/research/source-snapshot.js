@@ -172,6 +172,9 @@ function record(input) {
     raw_size: rawSize,
     raw_truncated: truncated,
     collector_version: COLLECTOR_VERSION,
+    // SC-01（05 v0.3.1 §4）：parser_version 字段必须存在但 nullable——快照层未解析，
+    // 恒为 null（不伪造）；结构化 Adapter/Evidence/Fact 层必填实际 parser 版本。
+    parser_version: null,
     trigger: input.trigger || 'enrich',
     tenant: { tenant_id: tenantId, project_ref: input.projectRef || null, brand_hint: input.brandHint || null },
     call_ledger_id: null,                      // ExternalCallLedger 并行 track 预留（正交，OQ-3）

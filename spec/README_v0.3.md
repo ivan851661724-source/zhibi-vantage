@@ -9,7 +9,7 @@
 - 02 Data & Algorithm：v0.3
 - 03 Backend & API：v0.3
 - 04 Frontend Interaction：v0.3
-- 05 Data Source & Collection：v0.3
+- 05 Data Source & Collection：v0.3.1（SC-01：collector_version 必填 / parser_version nullable，2026-10-07）
 - 06 QA / Golden Dataset：v0.3
 - 07 Operations Runbook：v0.3
 

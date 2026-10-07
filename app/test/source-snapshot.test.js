@@ -77,7 +77,7 @@ const BASE = 'http://example.com';
 
 (async () => {
 
-  // 1. success 快照字段完整性（collector_version，非 parser_version）
+  // 1. success 快照字段完整性（collector_version + parser_version:null）
   await t('1 success 快照字段完整性（collector_version 而非 parser_version）', async () => {
     fetchRoutes = { [BASE + '/page1']: () => jsonResponse('<html>hello page1</html>', { 'content-type': 'text/html' }) };
     const out = await net.fetchPage(BASE + '/page1', 5000, { tenantId: TENANT_A, trigger: 'enrich' });
@@ -90,7 +90,7 @@ const BASE = 'http://example.com';
     assert.equal(meta.http_status, 200);
     assert.equal(meta.source_status, 'success');
     assert.equal(meta.collector_version, 'net-1');
-    assert.ok(!('parser_version' in meta), '快照层不得伪造 parser_version');
+    assert.equal(meta.parser_version, null, '快照层 parser_version 字段存在且为 null（SC-01：未解析不伪造）');
     assert.ok(meta.observed_at && meta.fetched_at && meta.collected_at, '三时间齐备');
     assert.equal(meta.content_hash, 'sha256:' + sha256hex(Buffer.from('<html>hello page1</html>', 'utf8')));
     assert.equal(meta.tenant.tenant_id, TENANT_A);
