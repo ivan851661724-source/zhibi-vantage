@@ -89,6 +89,45 @@ export default function DemoPage() {
   const events = recent?.events || [];
   const summary = recent?.summary;
 
+  // ---- 今日竞争简报（纯派生：数字全部来自 recent-changes REST 的 DomainEvent，不写死业务数字）----
+  const [copyMsg, setCopyMsg] = useState('');
+  const latest = events.length
+    ? [...events].sort((a, b) => String(b.occurred_at).localeCompare(String(a.occurred_at)))[0]
+    : null;
+  const latestBrand = latest ? String((latest.entity_ref && (latest.entity_ref as Record<string, unknown>).brand_name) || '竞品') : '';
+  const latestTitle = latest ? String((latest.entity_ref && (latest.entity_ref as Record<string, unknown>).title) || '商品') : '';
+  const latestPct = latest ? Math.abs(latest.pct ?? 0).toFixed(1) : '';
+  const latestDirWord = latest ? (latest.direction === 'decrease' ? '下降' : latest.direction === 'increase' ? '上涨' : '变化') : '';
+  // 确定性「建议关注」（按方向给固定口径，不编造任何数字/事件）
+  const advice = latest
+    ? (latest.direction === 'decrease'
+      ? '建议关注同价格带商品的后续价格压力与促销动作。'
+      : latest.direction === 'increase'
+        ? '建议关注该品牌是否在试探提价空间，以及对自家转化与促销策略的影响。'
+        : '建议保持观察，等待下一次扫描确认趋势。')
+    : '';
+  const briefAi = latest ? insight[latest.event_id] : undefined; // 复用现有 ai-interpretation 结果；无 AI 不影响简报
+  const briefText = latest ? [
+    '【今日竞争简报】（Demo / Sample Data）',
+    '近期发现 ' + (summary ? summary.total : events.length) + ' 个竞争变化动作' + (summary ? '（降价 ' + summary.decrease + ' · 涨价 ' + summary.increase + '）' : '') + '。',
+    '最重要：' + latestBrand + ' · ' + latestTitle + ' 价格从 ' + fmtMoney(latest.old_price, latest.currency)
+      + ' 调整至 ' + fmtMoney(latest.new_price, latest.currency) + '，' + latestDirWord + ' ' + latestPct + '%'
+      + (latest.currency ? '（币种 ' + latest.currency + '）' : '（币种未确认）') + '。',
+    '观察时间：' + fmtTime(latest.observed_at_old) + ' → ' + fmtTime(latest.observed_at_new),
+    advice,
+    briefAi ? 'AI 解读（' + briefAi.model + '）：' + briefAi.insight : '',
+  ].filter(Boolean).join('\n') : '';
+
+  async function copyBrief() {
+    try {
+      await navigator.clipboard.writeText(briefText);
+      setCopyMsg('已复制到剪贴板');
+    } catch {
+      setCopyMsg('复制失败（浏览器剪贴板权限受限）');
+    }
+    setTimeout(() => setCopyMsg(''), 3000);
+  }
+
   return (
     <div className="demo-console">
       <style jsx global>{`
@@ -115,6 +154,10 @@ export default function DemoPage() {
         .demo-err { color: #d92d20; font-size: 12.5px; margin-top: 8px; }
         .demo-empty { color: #9ca3af; font-size: 13px; padding: 18px 0; text-align: center; }
         .demo-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+        .demo-brief-line { font-size: 13.5px; margin: 5px 0; line-height: 1.9; color: #374151; }
+        .demo-brief-line b { color: #111; }
+        .demo-brief-new { color: #d92d20; font-weight: 700; }
+        .demo-brief-advice { color: #166534; font-size: 13px; margin-top: 8px; }
       `}</style>
 
       <div>
@@ -122,6 +165,33 @@ export default function DemoPage() {
         <span className="demo-badge">Demo / Sample Data</span>
         <div className="demo-sub">持续替你观察竞争对手 · 记住过去 · 发现变化 · 用 AI 解释影响 · 每个结论可回到证据</div>
       </div>
+
+      {/* 今日竞争简报（AI Analyst 首屏）：数字全部来自 recent-changes；AI 不可用时仅显确定性事实 */}
+      {latest && (
+        <>
+          <div className="demo-sec-title">今日竞争简报</div>
+          <div className="demo-card">
+            <div className="demo-brief-line">
+              近期发现 <b>{summary ? summary.total : events.length}</b> 个重要竞争动作（降价 <b>{summary ? summary.decrease : 0}</b> · 涨价 <b>{summary ? summary.increase : 0}</b>）。
+            </div>
+            <div className="demo-brief-line">
+              {latestBrand} · {latestTitle} 价格从 <b>{fmtMoney(latest.old_price, latest.currency)}</b> 调整至 <b className="demo-brief-new">{fmtMoney(latest.new_price, latest.currency)}</b>，{latestDirWord} {latestPct}%
+              {!latest.currency && <span className="demo-cur-note" style={{ marginLeft: 4 }}>币种未确认</span>}。
+            </div>
+            {briefAi && (
+              <div className="demo-ai">
+                {briefAi.insight}
+                <div className="demo-ai-meta">模型 {briefAi.model} · 端点 {briefAi.endpoint_kind}{briefAi.cached ? ' · 缓存' : ''}</div>
+              </div>
+            )}
+            <div className="demo-brief-advice">{advice}</div>
+            <div style={{ marginTop: 10 }}>
+              <button className="demo-btn" onClick={copyBrief}>复制简报</button>
+              {copyMsg && <span className="demo-kv" style={{ marginLeft: 4 }}>{copyMsg}</span>}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* 页面 A —— 工作台：今日竞争动态 */}
       <div className="demo-sec-title">今日竞争动态</div>
