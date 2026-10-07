@@ -100,11 +100,13 @@ async function seed(ctx, req, res, url, p) {
   return true;
 }
 
-// ---------- POST /api/demo/ai-interpretation?id=evt_xxx ----------
+// ---------- POST /api/demo/ai-interpretation?id=evt_xxx[&refresh=1] ----------
 // AI 竞争分析师（任务书 §一.4 / §七）：只解释已有结构化 Event 数据。
 // 硬规则：prompt 仅含 Event 真值字段（价格/方向/幅度/时间/来源），
 // system 明令禁止编造数字/来源/销量/GMV/AOV；实际使用的 model 与端点类型
 // 随响应返回（百炼真实调用须可核验）。结果按 event_id 幂等缓存（可回算对象）。
+// refresh=1（百炼真实 smoke 用）：跳过已有缓存，强制真实调用 LLM Gateway，
+// 成功后覆盖更新缓存——只影响 AI 解读，绝不触碰 Event/Diff/Fact/Evidence/Snapshot。
 async function aiInterpretation(ctx, req, res, url, p) {
   if (p !== '/api/demo/ai-interpretation' || req.method !== 'POST') return false;
   const tenantId = als.getTenantCtx();
@@ -120,7 +122,9 @@ async function aiInterpretation(ctx, req, res, url, p) {
   const { sanitizeNs } = require('../../core/state-store.js');
   const insightDir = path.join(DATA, 'ai-insights', sanitizeNs(tenantId));
   const insightPath = path.join(insightDir, event.event_id + '.json');
-  if (fs.existsSync(insightPath)) {
+  // refresh=1（真实 smoke）：跳过缓存命中，强制走真实 LLM 调用（默认行为不变）
+  const refresh = (url && url.searchParams && url.searchParams.get('refresh')) === '1';
+  if (!refresh && fs.existsSync(insightPath)) {
     try { return ctx.sendJSON(res, 200, Object.assign(JSON.parse(fs.readFileSync(insightPath, 'utf8')), { cached: true })); } catch (e) {}
   }
 
@@ -136,7 +140,9 @@ async function aiInterpretation(ctx, req, res, url, p) {
   const LLM = require('../../services/llm-gateway.js');
   const apiKey = String(RLLM.llmApiKey(cfg) || '').trim();
   if (!apiKey) return ctx.sendJSON(res, 503, { error: 'LLM_NOT_CONFIGURED', message: 'LLM 未配置（平台设置 llm.apiKey 或环境变量 LLM_API_KEY）。Demo 不伪造 AI 解读。' });
-  const model = RLLM.resolveModel((cfg.llm && cfg.llm.model) || null);
+  // 传 null → resolveModel 按同源原则解析（config key 非空用 cfg.llm.model；
+  // config key 空 + env key 在用 env LLM_MODEL——历史 DeepSeek 默认模型名不得压住 env）。
+  const model = RLLM.resolveModel(null);
   const baseUrl = RLLM.resolveBaseUrl(apiKey, null);
   // 汇报实际端点（§七 必录）：baseUrl 为空时网关用默认端点，这里如实还原，绝不上报空 URL。
   const endpointUsed = LLM.normalizeBaseUrl(baseUrl) || LLM.DEFAULT_BASE_URL;
@@ -180,7 +186,8 @@ async function aiInterpretation(ctx, req, res, url, p) {
   };
   try {
     fs.mkdirSync(insightDir, { recursive: true });
-    fs.writeFileSync(insightPath, JSON.stringify(payload, null, 1), { flag: 'wx' });
+    // refresh=1 覆盖已有缓存；默认 'wx' 保持首次写幂等（不覆盖既有文件）
+    fs.writeFileSync(insightPath, JSON.stringify(payload, null, 1), { flag: refresh ? 'w' : 'wx' });
   } catch (e) { if (!fs.existsSync(insightPath)) throw e; }
   ctx.sendJSON(res, 200, payload);
   return true;

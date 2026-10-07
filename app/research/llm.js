@@ -17,9 +17,28 @@ const { curTenantId } = require('../core/als.js'); // 拆分自 server.js 时遗
 const LEGACY_LLM_MODELS = new Set(['deepseek-chat', 'deepseek-reasoner']);
 const _warnedLegacyModel = new Set();
 function _loadCfg() { try { return loadConfig() || {}; } catch { return {}; } }
+// ============ 配置同源原则（2026-10-07，Key 决定配置源） ============
+// apiKey/baseUrl/model/modelDeep 必须来自同一配置源，禁止混搭拼接：
+//   config key 非空            → config 是主配置源（cfg.llm.*）
+//   config key 为空 + env key 在 → env 是主配置源（LLM_* 全套）
+// 背景：config-seed 里存在历史默认值（baseUrl=api.deepseek.com、model=deepseek-v4-flash），
+// 若 model/baseUrl 各自独立取源，会产生「百炼 endpoint + 百炼 key + deepseek 模型」的错配。
+function configKeySet(config) {
+  return Boolean(config && config.llm && String(config.llm.apiKey || '').trim());
+}
+function envKeySet() {
+  return Boolean(String(process.env.LLM_API_KEY || '').trim());
+}
 // 旧模型名（deepseek-chat 等）各供应商均已下线：自动改写为当前默认并告警一次（只告警不改写调用方认知）
 function resolveModel(model) {
-  let m = model || (_loadCfg().llm && _loadCfg().llm.model) || LLMGateway.DEFAULT_MODEL;
+  let m = model;
+  if (!m) {
+    const cfgLlm = _loadCfg().llm || {};
+    if (configKeySet(_loadCfg())) m = cfgLlm.model || '';
+    else if (envKeySet()) m = String(process.env.LLM_MODEL || '').trim(); // env 为主配置源：config 历史 model 不得压住 env
+    else m = cfgLlm.model || '';                                          // 无 key：保留旧解析行为
+    m = m || LLMGateway.DEFAULT_MODEL;
+  }
   if (LEGACY_LLM_MODELS.has(m)) {
     if (!_warnedLegacyModel.has(m)) {
       _warnedLegacyModel.add(m);
@@ -29,13 +48,17 @@ function resolveModel(model) {
   }
   return m;
 }
-// 模型分工（cfg.llm.modelDeep，2026-09-12）：批量抽取类调用（translate/enumerate/harvest/
-// crossvalidate/enrich 字段抽取）走 cfg.llm.model（轻快模型，如 qwen3.6-flash）；
-// 深研裁决类（deepdive 字段裁决 / report 报告生成）走 cfg.llm.modelDeep（旗舰模型，如 qwen3.8-max）。
-// modelDeep 未配置时回落到 model——单模型部署行为不变。
+// 模型分工（cfg.llm.modelDeep / env LLM_MODEL_DEEP，2026-09-12）：批量抽取类调用（translate/
+// enumerate/harvest/crossvalidate/enrich 字段抽取）走 resolveModel()（轻快模型，如 qwen3.6-flash）；
+// 深研裁决类（deepdive 字段裁决 / report 报告生成）走本函数（旗舰模型，如 qwen3.8-max）。
+// deep 未配置时回落到 model——单模型部署行为不变。同源原则与 resolveModel 一致。
 function resolveDeepModel() {
   const cfgLlm = _loadCfg().llm || {};
-  return cfgLlm.modelDeep || resolveModel(null);
+  let m = '';
+  if (configKeySet(_loadCfg())) m = cfgLlm.modelDeep || '';
+  else if (envKeySet()) m = String(process.env.LLM_MODEL_DEEP || '').trim(); // env 为主配置源
+  else m = cfgLlm.modelDeep || '';
+  return m || resolveModel(null);
 }
 // 统一取 key：平台配置优先，其次环境变量（如 Token Plan 专属 key 走 .env 下发）
 function llmApiKey(config) {

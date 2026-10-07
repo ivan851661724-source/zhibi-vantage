@@ -22,9 +22,11 @@ const FIXTURE_TAG = 'Demo / Sample Data';
 const DEMO_BRAND = 'Demo Brand';
 const DEMO_PRODUCT_ID = '1001';
 const DEMO_ENTITY_KEY = 'shopify_product:' + DEMO_PRODUCT_ID;
-// 固定观察时间（确定性；两次观察跨窗口）
-const OBS_A = '2026-10-08T09:00:00.000Z';
-const OBS_B = '2026-10-08T11:00:00.000Z';
+// 固定观察时间（确定性；两次观察跨窗口）。
+// 🔴 必须冻结在历史日期（比赛运行时刻之前），否则 UI 会"观察到未来的竞争变化"穿帮。
+// 不要改成 new Date() 动态生成——幂等与测试稳定性依赖确定性。
+const OBS_A = '2026-10-07T09:00:00.000Z';
+const OBS_B = '2026-10-07T11:00:00.000Z';
 
 function productsJson(price) {
   return JSON.stringify({

@@ -143,6 +143,116 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     passed++; console.log('ok - 7. P0-1 UI honesty: no fabricated "$", null currency labeled');
   } catch (e) { failed++; console.error('FAIL - 7. P0-1 UI: ' + String(e.message || e).split('\n')[0]); }
 
+  // ============ 8. 配置回归（§十二）：config 空 key + legacy DeepSeek 值 不得压住 env 百炼配置 ============
+  // 「Key 决定配置源」：config key 为空 + env key 存在 → key/baseUrl/model/modelDeep 全套取 env。
+  try {
+    const Paths = require('../core/paths.js');
+    fs.writeFileSync(Paths.CONFIG_PATH, JSON.stringify({ llm: {
+      apiKey: '', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash', modelDeep: 'deepseek-v4-max',
+    } }));
+    process.env.LLM_API_KEY = 'fake-test-bailian-key';
+    process.env.LLM_BASE_URL = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    process.env.LLM_MODEL = 'qwen3.6-flash';
+    process.env.LLM_MODEL_DEEP = 'qwen3.8-max';
+    delete require.cache[require.resolve('../services/llm-gateway.js')];
+    delete require.cache[require.resolve('../research/llm.js')];
+    const RLLM = require('../research/llm.js');
+    const LLM = require('../services/llm-gateway.js');
+    const key = RLLM.llmApiKey(require('../core/config.js').loadConfig());
+    assert.equal(key, 'fake-test-bailian-key', 'key must come from env (config key empty)');
+    const model = RLLM.resolveModel(null);
+    assert.notEqual(model, 'deepseek-v4-flash', 'config legacy model must NOT suppress env LLM_MODEL');
+    assert.equal(model, 'qwen3.6-flash');
+    const deep = RLLM.resolveDeepModel();
+    assert.notEqual(deep, 'deepseek-v4-max', 'config legacy modelDeep must NOT suppress env LLM_MODEL_DEEP');
+    assert.equal(deep, 'qwen3.8-max');
+    const baseUrl = LLM.normalizeBaseUrl(RLLM.resolveBaseUrl(key, null)) || LLM.DEFAULT_BASE_URL; // ''=走网关默认（env LLM_BASE_URL）
+    assert.ok(baseUrl.includes('token-plan.cn-beijing.maas.aliyuncs.com'), 'endpoint must be Bailian, got: ' + baseUrl);
+    assert.equal(/deepseek/i.test(baseUrl), false, 'endpoint must not contain deepseek');
+    // 配置模式不回归：config key 非空 → 整套取 config
+    fs.writeFileSync(Paths.CONFIG_PATH, JSON.stringify({ llm: {
+      apiKey: 'cfg-key-1', baseUrl: 'https://cfg.example.com/v1', model: 'cfg-model-light', modelDeep: 'cfg-model-deep',
+    } }));
+    delete process.env.LLM_API_KEY;
+    delete require.cache[require.resolve('../research/llm.js')];
+    const RLLM2 = require('../research/llm.js');
+    assert.equal(RLLM2.resolveModel(null), 'cfg-model-light', 'config-key mode: cfg model wins');
+    assert.equal(RLLM2.resolveDeepModel(), 'cfg-model-deep', 'config-key mode: cfg modelDeep wins');
+    const RLLM3 = require('../research/llm.js');
+    assert.equal(RLLM3.resolveBaseUrl('cfg-key-1', null), 'https://cfg.example.com/v1/chat/completions', 'config-key mode: cfg custom endpoint wins');
+    delete require.cache[require.resolve('../research/llm.js')];
+    passed++; console.log('ok - 8. config regression: env Bailian wins over legacy DeepSeek config (key/baseUrl/model/modelDeep all from one source)');
+  } catch (e) { failed++; console.error('FAIL - 8. config regression: ' + String(e.message || e).split('\n')[0]); }
+
+  // ============ 9. fixture 时间诚实（§十三）：OBS_A < OBS_B，且冻结在历史日期（非未来） ============
+  try {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'research', 'demo-fixture.js'), 'utf8');
+    const mA = /const OBS_A = '([^']+)';/.exec(src);
+    const mB = /const OBS_B = '([^']+)';/.exec(src);
+    assert.ok(mA && mB, 'OBS_A/OBS_B must be fixed constants (deterministic, not new Date())');
+    const a = new Date(mA[1]).getTime(), b = new Date(mB[1]).getTime();
+    assert.ok(a < b, 'OBS_A < OBS_B');
+    // 冻结在历史日期：比赛运行期（2026-10-07 起）必然晚于观察时刻，UI 不会出现"未来"变化。
+    // 用固定分界日期而非 Date.now() 比较——测试长期稳定不随时间失效。
+    const FROZEN_BEFORE = new Date('2026-10-08T00:00:00.000Z').getTime();
+    assert.ok(b < FROZEN_BEFORE, 'both observations frozen before 2026-10-08 (no future observations)');
+    // 播种产物时间顺序一致
+    const evt = Events.listEvents(TA)[0];
+    assert.ok(new Date(evt.observed_at_old).getTime() < new Date(evt.observed_at_new).getTime(), 'event observed_at_old < observed_at_new');
+    passed++; console.log('ok - 9. fixture time honesty: OBS_A < OBS_B, frozen in history (no future observations)');
+  } catch (e) { failed++; console.error('FAIL - 9. fixture time: ' + String(e.message || e).split('\n')[0]); }
+
+  // ============ 10. refresh=1 跳过缓存强制真实调用；默认仍走缓存；不触碰真值链 ============
+  try {
+    const Paths = require('../core/paths.js');
+    const { DATA } = Paths;
+    const { sanitizeNs } = require('../core/state-store.js');
+    fs.writeFileSync(Paths.CONFIG_PATH, JSON.stringify({ llm: { apiKey: '' } })); // 触发 env key 模式
+    process.env.LLM_API_KEY = 'fake-test-bailian-key';
+    process.env.LLM_MODEL = 'qwen3.6-flash';
+    process.env.LLM_BASE_URL = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    delete require.cache[require.resolve('../services/llm-gateway.js')];
+    delete require.cache[require.resolve('../research/llm.js')];
+    delete require.cache[require.resolve('../routes/handlers/demo.js')];
+    const H = require('../routes/handlers/demo.js');
+    const LLM = require('../services/llm-gateway.js');
+    const fsMod = require('fs');
+    const insightDir = path.join(DATA, 'ai-insights', sanitizeNs(TA));
+    const evt10 = Events.listEvents(TA)[0];
+    const insightPath = path.join(insightDir, evt10.event_id + '.json');
+    // 预置一份"旧供应商"缓存（模拟 DeepSeek 时期产物）
+    fsMod.mkdirSync(insightDir, { recursive: true });
+    fsMod.writeFileSync(insightPath, JSON.stringify({ event_id: evt10.event_id, insight: '旧缓存解读', model: 'deepseek-old' }));
+    let calls = 0;
+    LLM.call = async () => { calls++; return '新解读：来自真实网关调用。'; };
+    const als = require('../core/als.js');
+    const Config = require('../core/config.js');
+    const mkCtx = () => { const sent = []; return { sent, ctx: { sendJSON: (res, code, obj) => { sent.push({ code, obj }); return obj; }, loadConfig: () => Config.loadConfig() } }; };
+    // refresh=1：跳过缓存 → 真实网关调用 → 覆盖缓存
+    let c10 = mkCtx();
+    await als.requestScope.run(TA, async () => {
+      await H.aiInterpretation(c10.ctx, { method: 'POST' }, {}, new URL('http://x/api/demo/ai-interpretation?id=' + evt10.event_id + '&refresh=1'), '/api/demo/ai-interpretation');
+    });
+    const out = c10.sent[c10.sent.length - 1];
+    assert.equal(out.code, 200, 'refresh call should succeed: ' + JSON.stringify(out.obj));
+    assert.equal(calls, 1, 'refresh=1 must invoke LLM gateway (bypass cache)');
+    assert.equal(out.obj.cached, false, 'refresh response cached=false');
+    assert.equal(out.obj.insight, '新解读：来自真实网关调用。');
+    assert.equal(JSON.parse(fsMod.readFileSync(insightPath, 'utf8')).model, out.obj.model, 'cache overwritten with fresh payload');
+    // 默认（无 refresh）：命中缓存，零网关调用
+    let c10b = mkCtx();
+    await als.requestScope.run(TA, async () => {
+      await H.aiInterpretation(c10b.ctx, { method: 'POST' }, {}, new URL('http://x/api/demo/ai-interpretation?id=' + evt10.event_id), '/api/demo/ai-interpretation');
+    });
+    const out2 = c10b.sent[c10b.sent.length - 1];
+    assert.equal(calls, 1, 'default must still hit cache (no extra gateway call)');
+    assert.equal(out2.obj.cached, true);
+    // 真值链不受影响：事件数/内容不变
+    assert.equal(Events.getEventById(TA, evt10.event_id).new_price, 29);
+    delete require.cache[require.resolve('../routes/handlers/demo.js')];
+    passed++; console.log('ok - 10. refresh=1 bypasses insight cache & forces real gateway call; truth chain untouched');
+  } catch (e) { failed++; console.error('FAIL - 10. refresh: ' + String(e.message || e).split('\n')[0]); }
+
   console.log('\ndemo-fixture.test: ' + passed + ' passed, ' + failed + ' failed');
   if (failed > 0) process.exit(1);
 })();
