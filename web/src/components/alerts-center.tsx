@@ -102,7 +102,7 @@ export function AlertsCenter() {
             </div>
             <div className="alert-list">
               {alerts.length === 0 ? (
-                <p className="alert-empty muted">暂无异动。竞争品牌出现新的竞争动态（降价 / 上新 / 开新店 / 差评暴涨）时，会出现在这里。</p>
+                <p className="alert-empty muted">暂无异动。竞争品牌发生价格、上新、渠道或口碑变化时，会出现在这里。</p>
               ) : (
                 alerts.map((a: ZbAlert) => (
                   <div key={a.id} className={'alert-item' + (a.read ? ' read' : '')}>

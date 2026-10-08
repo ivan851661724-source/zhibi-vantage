@@ -83,7 +83,7 @@ function methodLabel(oid?: string): string {
 
 const ZONE_ORDER = ['underserved', 'moderate', 'served'] as const;
 const ZONE_DESC: Record<string, string> = {
-  underserved: '重要性高、满意度低：多个竞争品牌的用户反馈集中出现相同问题，且尚未发现稳定的正向表现。',
+  underserved: '重要性高、满意度低：多个竞争品牌的用户反馈中反复出现相同问题，且尚未发现稳定的正向表现。',
   moderate: '有一定普遍性、满意度中等：建议优先验证其是否为目标人群真正关心的议题。',
   served: '要么已经被做好，要么只有零星提及——不建议作为切入点。',
 };

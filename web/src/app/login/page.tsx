@@ -137,7 +137,7 @@ function LoginPageInner() {
         </div>
         <div className="auth-card">
           <p className="auth-tagline">
-            需要重点关注的竞争品牌一旦出现动作——<b>降价 · 上新 · 开新店 · 差评暴涨</b>，系统会自动整理成一份可直接查阅的简报。
+            需要重点关注的竞争品牌发生价格、上新、渠道或口碑变化——<b>降价 · 上新 · 开新店 · 差评暴涨</b>，系统会自动整理成一份可直接查阅的简报。
           </p>
           <div className="auth-tabs" id="authTabs">
             <button

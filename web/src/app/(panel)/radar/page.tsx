@@ -165,9 +165,9 @@ export default function RadarPage() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
           <div className="rlb-main">
             <b>当前仅 {cs.length} 家竞争品牌，样本偏薄</b>
-            <span>信号聚合与空白视图需要 ≥3 家竞争品牌数据才可靠。补录几个需要重点关注的品牌，雷达与机会视图会自动重算。</span>
+            <span>信号聚合与空白视图需要 ≥3 家竞争品牌数据才可靠。添加需要重点关注的品牌，雷达与机会视图会自动重算。</span>
           </div>
-          <Link className="btn-ghost" href="/?new=1">＋ 补录竞争品牌</Link>
+          <Link className="btn-ghost" href="/?new=1">＋ 添加竞争品牌</Link>
         </div>
       ) : null}
       <div id="radarWall">
