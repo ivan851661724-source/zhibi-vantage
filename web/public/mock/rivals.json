@@ -5,7 +5,7 @@
     "avatar": "M",
     "tag": "英国 · 定制人偶老牌 · 2008",
     "relation": "direct",
-    "relationLabel": "直接对手",
+    "relationLabel": "直接竞品",
     "price": { "from": 119, "currency": "GBP", "band": "市场带 £95–£175" },
     "channels": [
       { "label": "官网", "tier": "ok" },
@@ -66,7 +66,7 @@
     "avatar": "F",
     "tag": "美国 · 量产快线 · 2021",
     "relation": "direct",
-    "relationLabel": "直接对手",
+    "relationLabel": "直接竞品",
     "price": { "from": 45, "currency": "USD", "band": "市场带 $35–$80" },
     "channels": [
       { "label": "Amazon US", "tier": "ok" },

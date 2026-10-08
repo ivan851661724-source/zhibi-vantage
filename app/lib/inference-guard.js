@@ -179,7 +179,7 @@ function guardBlueOcean(blueOcean, ctx) {
           if (de.soft) {
             // 第三层 LLM 语义召回：字面无匹配但语义相关——软证据，低置信、须核验
             b.demandEvidenceSoft = true;
-            b.demandEvidenceNote = 'LLM 语义召回（第三层·需核验）：字面无匹配但语义相关；按软证据处理，置信上限锁 low，须交叉验证方可下注';
+            b.demandEvidenceNote = 'LLM 语义召回（第三层·需核验）：字面无匹配但语义相关；按软证据处理，置信上限锁 low，须交叉验证后方可作为行动依据';
             b.confidenceCap = 'low';
             b.gapNote = '供给侧空且需求侧有软证据（LLM语义召回）→ 未满足空白（待核验），可视为候选机会';
           } else {

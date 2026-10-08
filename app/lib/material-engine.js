@@ -63,7 +63,7 @@ function priceFollowRecipe(priceVerdict, opts) {
       type: 'price-follow',
       domain: 'price',
       subjectId: item.subjectId,
-      title: changed ? '对手价格变动' : '对手当前价格',
+      title: changed ? '竞争品牌价格变动' : '竞争品牌当前价格',
       body: item.claim,
       confidence: item.confidence || 'low',
       basis: item.basis || 'unverified',

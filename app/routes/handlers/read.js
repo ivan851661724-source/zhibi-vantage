@@ -87,7 +87,7 @@ async function radarChanges(ctx, req, res, url, p) {
     track: ds.track,
     groupSignals: (ds.radar && ds.radar.groupSignals) || [],
     perCompetitor: (ds.radar && ds.radar.perCompetitor) || {},
-    note: 'groupSignals=战略信号条（群体异动）；perCompetitor.recentActions=每对手最近动作（verified=准 / inferred=推）。'
+    note: 'groupSignals=战略信号条（群体异动）；perCompetitor.recentActions=每个竞争品牌最近动作（verified=准 / inferred=推）。'
   });
   return true;
 }

@@ -18,7 +18,7 @@ function voiceVerdict(st) {
     return {
       subjectCount: themes.length, items: [],
       basis: 'unverified', confidence: 'low', level: 'undetected',
-      note: '有用户声音的对手 ' + brandsWithVoice + ' 家（<' + MIN_BRANDS + '），不出群体口碑结论；机会视图仅展示初步信号',
+      note: '有用户声音的竞争品牌 ' + brandsWithVoice + ' 家（<' + MIN_BRANDS + '），不出群体口碑结论；机会视图仅展示初步信号',
     };
   }
   const items = themes.slice(0, 8).map(t => ({
@@ -36,7 +36,7 @@ function voiceVerdict(st) {
   return {
     subjectCount: themes.length, items,
     basis: 'inferred', confidence: 'medium', level: 'opportunity',
-    denominator: brandsWithVoice + ' 家对手有声音数据',
+    denominator: brandsWithVoice + ' 家竞争品牌有声音数据',
   };
 }
 

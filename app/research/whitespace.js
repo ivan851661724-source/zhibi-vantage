@@ -35,9 +35,9 @@ function assessPositioning(state) {
       if (hit) { overlap++; names.push(c.name); }
     });
     out.price = { band: { min: lo, max: hi, currency: cur }, contestedBy: overlap, contestedNames: names.slice(0, 6) };
-    if (overlap >= 3) out.challenges.push({ type: 'price_crowded', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段已被 ${overlap} 家对手占据，属红海——要么找差异点，要么看相邻空档。` });
-    else if (overlap === 0) out.challenges.push({ type: 'price_open', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段目前无人直接占据，是可守的空档（但仍看产品力）。` });
-    else out.challenges.push({ type: 'price_partial', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段有 ${overlap} 家对手在打，不算拥挤但已有先入者。` });
+    if (overlap >= 3) out.challenges.push({ type: 'price_crowded', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段已被 ${overlap} 家竞争品牌占据，竞争较为充分——可核验差异点或相邻空档。` });
+    else if (overlap === 0) out.challenges.push({ type: 'price_open', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段在当前样本中尚未发现直接占据的品牌，可能是可守的空档（仍取决于产品力）。` });
+    else out.challenges.push({ type: 'price_partial', text: `你定的 ${cur} ${fmtMoney(lo, cur)}–${fmtMoney(hi, cur)} 价格段有 ${overlap} 家竞争品牌在打，不算拥挤但已有先入者。` });
   }
 
   // 卖点原点：你选的卖点里，哪些被对手占了、哪些还是空白
@@ -48,8 +48,8 @@ function assessPositioning(state) {
       return { sp, label: SP_LABEL[sp] || sp, claimedBy: claimed.length, claimedNames: claimed.slice(0, 6) };
     });
     out.sellingPoints.forEach(r => {
-      if (r.claimedBy === 0) out.challenges.push({ type: 'sp_open', text: `你选的卖点「${r.label}」目前无对手主打，是空白可占。` });
-      else if (r.claimedBy >= 3) out.challenges.push({ type: 'sp_crowded', text: `你选的卖点「${r.label}」已被 ${r.claimedBy} 家对手主打（${r.claimedNames.join('、')}），属拥挤方向。` });
+      if (r.claimedBy === 0) out.challenges.push({ type: 'sp_open', text: `你选的卖点「${r.label}」在当前样本中尚未发现主打品牌，属待验证空缺。` });
+      else if (r.claimedBy >= 3) out.challenges.push({ type: 'sp_crowded', text: `你选的卖点「${r.label}」已被 ${r.claimedBy} 家竞争品牌主打（${r.claimedNames.join('、')}），竞争较为集中。` });
     });
   }
   return out;
@@ -65,15 +65,15 @@ const GAP_METHOD = {
   'absence:verified-neg': { key: 'verifiedAbsence', label: '已验证缺失（多家确证未入驻）' },
   'absence:partial-verified': { key: 'partialVerifiedAbsence', label: '部分验证缺失（部分确证、部分未探测）' },
   'absence:undetected': { key: 'undetectedAbsence', label: '未探测（仅未查到，非确认不做）' },
-  'absence:neg': { key: 'regionAbsence', label: '地域缺席（无对手覆盖该市场）' },
+  'absence:neg': { key: 'regionAbsence', label: '地域缺席（当前样本中未发现覆盖该市场的品牌）' },
   'priceGap:scraped-prices': { key: 'priceScraped', label: '价位阶梯空档（≥2家实抓价佐证）' },
   'priceGap:stated-prices': { key: 'priceStated', label: '价位阶梯空档（陈述价佐证）' },
   'priceGap:undetected': { key: 'priceLack', label: '价格数据不足（<3家同币种）' },
-  'claimGap:matrix': { key: 'spMatrix', label: '卖点矩阵空缺（品牌×卖点无人认领）' },
-  'tacticGap:matrix': { key: 'tacticMatrix', label: '策略矩阵空缺（品牌×打法无人使用）' },
-  'demandGap:reviews': { key: 'painSpeculation', label: '口碑痛点推测（被抱怨但无人解决）' },
-  'adjacency:struct': { key: 'adjacencyStruct', label: '邻接结构推理（相邻品类通用打法，无对手采用）' },
-  'singleBlindSpot:struct': { key: 'singleBlindSpot', label: '单家盲点（同类对手在做/本对手价位复购，结构推理其留白）' }
+  'claimGap:matrix': { key: 'spMatrix', label: '卖点矩阵空缺（品牌×卖点，当前样本未见认领）' },
+  'tacticGap:matrix': { key: 'tacticMatrix', label: '策略矩阵空缺（品牌×打法，当前样本未见使用）' },
+  'demandGap:reviews': { key: 'painSpeculation', label: '口碑痛点推测（相关用户反馈中反复出现，尚未发现解决方案）' },
+  'adjacency:struct': { key: 'adjacencyStruct', label: '邻接结构推理（相邻品类通用打法，当前样本未见采用）' },
+  'singleBlindSpot:struct': { key: 'singleBlindSpot', label: '单家盲点（同类竞争品牌在做/本品牌价位复购，结构推理其留白）' }
 };
 const gapMethodOf = (type, evidence) => GAP_METHOD[type + ':' + evidence] || GAP_METHOD[type] || { key: 'other', label: '结构推理' };
 
@@ -108,7 +108,7 @@ function computeSingleCompetitorGaps(state, comps) {
       const cPresent = cRec && cRec.present === true;
       if (activePeers.length && !cPresent) {
         pushSingle(c, '渠道', ch, 'singleBlindSpot',
-          `「${c.name}」未在 ${ch} 布局（其同类对手 ${activePeers.map(p => p.name).join('/')} 在该渠道活跃，结构推测其留白）`,
+          `「${c.name}」未在 ${ch} 布局（其同类竞争品牌 ${activePeers.map(p => p.name).join('/')} 在该渠道活跃，结构推测其留白）`,
           activePeers.map(p => ({ name: p.name, basis: 'inferred', detail: '在' + ch + '活跃' })));
       }
     });
@@ -119,7 +119,7 @@ function computeSingleCompetitorGaps(state, comps) {
       const cUsing = (c.tactics || []).includes(tc);
       if (usingPeers.length && !cUsing) {
         pushSingle(c, '策略空缺', tcLabel, 'singleBlindSpot',
-          `「${c.name}」未采用「${tcLabel}」打法（其同类对手 ${usingPeers.map(p => p.name).join('/')} 采用，结构推测其留白）`,
+          `「${c.name}」未采用「${tcLabel}」打法（其同类竞争品牌 ${usingPeers.map(p => p.name).join('/')} 采用，结构推测其留白）`,
           usingPeers.map(p => ({ name: p.name, basis: 'inferred', detail: '采用' + tcLabel })));
       }
     });
@@ -239,7 +239,7 @@ function computeWhiteSpace(state) {
         const verifiedBrands = new Set(Object.values(ladderOcc).flat().filter(o => o.verified).map(o => o.name));
         const verifiedCnt = verifiedBrands.size;
         const conf = verifiedCnt >= 2 ? 'high' : 'medium'; // 有≥2家实抓价格佐证 → 高置信
-        pushGap('价位空缺', L.label, 'priceGap', conf, verifiedCnt >= 2 ? 'scraped-prices' : 'stated-prices', `${pricedComps}家对手（均以 ${MKT_CUR} 计价）定价都不落在 ${L.label} 档（${verifiedCnt}家为实抓价格），该价位带无人占据${xcNote}`, priceSrc());
+        pushGap('价位空缺', L.label, 'priceGap', conf, verifiedCnt >= 2 ? 'scraped-prices' : 'stated-prices', `${pricedComps}家竞争品牌（均以 ${MKT_CUR} 计价）定价都不落在 ${L.label} 档（${verifiedCnt}家为实抓价格），当前样本中尚未发现占据该价位带的品牌${xcNote}`, priceSrc());
       }
     });
   } else {
@@ -262,7 +262,7 @@ function computeWhiteSpace(state) {
     SELLING_POINTS.forEach(sp => {
       const claimed = spComps.filter(c => (c.sellingPoints || []).includes(sp));
       if (claimed.length === 0) {
-        pushGap('卖点空缺', SP_LABEL[sp] || sp, 'claimGap', 'medium', 'matrix', `${spComps.length}家对手无一主打「${SP_LABEL[sp] || sp}」，卖点矩阵该列空缺`, spSrc, true);
+        pushGap('卖点空缺', SP_LABEL[sp] || sp, 'claimGap', 'medium', 'matrix', `当前样本 ${spComps.length} 家竞争品牌中尚未发现主打「${SP_LABEL[sp] || sp}」，卖点矩阵该列空缺`, spSrc, true);
       }
     });
   }
@@ -282,7 +282,7 @@ function computeWhiteSpace(state) {
     TACTICS.forEach(tc => {
       const used = tcComps.filter(c => (c.tactics || []).includes(tc));
       if (used.length === 0) {
-        pushGap('策略空缺', TACTIC_LABELS[tc] || tc, 'tacticGap', 'medium', 'matrix', `${tcComps.length}家对手无一采用「${TACTIC_LABELS[tc] || tc}」打法`, tcSrc, true);
+        pushGap('策略空缺', TACTIC_LABELS[tc] || tc, 'tacticGap', 'medium', 'matrix', `当前样本 ${tcComps.length} 家竞争品牌中尚未发现采用「${TACTIC_LABELS[tc] || tc}」打法`, tcSrc, true);
       }
     });
   }
@@ -315,7 +315,7 @@ function computeWhiteSpace(state) {
     .slice(0, 6)
     .forEach(p => {
       const src = p.brands.map(b => ({ name: b, basis: 'inferred', detail: '抱怨：「' + p.point + '」' }));
-      pushGap('市场机会', p.point, 'demandGap', 'low', 'reviews', `${p.brands.length}家对手（${p.brands.slice(0, 3).join('/')}）被用户抱怨「${p.point}」且无人宣称解决 —— 推测存在需求空档`, src);
+      pushGap('市场机会', p.point, 'demandGap', 'low', 'reviews', `${p.brands.length}家竞争品牌（${p.brands.slice(0, 3).join('/')}）的相关用户反馈中反复出现「${p.point}」，且尚未发现宣称解决该问题的品牌 —— 推测存在需求空档`, src);
       gaps[gaps.length - 1].speculative = true; // 强制标"推测"（低置信，按 PRD §7.1 归 undetected + 免责声明，不冒充机会）
     });
 
@@ -327,13 +327,13 @@ function computeWhiteSpace(state) {
   COLLAB_TYPES.forEach(ct => {
     if (!allCollab.includes(ct)) {
       // 规范 E：邻接结构推理（联名）置信度强制 low，level 恒 undetected，不得显示为机会
-      pushGap('联名', ct, 'adjacency', 'low', 'struct', `无对手采用${ct}联名（类比依据：相邻品类普遍用联名拉新；无对手采用≠对手刻意不做，需核验）`);
+      pushGap('联名', ct, 'adjacency', 'low', 'struct', `当前样本中尚未发现采用${ct}联名的竞争品牌（类比依据：相邻品类普遍用联名拉新；样本未见≠刻意不做，需核验）`);
     }
   });
   const allContent = comps.flatMap(c => c.contentForms || []);
   CONTENT_FORMS.forEach(cf => {
     if (!allContent.includes(cf)) {
-      pushGap('内容', cf, 'adjacency', 'low', 'struct', `无对手主打${cf}内容形态（类比依据：相邻品类内容打法常规；无对手采用属结构推测，非确证缺失）`);
+      pushGap('内容', cf, 'adjacency', 'low', 'struct', `当前样本中尚未发现主打${cf}内容形态的竞争品牌（类比依据：相邻品类内容打法常规；样本未见属结构推测，非确证缺失）`);
     }
   });
   REGIONS.forEach(rg => {
@@ -346,12 +346,12 @@ function computeWhiteSpace(state) {
         const verified = rs.some(s => s.tier === 1);
         return { name: c.name, basis: verified ? 'verified' : 'inferred', detail: '无该市场覆盖' };
       });
-      pushGap('地域', rg, 'absence', 'medium', 'neg', `无对手覆盖${rg}市场`, src);
+      pushGap('地域', rg, 'absence', 'medium', 'neg', `当前样本中未发现覆盖${rg}市场的竞争品牌`, src);
     }
   });
   FULFILLMENT.forEach(f => {
     const present = comps.filter(c => (c.fulfillment || []).includes(f)).length;
-    if (present === 0) pushGap('履约', f, 'adjacency', 'low', 'struct', `无对手采用${f}履约（类比依据：相邻品类履约方式常规；无对手采用属结构推测，非确证缺失）`);
+    if (present === 0) pushGap('履约', f, 'adjacency', 'low', 'struct', `当前样本中尚未发现采用${f}履约的竞争品牌（类比依据：相邻品类履约方式常规；样本未见属结构推测，非确证缺失）`);
   });
 
   // 各维度采集覆盖率（PRD §8：覆盖率 <70% 严禁输出群体性空白）

@@ -235,7 +235,7 @@ async function buildReport(state, config) {
   });
   if (copyGaps.length) weDontKnow.push(`- 文案空缺（非市场空缺）：以下卖点/打法空缺仅基于"官网文案比对"（${copyGaps.length} 项），未验证市场层面需求，属观察级，不构成已确认的市场机会。`);
   if (singleMode) weDontKnow.push(`- 当前仅 ${state.whiteSpace.total} 家对手完成研究（<3），空白分析处于"单家观察"模式：下方单家留白仅为结构推测、非群体共识，补充至 ≥3 家后才会给出赛道级群体空白。`);
-  if (suspectFactIds.length || suspectGapIds.length) weDontKnow.push(`- 部分结论依赖被降级（量级存疑 flaggedOutlier）对手的数据，可信度相对更低，建议在「我们的判断」段结合原始来源复核。`);
+  if (suspectFactIds.length || suspectGapIds.length) weDontKnow.push(`- 部分结论依赖被降级（量级存疑 flaggedOutlier）竞争品牌的数据，可信度相对更低，建议在「我们的判断」段结合原始来源复核。`);
   const weDontKnowText = weDontKnow.length ? weDontKnow.join('\n') : '- （本次各维度探测覆盖较充分，暂无重大未探测项）';
 
 
@@ -244,8 +244,8 @@ async function buildReport(state, config) {
   let posText = '(未填写定位——空白分析以全赛道为参照，未以你为锚点)';
   if (pos && pos.hasProfile) {
     const lines = [];
-    if (pos.price) lines.push(`价格段：${pos.price.band.currency} ${pos.price.band.min}-${pos.price.band.max}，被 ${pos.price.contestedBy} 家同币种对手占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。`);
-    if (pos.sellingPoints) lines.push('卖点：' + pos.sellingPoints.map(r => `「${r.label}」${r.claimedBy ? `被${r.claimedBy}家主打` : '无人主打（空白可占）'}`).join('；') + '。');
+    if (pos.price) lines.push(`价格段：${pos.price.band.currency} ${pos.price.band.min}-${pos.price.band.max}，被 ${pos.price.contestedBy} 家同币种竞争品牌占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。`);
+    if (pos.sellingPoints) lines.push('卖点：' + pos.sellingPoints.map(r => `「${r.label}」${r.claimedBy ? `被${r.claimedBy}家主打` : '当前样本中尚未发现主打品牌（待验证空缺）'}`).join('；') + '。');
     if (pos.challenges.length) lines.push('已识别信号：' + pos.challenges.map(c => c.text).join(' '));
     posText = lines.join('\n');
   }
@@ -324,12 +324,12 @@ ${weDontKnowText}
   if (pos && pos.hasProfile) {
     calib = '\n\n---\n### 定位校准 · 基于你填写的价格段 / 卖点（机器核对，非模型生成）\n';
     if (pos.price) {
-      calib += `- **价格段** ${pos.price.band.currency} ${pos.price.band.min}–${pos.price.band.max}：被 **${pos.price.contestedBy}** 家同币种对手占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。\n`;
+      calib += `- **价格段** ${pos.price.band.currency} ${pos.price.band.min}–${pos.price.band.max}：被 **${pos.price.contestedBy}** 家同币种竞争品牌占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。\n`;
     }
     if (pos.sellingPoints) {
-      calib += '- **卖点对照**（你选的 vs 对手是否在做）：\n';
+      calib += '- **卖点对照**（你选的 vs 竞争品牌是否在做）：\n';
       pos.sellingPoints.forEach(r => {
-        calib += `  - 「${r.label}」：${r.claimedBy ? `被 ${r.claimedBy} 家主打${r.claimedNames.length ? `（${r.claimedNames.join('、')}）` : ''} —— 红海方向` : '**无人主打 —— 空白可占**'}。\n`;
+        calib += `  - 「${r.label}」：${r.claimedBy ? `被 ${r.claimedBy} 家主打${r.claimedNames.length ? `（${r.claimedNames.join('、')}）` : ''} —— 竞争较为充分` : '**当前样本中尚未发现主打品牌 —— 待验证空缺**'}。\n`;
       });
     }
     if (pos.challenges.length) {

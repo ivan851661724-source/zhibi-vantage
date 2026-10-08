@@ -27,8 +27,8 @@ const ZONE_UNDERSERVED = 15;
 const ZONE_MODERATE = 10;
 
 const CAVEATS = [
-  '重要性＝提及广度代理（多少家对手的用户声音提到），不是调研测得的重要性；满意度＝正负提及比，不是满意度评分。',
-  '分母是「有用户声音的对手家数」，不是消费者样本量。本图可以帮你排优先级，不能替代真实用户访谈。',
+  '重要性＝提及广度代理（多少家竞争品牌的用户声音提到），不是调研测得的重要性；满意度＝正负提及比，不是满意度评分。',
+  '分母是「有用户声音的竞争品牌家数」，不是消费者样本量。本图可以帮你排优先级，不能替代真实用户访谈。',
   '本图任何一条置信度封顶为「中」——代理指标不足以支撑高置信结论。',
   '同义表述按字面相似度合并，阈值取保守值：宁可少合并也不硬凑。因此机会分的失真方向是「低估」而非「高估」，看到的分数是下限。',
   '分区（重点机会 / 中等 / 已覆盖）是「相对当前数据」：按机会分在可见主题里排 top 15% / 再 35% 着色，不是 Ulwick 绝对门槛；上面展示的重要性 / 满意度 / 机会分仍是绝对代理值，请照绝对值看。'
@@ -176,7 +176,7 @@ function scoreCluster(cl, brandsWithVoice) {
     negMentions: neg,
     confidence,
     method: METHOD_LABEL,
-    denominatorText: `${brandSet.size}/${denom} 家有用户声音的对手提到（正面 ${pos} · 负面 ${neg}）`,
+    denominatorText: `${brandSet.size}/${denom} 家有用户声音的竞争品牌提到（正面 ${pos} · 负面 ${neg}）`,
     sources: cl.mentions.slice(0, 12).map(m => ({
       name: m.brand, field: m.field, polarity: m.polarity,
       basis: m.basis || 'unverified', detail: m.text,
@@ -251,7 +251,7 @@ function computeOpportunityMap(competitors, opts) {
     themes.forEach(t => {
       t.confidence = 'low';
       t.coverageInsufficient = true;
-      t.note = `覆盖率不足：${brandsWithVoice}/${doneBrands} 家对手有用户声音（${coveragePct}%），排序仅供参考，不构成优先级结论。`;
+      t.note = `覆盖率不足：${brandsWithVoice}/${doneBrands} 家竞争品牌有用户声音（${coveragePct}%），排序仅供参考，不构成优先级结论。`;
     });
   }
   themes.sort((a, b) => (b.opportunity - a.opportunity) || (b.brandsMentioned - a.brandsMentioned) || a.label.localeCompare(b.label));

@@ -203,7 +203,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const llmCands = await enumP;
   const fanout = await fanoutP;
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'enumerating', label: '已枚举候选品牌，正在全网搜索…', pct: 15, found: llmCands.length });
-  if (emit) emitT('discover_stage', { projectId: pid, stage: 'searching', label: '正在多维度搜索对手（覆盖各体量）…', pct: 30, found: fanout.length });
+  if (emit) emitT('discover_stage', { projectId: pid, stage: 'searching', label: '正在多维度搜索竞争品牌（覆盖各体量）…', pct: 30, found: fanout.length });
   _stage('round1（total ' + ((Date.now() - _tR1) / 1000).toFixed(1) + 's）');
   if (!fanout.length && !llmCands.length) throw new Error('SEARCH_FAILED');
 
@@ -251,7 +251,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   // 市场存在度门槛：剔除"基本没浏览/没曝光"的单次噪声（跨 <2 个查询且无官网）
   candidates = presenceGate(candidates);
   const afterRelevance = candidates.slice();
-  if (emit) emitT('discover_stage', { projectId: pid, stage: 'validating', label: '正在校验对手相关性与市场存在度…', pct: 70, found: candidates.length });
+  if (emit) emitT('discover_stage', { projectId: pid, stage: 'validating', label: '正在校验竞争品牌相关性与市场存在度…', pct: 70, found: candidates.length });
   candidates = rankCandidates(candidates).slice(0, 18);
   // 硬信号生效：剔除上一轮用户在本赛道移除过的品牌（按名字×赛道），零风险自动排除
   const supRes = applySuppression(candidates, carrySuppressed, track);
@@ -328,7 +328,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   }
   // B-6：被去重的候选显式广播（前端据此移除对应线索/骨架卡，不做静默丢弃）
   if (emit) for (const d of _droppedDup) emitT('brand_removed', { projectId: pid, id: d.id, reason: 'duplicate', name: d.name });
-  if (emit) emitT('discover_stage', { projectId: pid, stage: 'ranking', label: '已确认对手，正在汇总…', pct: 90, found: competitors.length });
+  if (emit) emitT('discover_stage', { projectId: pid, stage: 'ranking', label: '已确认竞争品牌，正在汇总…', pct: 90, found: competitors.length });
   for (const c of competitors) {
     state.competitors.push(c);
     state.progress.total = state.competitors.length;

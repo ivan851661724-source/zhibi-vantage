@@ -75,8 +75,8 @@ const DIMENSIONS = {
   }
 };
 
-const RELATIVE_NOTE = '蓝海 / 红海着色为「相对当前数据」：按该维度内各桶的对手计数相对分布判断（≥ 半数对手同桶＝红海，零对手＝蓝海空位）；下方计数为绝对数。零计数桶＝当前无对手占，但「没人做」不等于「该做」，需结合品类判断是否真机会。';
-const METHOD = '受控词表计数（渠道 present / 卖点数组 / 体量 / 价格带 band），逐桶统计落点对手数；红蓝为相对分布判断，非绝对门槛。';
+const RELATIVE_NOTE = '蓝海 / 红海着色为「相对当前数据」：按该维度内各桶的竞争品牌计数相对分布判断（≥ 半数同桶＝竞争较为充分，零计数＝当前样本未见占据）；下方计数为绝对数。零计数桶＝当前样本中无竞争品牌占据，但「样本未见」不等于「值得进入」，需结合品类判断是否真机会。';
+const METHOD = '受控词表计数（渠道 present / 卖点数组 / 体量 / 价格带 band），逐桶统计落点的竞争品牌数；红蓝为相对分布判断，非绝对门槛。';
 
 // 读取单个对手在某维度上占据的桶 key 列表
 function readBuckets(c, dimKey) {
@@ -213,7 +213,7 @@ function computeBlueOceanCurve(competitors, opts) {
     method: METHOD,
     // 始终给出诚实说明：本视图展示的是「原始趋同计数」，不是机会分 O/I/S；
     // 与机会地图一致地「绝对数照常展示 + 相对当前数据着色」。
-    note: '本视图展示的是各要素桶的对手绝对计数与占比（不是机会分 O/I/S）；与机会地图一致：绝对数照常展示，红/蓝着色为相对当前数据的分布判断。'
+    note: '本视图展示的是各要素桶的竞争品牌绝对计数与占比（不是机会分 O/I/S）；与机会地图一致：绝对数照常展示，红/蓝着色为相对当前数据的分布判断。'
   };
 }
 
@@ -257,7 +257,7 @@ function computeSeedingPercentiles(competitors, platforms) {
       (out[rec.id] = out[rec.id] || {});
       out[rec.id][k] = {
         ordinal: rec.ordinal, num: rec.num, percentile: pct, total,
-        note: `在 ${total} 个对手的 ${k} 种草声量中位于第 ${pct} 百分位（组内按 none<low<medium<high 排序；相对组内排名，非绝对计数）`
+        note: `在 ${total} 个竞争品牌的 ${k} 种草声量中位于第 ${pct} 百分位（组内按 none<low<medium<high 排序；相对组内排名，非绝对计数）`
       };
     });
   });
