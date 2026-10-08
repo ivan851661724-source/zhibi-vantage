@@ -97,7 +97,7 @@ export function Onboarding({
           <span className="ob-badge">知彼</span>
           <h1>先告诉我，你要做哪个赛道？</h1>
           <p className="ob-sub">
-            我会替你把竞争品牌摸清楚，给你一份带数据依据的全景简报，并标出值得关注的市场机会。不止玩具——任何消费品赛道都行。
+            我会帮你把竞争品牌梳理清楚，给你一份带数据依据的全景简报，并标出值得关注的市场机会。不止玩具——任何消费品赛道都可调研。
           </p>
         </div>
         <div className="ob-card">

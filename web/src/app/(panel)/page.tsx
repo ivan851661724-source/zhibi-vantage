@@ -145,7 +145,7 @@ function MaterialCard({
       </div>
       <div className="mat-acts">
         <button className="btn-act act-keep" type="button" onClick={() => onSet(m.id, 'keep')}>✓ 收录</button>
-        <button className="btn-act act-later" type="button" onClick={() => onSet(m.id, 'later')}>先放着</button>
+        <button className="btn-act act-later" type="button" onClick={() => onSet(m.id, 'later')}>稍后处理</button>
         <button className="btn-act act-drop" type="button" onClick={() => onSet(m.id, 'ignore')}>忽略</button>
       </div>
       {done ? (

@@ -243,7 +243,7 @@ export function FieldCorrectModal({ competitorId, initialField, onClose }: Field
         </div>
         <div className="fc-body">
           <p className="modal-sub">
-            忠实助理红线：你的纠错不会直接改写&quot;已核实&quot;结论。除「我确认这是准的」外，纠错须附证据来源、进入待复核队列，复核通过后才会生效。我们不直接替你下结论。
+            纠错说明：你的纠错不会直接改写&quot;已核实&quot;结论。除「我确认这是准的」外，纠错须附证据来源、进入待复核队列，复核通过后才会生效。我们不会直接替你下结论。
           </p>
           <label className="field-label">要纠错的数据项 *</label>
           <select

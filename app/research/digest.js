@@ -21,10 +21,10 @@ function buildDigestText(alerts, trackNames) {
     const track = (trackNames && (trackNames[a.projectId])) || a.track || '';
     const prefix = track ? '【' + track + '】' : '';
     if (a.type === 'price-change' || a.type === 'price-discovered') {
-      return '- ' + prefix + (a.competitorName || a.competitorId || '对手') + ' ' + (a.text || '价格变动');
+      return '- ' + prefix + (a.competitorName || a.competitorId || '竞争品牌') + ' ' + (a.text || '价格变动');
     }
     const moves = Array.isArray(a.moves) ? a.moves.join('；') : '';
-    return '- ' + prefix + (a.competitorName || a.competitorId || '对手') + ' ' + (a.text || moves || '有新动作').slice(0, 120);
+    return '- ' + prefix + (a.competitorName || a.competitorId || '竞争品牌') + ' ' + (a.text || moves || '出现新的竞争动态').slice(0, 120);
   });
   const head = '知彼 Vantage · 每日竞品动态摘要（' + new Date().toISOString().slice(0, 10) + '）';
   return head + '\n\n' + lines.join('\n') + '\n\n共 ' + recent.length + ' 条变化。打开工作台查看详情与来源。';

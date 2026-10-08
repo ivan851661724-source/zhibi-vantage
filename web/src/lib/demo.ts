@@ -120,7 +120,7 @@ export async function buildDemoState(): Promise<Record<string, unknown>> {
       category: '潮流玩具',
       tier: i === 0 ? 'large' : i < 3 ? 'mid' : 'small',
       url: 'https://' + (dom || 'brand') + '.com',
-      relationship: { code: REL_CODE[r.relation || ''] || 'undetermined', label: r.relationLabel || '直接对手' },
+      relationship: { code: REL_CODE[r.relation || ''] || 'undetermined', label: r.relationLabel || '直接竞品' },
       priceBand: { band: 'mid', range: (r.price && r.price.band) || '', currency: (r.price && r.price.currency) || 'USD', basis: 'verified' },
       pricePoints: r.price && r.price.from != null ? [r.price.from] : [],
       priceField: r.price ? { display: (SYM[r.price.currency || ''] || '$') + r.price.from, basis: 'verified' } : null,

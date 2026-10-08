@@ -7,7 +7,7 @@ import { apiPost, getToken } from '@/lib/api';
 import { isDemoMode } from '@/lib/demo';
 
 export const WB_KEY = 'ci_workbench_decisions'; // 与旧前端同键：已有裁决无缝继承
-export const WB_ACTIONS: Record<string, string> = { keep: '收了', ignore: '忽略', later: '稍后' };
+export const WB_ACTIONS: Record<string, string> = { keep: '收录', ignore: '忽略', later: '稍后' };
 export type WbAction = 'keep' | 'later' | 'ignore';
 
 export interface WbMaterial {

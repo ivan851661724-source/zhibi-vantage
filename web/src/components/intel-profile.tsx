@@ -483,7 +483,7 @@ function NoteBox({ cid }: { cid: string }) {
   return (
     <div className="note-box">
       <div className="lbl">私有备注（只在本机生效，不进公共库）</div>
-      <textarea className="note-ta" placeholder="例：这家「可动关节」卖点与我们方向重合，重点盯它的新品定价…" value={text} onChange={(e) => setText(e.target.value)} maxLength={5000} />
+      <textarea className="note-ta" placeholder="例：这家「可动关节」卖点与我们方向重合，重点关注其新品定价…" value={text} onChange={(e) => setText(e.target.value)} maxLength={5000} />
       <div className="note-hint">你补充的信息只在你自己的页面生效——这是忠实助理的底线，防止干扰数据。</div>
       <div className="notes-actions" style={{ marginTop: 8 }}>
         <button className="btn-mini" type="button" disabled={saving || !loaded} onClick={() => void save()}>保存备注</button>

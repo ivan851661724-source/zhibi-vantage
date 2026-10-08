@@ -83,8 +83,8 @@ function methodLabel(oid?: string): string {
 
 const ZONE_ORDER = ['underserved', 'moderate', 'served'] as const;
 const ZONE_DESC: Record<string, string> = {
-  underserved: '重要性高、满意度低：多个竞争品牌的用户都在抱怨同一件事，且无人被夸做得好。',
-  moderate: '有一定普遍性、满意度中等：值得盯，但先确认它是否是你的目标人群真正在乎的。',
+  underserved: '重要性高、满意度低：多个竞争品牌的用户反馈集中出现相同问题，且尚未发现稳定的正向表现。',
+  moderate: '有一定普遍性、满意度中等：建议优先验证其是否为目标人群真正关心的议题。',
   served: '要么已经被做好，要么只有零星提及——不建议作为切入点。',
 };
 const FIELD_ZH: Record<string, string> = {
@@ -122,7 +122,7 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
   return (
     <div className="ws-section opp-section opp-market">
       <h4><span className="opp-zone-dot" style={{ background: '#1f6fb2' }} />卖点空缺 / 市场空缺（竞争品牌未覆盖的空位 · 来自空白视图）</h4>
-      <p className="ws-desc">下列空位来自「空白视图」：供给侧无人占据、且（需求侧有证据，或薄样本下不定为无需求）。这是最该盯的切入线索；口碑驱动的补充机会见下方「口碑机会」层。</p>
+      <p className="ws-desc">下列空位来自「空白视图」：供给侧暂未发现品牌占据、且（需求侧有证据，或薄样本下不定为无需求）。这是建议优先验证的切入线索；口碑驱动的补充机会见下方「口碑机会」层。</p>
       <div className="opp-list">
         {market.map((g, i) => {
           const silent = g.gapKind === 'silent_demand';
@@ -417,7 +417,7 @@ export default function OpportunityPage() {
       <div className="pano-quad-wrap opp-chart">
         <div className="pano-sec-title">机会分布 · 满意度 × 重要性</div>
         <OppScatter op={op} hl={hl} onPick={onPick} />
-        <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝很多人在乎、但普遍被抱怨，是最值得下注的位置；右侧＝已经被做好了，硬挤是红海。</p>
+        <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝需求呼声较高、负面反馈集中，是建议优先验证的机会区域；右侧＝需求已被较好满足，该区域竞争较为充分。</p>
       </div>
       {ZONE_ORDER.map((zk) => {
         const list = (op.themes || []).filter((t) => t.zone === zk);

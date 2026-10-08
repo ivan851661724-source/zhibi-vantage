@@ -155,7 +155,7 @@ export default function RadarPage() {
         <div>
           <h2>竞品雷达</h2>
           <p className="desc">
-            当前赛道在观测的全部竞争品牌，按「与你位置的接近程度」排序。觉得哪家不算竞争品牌，闸门移掉即可，空白视图自动重算。
+            当前赛道在观测的全部竞争品牌，按「与你位置的接近程度」排序。若某家不属于竞争品牌，可将其移出列表，空白视图会自动重算。
           </p>
         </div>
       </div>
@@ -165,7 +165,7 @@ export default function RadarPage() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" strokeLinecap="round" /></svg>
           <div className="rlb-main">
             <b>当前仅 {cs.length} 家竞争品牌，样本偏薄</b>
-            <span>信号聚合与空白视图需要 ≥3 家竞争品牌数据才可靠。补录几个你真在盯的品牌，雷达与机会视图会自动重算。</span>
+            <span>信号聚合与空白视图需要 ≥3 家竞争品牌数据才可靠。补录几个需要重点关注的品牌，雷达与机会视图会自动重算。</span>
           </div>
           <Link className="btn-ghost" href="/?new=1">＋ 补录竞争品牌</Link>
         </div>

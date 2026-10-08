@@ -199,10 +199,10 @@ export function MaterialDrawer({ m, decision, onSet, onClose }: MaterialDrawerPr
         </div>
         <div className="dr-foot">
           <button className={'btn-act act-keep' + (decision === 'keep' ? ' active' : '')} type="button" onClick={() => setAndClose('keep')}>
-            ✓ 收了
+            ✓ 收录
           </button>
           <button className={'btn-act act-later' + (decision === 'later' ? ' active' : '')} type="button" onClick={() => setAndClose('later')}>
-            先放着
+            稍后处理
           </button>
           <button className={'btn-act act-drop' + (decision === 'ignore' ? ' active' : '')} type="button" onClick={() => setAndClose('ignore')}>
             忽略

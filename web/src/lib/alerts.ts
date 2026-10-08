@@ -42,10 +42,10 @@ function normalizeServerAlert(x: Record<string, unknown>): ZbAlert {
   let title = String(x.title || '');
   let body = x.body ? String(x.body) : '';
   if (type === 'competitor-move') {
-    const name = String(x.competitorName || '对手');
+    const name = String(x.competitorName || '竞争品牌');
     const moves = Array.isArray(x.moves) ? (x.moves as unknown[]).map(String).filter(Boolean) : [];
-    title = name + ' 有新动作';
-    body = moves.length ? moves.join('；') : '雷达检测到该竞品有新动态，去工作台查看。';
+    title = name + ' 出现新的竞争动态';
+    body = moves.length ? moves.join('；') : '雷达检测到该竞争品牌的新动态，请前往工作台查看。';
   }
   return {
     id: String(x.id || ''),

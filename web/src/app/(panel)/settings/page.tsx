@@ -158,14 +158,14 @@ function SettingsPageInner() {
       <div className="page-head">
         <div>
           <h2>设置</h2>
-          <p className="desc">API 密钥与数据卫生配置。密钥仅存于本机 data/config.json，不会回传到前端。</p>
+          <p className="desc">API 密钥与数据卫生配置。密钥仅保存在当前设备，不会回传到前端。</p>
         </div>
       </div>
       {loadErr ? <p className="ob-status">{loadErr}</p> : null}
 
       <div className="modal-card" style={{ maxWidth: 720, margin: '0 auto' }}>
         <h3>设置 API 密钥</h3>
-        <p className="modal-sub">用于自动发现竞争品牌与综合情报分析。密钥仅存于本机 <code>data/config.json</code>。</p>
+        <p className="modal-sub">用于自动发现竞争品牌与综合情报分析。密钥仅保存在当前设备。</p>
         <label className="field-label">LLM API Key <span className="field-hint">DeepSeek / 阿里云百炼 Token Plan 等 OpenAI 兼容服务</span></label>
         <input className="text-input" type="password" placeholder="sk-…（留空则保持已配置；也可由环境变量 LLM_API_KEY 下发）" value={ds} onChange={(e) => setDs(e.target.value)} />
         <label className="field-label">LLM 接入点（基地址）<span className="field-hint">留空 = DeepSeek 官方或环境变量 LLM_BASE_URL</span></label>

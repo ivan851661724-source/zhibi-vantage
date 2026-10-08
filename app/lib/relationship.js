@@ -108,9 +108,9 @@ function computeRelationship(comp, profile) {
     if (myPB.currency && compPR.currency && myPB.currency !== compPR.currency) priceOverlap = null; // 跨币种，不猜
     else priceOverlap = !(compPR.max < myPB.min || compPR.min > myPB.max);
   }
-  if (priceOverlap === true && spOverlap === true) return { code: 'direct', basis: 'price+sp', label: '直接对手' };
+  if (priceOverlap === true && spOverlap === true) return { code: 'direct', basis: 'price+sp', label: '直接竞品' };
   if (priceOverlap === false && spOverlap === false) return { code: 'unrelated', basis: 'no-touch', label: '暂不直接相关' };
-  if (priceOverlap === true || spOverlap === true) return { code: 'indirect', basis: 'partial', label: '间接对手' };
+  if (priceOverlap === true || spOverlap === true) return { code: 'indirect', basis: 'partial', label: '间接竞品' };
   return { code: 'undetermined', basis: 'insufficient', label: '关系待定' };
 }
 // 在响应序列化前给每个竞品附上 relationship（派生字段，不落库；profile 变则重算）
