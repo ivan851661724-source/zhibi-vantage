@@ -54,6 +54,23 @@ function fmtTime(iso: string | null) {
   if (!iso) return '—';
   try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }); } catch { return iso; }
 }
+// 观察值业务层友好展示：结构化价格取 price_min/price_max 区间；原始 JSON 只进技术溯源折叠区
+function fmtValue(v: unknown): string {
+  if (v == null) return '—';
+  if (typeof v === 'object' && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    if (typeof o.price_min === 'number' && typeof o.price_max === 'number') {
+      return o.price_min === o.price_max ? String(o.price_min) : o.price_min + ' – ' + o.price_max;
+    }
+  }
+  return String(v);
+}
+// 数据来源业务层标签：按 evidence.source 派生（非硬编码）；工程 provider 码只进技术溯源折叠区
+function sourceLabel(ev: Record<string, unknown>): string {
+  const s = String(ev.source || '');
+  if (s === 'shopify') return 'Shopify 商品目录';
+  return s || '—';
+}
 
 export default function DemoPage() {
   const [recent, setRecent] = useState<RecentResp | null>(null);
@@ -140,40 +157,42 @@ export default function DemoPage() {
   return (
     <div className="demo-console">
       <style jsx global>{`
+        /* Design tokens：与 docs/design.md / globals.css :root 对齐，不引入新色值 */
         .demo-console { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
-        .demo-badge { display: inline-block; font-size: 11px; border: 1px solid #d97b00; color: #b26500; border-radius: 4px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
-        .demo-h1 { font-size: 20px; font-weight: 700; margin: 6px 0 2px; }
-        .demo-sub { color: #777; font-size: 12.5px; margin-bottom: 2px; }
-        .demo-sub2 { color: #9ca3af; font-size: 12px; margin-bottom: 16px; }
-        .demo-card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 14px; background: #fff; }
-        .demo-card.brief { border-color: #b7e4d3; background: #f7fefb; box-shadow: 0 1px 4px rgba(29,158,117,.08); }
-        .demo-sec-title { font-size: 13px; font-weight: 700; color: #374151; letter-spacing: .04em; margin: 18px 0 8px; }
-        .demo-btn { border: 1px solid #1d9e75; color: #1d9e75; background: #fff; border-radius: 8px; padding: 6px 14px; font-size: 13px; cursor: pointer; margin-right: 8px; }
-        .demo-btn.primary { background: #1d9e75; color: #fff; }
-        .demo-btn-text { border: none; background: none; color: #1d9e75; font-size: 13px; cursor: pointer; padding: 6px 4px; text-decoration: underline; text-underline-offset: 3px; }
+        .demo-badge { display: inline-block; font-size: 11.5px; border: 1px solid #d97b00; color: #b26500; border-radius: 6px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
+        .demo-h1 { font-size: 30px; font-weight: 800; color: #0D0D0D; letter-spacing: -0.8px; margin: 6px 0 2px; }
+        .demo-sub { color: #888888; font-size: 12.5px; margin-bottom: 2px; }
+        .demo-sub2 { color: #888888; font-size: 12px; margin-bottom: 16px; }
+        .demo-card { border: 1px solid #E8E8E5; border-radius: 20px; padding: 24px; margin-bottom: 16px; background: #FFFFFF; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+        .demo-card.brief { border-color: var(--brand-line, #BDEFD4); background: var(--brand-dim, #E7F9EF); }
+        .demo-sec-title { font-size: 11px; font-weight: 600; color: #888888; text-transform: uppercase; letter-spacing: 0.06em; margin: 18px 0 8px; }
+        .demo-btn { border: 1.5px solid #D0D0CC; color: #0D0D0D; background: #FFFFFF; border-radius: 12px; padding: 6px 14px; font-size: 13.5px; font-weight: 600; cursor: pointer; margin-right: 8px; }
+        .demo-btn.primary { background: #0D0D0D; color: var(--brand-hi, #8EF69A); border: none; }
+        .demo-btn-text { border: none; background: none; color: #0D0D0D; font-size: 13px; cursor: pointer; padding: 6px 4px; text-decoration: underline; text-underline-offset: 3px; }
         .demo-btn:disabled, .demo-btn-text:disabled { opacity: .5; cursor: default; }
-        .demo-price-old { text-decoration: line-through; color: #9ca3af; font-size: 15px; }
-        .demo-price-new { color: #d92d20; font-size: 26px; font-weight: 700; margin: 0 8px; }
+        .demo-price-old { text-decoration: line-through; color: #888888; font-size: 15px; }
+        .demo-price-new { color: #d92d20; font-size: 26px; font-weight: 800; margin: 0 8px; }
         .demo-pct { color: #d92d20; font-weight: 700; }
-        .demo-cur-note { color: #9ca3af; font-size: 11px; border: 1px dashed #d1d5db; border-radius: 4px; padding: 0 6px; }
-        .demo-kv { font-size: 12.5px; color: #555; margin: 2px 0; }
-        .demo-kv b { color: #111; }
+        .demo-cur-note { color: #888888; font-size: 11px; border: 1px dashed #D0D0CC; border-radius: 6px; padding: 0 6px; }
+        .demo-kv { font-size: 13px; color: #444444; margin: 2px 0; }
+        .demo-kv b { color: #0D0D0D; }
         .demo-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 60; }
-        .demo-modal { background: #fff; border-radius: 12px; max-width: 640px; width: 92%; max-height: 82vh; overflow: auto; padding: 20px; }
-        .demo-evidence { border: 1px dashed #d1d5db; border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 12.5px; }
-        .demo-ai { background: #f0fdf9; border: 1px solid #b7e4d3; border-radius: 8px; padding: 12px 14px; margin-top: 10px; font-size: 13.5px; line-height: 1.7; }
-        .demo-ai-meta { color: #6b7280; font-size: 11.5px; margin-top: 6px; word-break: break-all; }
-        .demo-ai-note { color: #9ca3af; font-size: 11.5px; margin-top: 4px; }
+        .demo-modal { background: #FFFFFF; border-radius: 20px; max-width: 640px; width: 92%; max-height: 82vh; overflow: auto; padding: 24px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
+        .demo-evidence { background: #F7F7F5; border-radius: 12px; padding: 10px 12px; margin: 8px 0; font-size: 13px; }
+        .demo-ai { background: var(--brand-dim, #E7F9EF); border: 1px solid var(--brand-line, #BDEFD4); border-radius: 12px; padding: 12px 14px; margin-top: 10px; font-size: 13.5px; line-height: 1.7; color: #1A4A2E; }
+        .demo-ai b { color: #0D0D0D; }
+        .demo-ai-meta { color: #888888; font-size: 11.5px; margin-top: 6px; word-break: break-all; }
+        .demo-ai-note { color: #888888; font-size: 11.5px; margin-top: 4px; }
         .demo-err { color: #b26500; font-size: 12.5px; margin-top: 8px; }
-        .demo-empty { color: #9ca3af; font-size: 13px; padding: 18px 0; text-align: center; }
+        .demo-empty { color: #888888; font-size: 13px; padding: 18px 0; text-align: center; }
         .demo-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
-        .demo-brief-line { font-size: 13.5px; margin: 5px 0; line-height: 1.9; color: #374151; }
-        .demo-brief-line b { color: #111; }
+        .demo-brief-line { font-size: 13.5px; margin: 5px 0; line-height: 1.9; color: #444444; }
+        .demo-brief-line b { color: #0D0D0D; }
         .demo-brief-new { color: #d92d20; font-weight: 700; }
-        .demo-brief-advice { color: #166534; font-size: 13px; margin-top: 8px; }
-        details.demo-tech { margin-top: 12px; border-top: 1px dashed #e5e7eb; padding-top: 8px; }
-        details.demo-tech summary { color: #9ca3af; font-size: 12px; cursor: pointer; user-select: none; }
-        details.demo-tech .demo-tech-body { color: #6b7280; font-size: 11.5px; line-height: 1.8; margin-top: 6px; word-break: break-all; }
+        .demo-brief-advice { color: #1A4A2E; font-size: 13px; margin-top: 8px; }
+        details.demo-tech { margin-top: 12px; border-top: 1px dashed #E8E8E5; padding-top: 8px; }
+        details.demo-tech summary { color: #888888; font-size: 12px; cursor: pointer; user-select: none; }
+        details.demo-tech .demo-tech-body { color: #888888; font-size: 11.5px; line-height: 1.8; margin-top: 6px; word-break: break-all; }
       `}</style>
 
       {/* 1) Hero */}
@@ -206,11 +225,12 @@ export default function DemoPage() {
             <div className="demo-ai">
               <b>竞争影响分析</b><br />{briefAi.insight}
               <div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div>
-              <div className="demo-ai-meta">模型 {briefAi.model} · 端点 {briefAi.endpoint_kind}{briefAi.cached ? ' · 缓存' : ''}</div>
+              <div className="demo-ai-meta">分析模型 {briefAi.model}{briefAi.cached ? ' · 缓存结果' : ''}</div>
             </div>
           )}
           <div className="demo-brief-advice">{advice}</div>
           <div style={{ marginTop: 10 }}>
+            <button className="demo-btn primary" onClick={() => latest && openDetail(latest)}>查看详情</button>
             <button className="demo-btn" onClick={copyBrief}>复制简报</button>
             {copyMsg && <span className="demo-kv" style={{ marginLeft: 4 }}>{copyMsg}</span>}
           </div>
@@ -226,7 +246,7 @@ export default function DemoPage() {
       <div className="demo-card">
         <div style={{ marginBottom: 10 }}>
           <button className="demo-btn primary" disabled={seeding} onClick={seed}>{seeding ? '正在载入演示数据…' : '载入演示数据'}</button>
-          <span className="demo-kv" style={{ marginLeft: 4, color: '#9ca3af' }}>载入一组固定演示数据，用于展示完整的竞争变化识别与数据溯源流程。</span>
+              <span className="demo-kv" style={{ marginLeft: 4, color: '#888888' }}>载入一组固定演示数据，用于展示完整的竞争变化识别与数据溯源流程。</span>
           {seedMsg && <div className="demo-kv" style={{ marginTop: 4 }}>{seedMsg}</div>}
         </div>
         {summary && (
@@ -239,11 +259,11 @@ export default function DemoPage() {
           const brand = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).brand_name) || '竞争品牌';
           const title = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).title) || '商品';
           return (
-            <div key={ev.event_id} style={{ borderTop: '1px solid #f1f5f9', padding: '12px 0' }}>
+            <div key={ev.event_id} style={{ borderTop: '1px solid #F0F0EE', padding: '12px 0' }}>
               <div className="demo-row">
                 <b>{String(brand)}</b>
-                <span style={{ color: '#6b7280', fontSize: 13 }}>{String(title)}</span>
-                <span className="demo-kv" style={{ color: '#374151' }}>{ev.direction === 'decrease' ? '价格变动 · 下调' : ev.direction === 'increase' ? '价格变动 · 上调' : '竞争变化'}</span>
+                <span style={{ color: '#444444', fontSize: 13 }}>{String(title)}</span>
+                <span className="demo-kv">{ev.direction === 'decrease' ? '价格变动 · 下调' : ev.direction === 'increase' ? '价格变动 · 上调' : '竞争变化'}</span>
               </div>
               <div className="demo-row" style={{ marginTop: 4 }}>
                 <span className="demo-price-old">{fmtMoney(ev.old_price, ev.currency)}</span>
@@ -263,7 +283,7 @@ export default function DemoPage() {
                 <div className="demo-ai">
                   <b>竞争影响分析</b> · {insight[ev.event_id].insight}
                   <div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div>
-                  <div className="demo-ai-meta">模型 {insight[ev.event_id].model} · 端点 {insight[ev.event_id].endpoint_kind} · {insight[ev.event_id].endpoint_base_url}{insight[ev.event_id].cached ? ' · 缓存' : ''}</div>
+                  <div className="demo-ai-meta">分析模型 {insight[ev.event_id].model}{insight[ev.event_id].cached ? ' · 缓存结果' : ''}</div>
                 </div>
               )}
               {aiErr[ev.event_id] && <div className="demo-err">{aiErr[ev.event_id]}</div>}
@@ -312,14 +332,14 @@ export default function DemoPage() {
 
             <div className="demo-sec-title">竞争影响分析</div>
             {insight[detail.event.event_id]
-              ? <div className="demo-ai">{insight[detail.event.event_id].insight}<div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div><div className="demo-ai-meta">模型 {insight[detail.event.event_id].model} · 端点 {insight[detail.event.event_id].endpoint_kind}</div></div>
+              ? <div className="demo-ai">{insight[detail.event.event_id].insight}<div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div><div className="demo-ai-meta">分析模型 {insight[detail.event.event_id].model}</div></div>
               : <div><button className="demo-btn primary" disabled={!!aiLoading} onClick={() => askAi(detail.event)}>{aiLoading === detail.event.event_id ? '正在生成竞争影响分析…' : '生成竞争影响分析'}</button>{aiErr[detail.event.event_id] && <div className="demo-err">{aiErr[detail.event.event_id]}</div>}</div>}
 
             <div className="demo-sec-title">数据依据（{detail.evidences.length} 条）</div>
             {detail.evidences.map(ev => (
               <div className="demo-evidence" key={String(ev.evidence_id)}>
-                <div>数据来源：<b>{String(ev.source)} / {String(ev.provider)}</b></div>
-                <div>观察时间：{fmtTime(String(ev.observed_at || ''))} · 观察值：<b>{JSON.stringify(ev.extracted_value)}</b></div>
+                <div>数据来源：<b>{sourceLabel(ev)}</b></div>
+                <div>观察时间：{fmtTime(String(ev.observed_at || ''))} · 观察值：<b>{fmtValue(ev.extracted_value)}</b></div>
                 <div>数据状态：{statusZh(ev.evidence_status)}</div>
                 <div style={{ marginTop: 6 }}>
                   <button className="demo-btn" onClick={() => openEvidence(String(ev.evidence_id))}>查看完整数据依据</button>
@@ -351,20 +371,22 @@ export default function DemoPage() {
         <div className="demo-modal-mask" onClick={() => setEvModal(null)}>
           <div className="demo-modal" onClick={e => e.stopPropagation()}>
             <div className="demo-h1" style={{ fontSize: 17 }}>数据依据与来源</div>
-            <div className="demo-kv">观察值：<b>{JSON.stringify(evModal.evidence.extracted_value)}</b></div>
+            <div className="demo-kv">观察值：<b>{fmtValue(evModal.evidence.extracted_value)}</b></div>
             <div className="demo-kv">数据状态：<b>{statusZh(evModal.evidence.evidence_status)}</b></div>
             <div className="demo-kv">观察时间：{fmtTime(String(evModal.evidence.observed_at || ''))}</div>
-            <div className="demo-kv">数据来源：{String(evModal.evidence.source)} / {String(evModal.evidence.provider)}</div>
+            <div className="demo-kv">数据来源：{sourceLabel(evModal.evidence as Record<string, unknown>)}</div>
             <div className="demo-kv">币种：{evModal.evidence.currency == null ? '币种信息暂不可用' : String(evModal.evidence.currency)}</div>
             {evModal.snapshots.map((s, i) => (
               <div className="demo-evidence" key={i}>
-                <div>原始来源：<a href={String(s.source_url || '')} target="_blank" rel="noreferrer" style={{ color: '#1d9e75', wordBreak: 'break-all' }}>{String(s.source_url || '—')}</a></div>
+                <div>原始来源：<a href={String(s.source_url || '')} target="_blank" rel="noreferrer" style={{ color: '#3F9C65', wordBreak: 'break-all' }}>{String(s.source_url || '—')}</a></div>
               </div>
             ))}
             <details className="demo-tech">
               <summary>技术溯源（Evidence → SourceSnapshot）</summary>
               <div className="demo-tech-body">
                 <div>Evidence ID：{String(evModal.evidence.evidence_id)} · status {String(evModal.evidence.evidence_status)}{evModal.evidence.reason_code ? '（' + String(evModal.evidence.reason_code) + '）' : ''}</div>
+                <div>source {String(evModal.evidence.source || '—')} · provider {String(evModal.evidence.provider || '—')}</div>
+                <div>extracted_value 原始：{JSON.stringify(evModal.evidence.extracted_value)}</div>
                 {evModal.snapshots.map((s, i) => (
                   <div key={i} style={{ marginTop: 6 }}>
                     <div>Snapshot ID：{String(s.snapshot_id)}</div>
