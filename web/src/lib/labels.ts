@@ -39,10 +39,12 @@ export function fmtPrice(c: Record<string, unknown>): string {
     const hi = band.max != null ? band.max : '?';
     return `${cur}${lo}–${hi}`;
   }
-  const pb = c.priceBand as { range?: string } | undefined;
-  if (pb && pb.range) return pb.range;
-  const pf = c.priceField as { display?: string } | undefined;
-  if (pf && pf.display) return pf.display;
+  // Legacy range may be an object/array; React must receive display text.
+  // Fall back to the existing normalized field, keeping its inference label.
+  const pb = c.priceBand as { range?: unknown } | undefined;
+  if (pb && typeof pb.range === 'string' && pb.range.trim()) return pb.range;
+  const pf = c.priceField as { display?: unknown } | undefined;
+  if (pf && typeof pf.display === 'string' && pf.display.trim()) return pf.display;
   return '价位未明';
 }
 
