@@ -102,20 +102,26 @@ function priceChangeView(ev) {
 }
 
 // AI factPayload 装配（纯函数，供 ai-interpretation 与回归测试复用）：
-// 携带完整价格区间（old/new_price_range）+ changed_boundary（projection 派生），
-// 单一价兼容字段 old_price/new_price 保留（区间价时为 null，绝不冒充区间）；
+// 携带完整价格区间（old/new_price_range）+ changed_boundary（projection 派生）；
 // direction=null 时 delta/pct 原样 null——绝不用 0 替代未知百分比。
+//
+// 历史兼容（2026-10-08）：**不信任历史事件落盘的 old_price/new_price**——升级前
+// v1 曾把 price_min 冒充区间标量，旧区间事件会带矛盾「10→10」标量。标量一律从
+// old_value/new_value 重新安全派生：仅 price_min===price_max 时承载，区间价输出
+// null，完整区间由 *_price_range 表达。对当前版事件（落盘已是 null）结果一致。
 function aiFactPayloadOf(event) {
-  const v = (x) => x && Number.isFinite(x.price_min) && Number.isFinite(x.price_max)
+  const val = (x) => x && Number.isFinite(x.price_min) && Number.isFinite(x.price_max)
     ? { min: x.price_min, max: x.price_max } : null;
+  const scalar = (x) => (x && Number.isFinite(x.price_min) && Number.isFinite(x.price_max)
+    && x.price_min === x.price_max) ? x.price_min : null;
   return {
     event_type: event.event_type,
     competitor_brand: (event.entity_ref && event.entity_ref.brand_name) || null,
     product: (event.entity_ref && event.entity_ref.title) || null,
-    old_price: event.old_price == null ? null : event.old_price,
-    new_price: event.new_price == null ? null : event.new_price,
-    old_price_range: v(event.old_value),
-    new_price_range: v(event.new_value),
+    old_price: scalar(event.old_value),
+    new_price: scalar(event.new_value),
+    old_price_range: val(event.old_value),
+    new_price_range: val(event.new_value),
     changed_boundary: changedBoundaryOf(event.old_value, event.new_value),
     direction: event.direction || null,
     delta: event.delta == null ? null : event.delta,
@@ -125,6 +131,22 @@ function aiFactPayloadOf(event) {
     data_source: event.source + '/' + event.provider,
     data_note: '以下数字均为系统真值链（SourceSnapshot→Evidence→Fact→Diff→Event）产出，是本回复唯一可用数据。价格可能为单一价格（old_price/new_price）或价格区间（old_price_range/new_price_range）；区间变化时请按区间表述，不要把区间简化成单一价格。',
   };
+}
+
+// ---------- AI insight 缓存兼容（2026-10-08） ----------
+// v2：标量价格改为从 old/new_value 安全派生。历史 v1 缓存（无 payload_version
+// 字段）中，**仅区间事件**的 insight 可能基于矛盾 payload（"10→10，下降25%"）
+// 生成——此类缓存判定失效，在用户下一次显式点击「AI 竞争分析」时重新生成并
+// 覆盖（本端点只由用户点击触发，页面读取绝不产生付费 LLM 调用）。单一价事件
+// 的 v1 缓存标量本就正确，继续有效——把重生成范围压到最小。缓存是派生物，
+// 覆盖不触碰真值链（Event/Diff/Fact/Evidence/Snapshot 均原样保留）。
+const AI_PAYLOAD_VERSION = 2;
+function insightCacheStale(event, cached) {
+  if (!cached || typeof cached !== 'object') return false;          // 无缓存/损坏 → 走正常 miss
+  if (cached.payload_version >= AI_PAYLOAD_VERSION) return false;   // 已是新版 → 有效
+  const isRange = (x) => !!x && Number.isFinite(x.price_min) && Number.isFinite(x.price_max)
+    && x.price_min !== x.price_max;
+  return isRange(event.old_value) || isRange(event.new_value);
 }
 
 // ---------- GET /api/demo/recent-changes?limit=30 ----------
@@ -263,8 +285,18 @@ async function aiInterpretation(ctx, req, res, url, p) {
   const insightPath = path.join(insightDir, event.event_id + '.json');
   // refresh=1（真实 smoke）：跳过缓存命中，强制走真实 LLM 调用（默认行为不变）
   const refresh = (url && url.searchParams && url.searchParams.get('refresh')) === '1';
+  // 缓存兼容（2026-10-08）：v1 区间事件缓存可能基于矛盾标量 payload 生成 →
+  // 判定失效后落到下方重新生成并覆盖；单一价 v1 缓存继续有效（不多花 LLM 费用）。
+  let staleCache = false;
   if (!refresh && fs.existsSync(insightPath)) {
-    try { return ctx.sendJSON(res, 200, Object.assign(JSON.parse(fs.readFileSync(insightPath, 'utf8')), { cached: true })); } catch (e) {}
+    try {
+      const cached = JSON.parse(fs.readFileSync(insightPath, 'utf8'));
+      if (insightCacheStale(event, cached)) {
+        staleCache = true; // 不返回旧解读，继续走重新生成（仅限用户显式点击本端点）
+      } else {
+        return ctx.sendJSON(res, 200, Object.assign(cached, { cached: true }));
+      }
+    } catch (e) {}
   }
 
   // LLM 配置解析（P0-2）：复用 research/llm.js 既有解析语义（单一口径，不另立政策）：
@@ -308,17 +340,18 @@ async function aiInterpretation(ctx, req, res, url, p) {
     model,                                   // 实际模型标识（§七 必录）
     endpoint_kind: 'openai_compatible',      // 端点类型（§七 必录）
     endpoint_base_url: endpointUsed,         // 实际完整端点（无凭据，可核验；绝不为空）
+    payload_version: AI_PAYLOAD_VERSION,     // 缓存兼容：v2 起标量从 old/new_value 安全派生
     purpose: 'DomainEvent -> AI Insight（价格变化业务解读）',
     created_at: new Date().toISOString(),
     cached: false,
   };
   try {
     fs.mkdirSync(insightDir, { recursive: true });
-    // refresh=1 覆盖已有缓存；默认 'wx' 保持首次写幂等（不覆盖既有文件）
-    fs.writeFileSync(insightPath, JSON.stringify(payload, null, 1), { flag: refresh ? 'w' : 'wx' });
+    // refresh=1 或旧区间缓存失效时覆盖写入；默认 'wx' 保持首次写幂等（不覆盖既有文件）
+    fs.writeFileSync(insightPath, JSON.stringify(payload, null, 1), { flag: (refresh || staleCache) ? 'w' : 'wx' });
   } catch (e) { if (!fs.existsSync(insightPath)) throw e; }
   ctx.sendJSON(res, 200, payload);
   return true;
 }
 
-module.exports = { recentChanges, eventDetail, evidenceDetail, seed, aiInterpretation, priceChangeView, aiFactPayloadOf, changedBoundaryOf };
+module.exports = { recentChanges, eventDetail, evidenceDetail, seed, aiInterpretation, priceChangeView, aiFactPayloadOf, changedBoundaryOf, insightCacheStale, AI_PAYLOAD_VERSION };

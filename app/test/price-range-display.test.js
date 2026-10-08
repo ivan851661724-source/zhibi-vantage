@@ -232,10 +232,114 @@ t('8. Demo fixture 39->29 flow unchanged (old_price scalar preserved)', () => {
   assert.equal(view.change_label, '下降 25.6%');
 });
 
-// ============ 汇总（T7 async 最后跑） ============
+// ============ 9. 历史区间事件（v1 落盘带矛盾标量）：payload 标量重派生为 null ============
+// 直接构造升级前落盘的历史事件对象（不经当前 recordPriceChangeEvent——模拟旧数据）
+const legacyRangeEvent = {
+  event_id: 'evt_legacyrange01', event_type: 'price_change_observed',
+  old_price: 10, new_price: 10,                       // v1 冒充标量：与区间矛盾
+  old_value: { price_min: 10, price_max: 20 },
+  new_value: { price_min: 10, price_max: 15 },
+  direction: 'decrease', delta: -5, pct: -25,
+  observed_at_old: '2026-10-07T09:00:00.000Z', observed_at_new: '2026-10-07T11:00:00.000Z',
+  source: 'shopify', provider: 'shopify_products_json', entity_ref: null,
+};
+t('9. Legacy v1 range event: payload scalars re-derived to null (no contradictory "10 -> 10")', () => {
+  const p = Demo.aiFactPayloadOf(legacyRangeEvent);
+  assert.equal(p.old_price, null, 'old_price must be re-derived null for range');
+  assert.equal(p.new_price, null, 'new_price must be re-derived null for range');
+  assert.deepStrictEqual(p.old_price_range, { min: 10, max: 20 });
+  assert.deepStrictEqual(p.new_price_range, { min: 10, max: 15 });
+  assert.equal(p.changed_boundary, 'price_max');
+  assert.equal(p.direction, 'decrease');
+  assert.equal(p.pct, -25);
+  // AI 看到的 payload 内部一致：不再有「10→10」与「10–20→10–15」并存
+  const s = JSON.stringify(p);
+  assert.equal(s.includes('"old_price":10'), false);
+  assert.equal(s.includes('"new_price":10'), false);
+});
+
+// ============ 10. 历史单一价事件：标量重派生仍为 39/29（兼容不变） ============
+t('10. Legacy single-price event: scalars re-derived 39/29, ranges single-point', () => {
+  const p = Demo.aiFactPayloadOf({
+    event_id: 'evt_legacysingle1', event_type: 'price_change_observed',
+    old_price: 39, new_price: 29,
+    old_value: { price_min: 39, price_max: 39 },
+    new_value: { price_min: 29, price_max: 29 },
+    direction: 'decrease', delta: -10, pct: -25.641,
+    source: 'shopify', provider: 'shopify_products_json', entity_ref: null,
+  });
+  assert.equal(p.old_price, 39);
+  assert.equal(p.new_price, 29);
+  assert.deepStrictEqual(p.old_price_range, { min: 39, max: 39 });
+  assert.deepStrictEqual(p.new_price_range, { min: 29, max: 29 });
+  assert.equal(p.changed_boundary, 'both');
+  assert.equal(p.direction, 'decrease');
+});
+
+// ============ 11. 缓存失效判定：仅「区间事件的 v1 缓存」失效 ============
+t('11. insightCacheStale: legacy range cache stale; single-price v1 cache valid; v2 valid', () => {
+  const v1Cache = { event_id: 'x', insight: '矛盾旧解读' };        // v1：无 payload_version
+  assert.equal(Demo.insightCacheStale(legacyRangeEvent, v1Cache), true, 'legacy range v1 cache stale');
+  assert.equal(Demo.insightCacheStale(legacyRangeEvent, Object.assign({}, v1Cache, { payload_version: 2 })), false, 'v2 cache valid');
+  const legacySingle = { old_value: { price_min: 39, price_max: 39 }, new_value: { price_min: 29, price_max: 29 } };
+  assert.equal(Demo.insightCacheStale(legacySingle, v1Cache), false, 'single-price v1 cache stays valid');
+  assert.equal(Demo.insightCacheStale(legacySingle, null), false);
+  assert.equal(Demo.AI_PAYLOAD_VERSION, 2);
+});
+
+// ============ 12. handler 级缓存兼容：失效旧缓存不服务、单一价旧缓存不多花 LLM ============
+async function t12() {
+  const { sanitizeNs } = require('../core/state-store.js');
+  const T = 'tenant:p1-cache';
+  const evDir = path.join(TMP, 'events', sanitizeNs(T));
+  fs.mkdirSync(evDir, { recursive: true });
+  // 直接落盘 v1 历史区间事件（append-only，不触碰真值链语义）
+  const legacyEvt = Object.assign({ tenant: { tenant_id: T, project_ref: null }, diff_id: 'diff_legacy01' }, legacyRangeEvent);
+  fs.writeFileSync(path.join(evDir, legacyEvt.event_id + '.json'), JSON.stringify(legacyEvt, null, 1));
+  const insightDir = path.join(TMP, 'ai-insights', sanitizeNs(T));
+  fs.mkdirSync(insightDir, { recursive: true });
+  const insightPath = path.join(insightDir, legacyEvt.event_id + '.json');
+  const sent = [];
+  const fakeRes = { writeHead() {}, end(s) { sent.push(s); } };
+  const ctx = { sendJSON: (res, code, obj) => { sent.push({ code, obj }); return obj; } };
+  const als = require('../core/als.js');
+  await als.requestScope.run(T, async () => {
+    // a) v1 旧区间缓存 → 判失效：不返回矛盾旧解读，落到重生成路径（无 LLM key → 诚实 503）
+    fs.writeFileSync(insightPath, JSON.stringify({ event_id: legacyEvt.event_id, insight: '价格从 10 调整至 10', model: 'legacy-model' }));
+    await Demo.aiInterpretation(ctx, { method: 'POST' }, fakeRes, new URL('http://x/api/demo/ai-interpretation?id=' + legacyEvt.event_id), '/api/demo/ai-interpretation');
+    const r1 = sent[sent.length - 1];
+    assert.equal(r1.code, 503, 'stale v1 range cache must NOT be served');
+    assert.equal(r1.obj.error, 'LLM_NOT_CONFIGURED');
+    // b) v2 缓存 → 直接命中返回，零 LLM 调用（无 key 也可读缓存）
+    fs.writeFileSync(insightPath, JSON.stringify({ event_id: legacyEvt.event_id, insight: '区间 10–20 → 10–15，最高价下降 25%', model: 'v2-model', payload_version: 2 }));
+    await Demo.aiInterpretation(ctx, { method: 'POST' }, fakeRes, new URL('http://x/api/demo/ai-interpretation?id=' + legacyEvt.event_id), '/api/demo/ai-interpretation');
+    const r2 = sent[sent.length - 1];
+    assert.equal(r2.code, 200);
+    assert.equal(r2.obj.cached, true);
+    assert.equal(r2.obj.model, 'v2-model');
+    // c) 单一价 v1 旧缓存 → 仍有效：不多花一次付费重生成
+    const singleEvt = { event_id: 'evt_legacysingle1', event_type: 'price_change_observed',
+      old_price: 39, new_price: 29,
+      old_value: { price_min: 39, price_max: 39 }, new_value: { price_min: 29, price_max: 29 },
+      direction: 'decrease', delta: -10, pct: -25.641,
+      source: 'shopify', provider: 'shopify_products_json', entity_ref: null,
+      tenant: { tenant_id: T, project_ref: null }, diff_id: 'diff_legacy02' };
+    fs.writeFileSync(path.join(evDir, singleEvt.event_id + '.json'), JSON.stringify(singleEvt, null, 1));
+    fs.writeFileSync(path.join(insightDir, singleEvt.event_id + '.json'), JSON.stringify({ event_id: singleEvt.event_id, insight: '39 → 29，下降 25.6%', model: 'legacy-model' }));
+    await Demo.aiInterpretation(ctx, { method: 'POST' }, fakeRes, new URL('http://x/api/demo/ai-interpretation?id=' + singleEvt.event_id), '/api/demo/ai-interpretation');
+    const r3 = sent[sent.length - 1];
+    assert.equal(r3.code, 200, 'single-price v1 cache served without regen');
+    assert.equal(r3.obj.cached, true);
+    assert.equal(r3.obj.model, 'legacy-model');
+  });
+}
+
+// ============ 汇总（T7/T12 async 最后跑） ============
 (async () => {
   try { await t7(); passed++; console.log('ok - 7. recent-changes/event-detail REST integration with display projection'); }
   catch (e) { failed++; console.error('FAIL - 7. REST integration: ' + String(e.message || e).split('\n')[0]); }
+  try { await t12(); passed++; console.log('ok - 12. AI insight cache compatibility: stale v1 range cache not served; single-price v1 cache kept'); }
+  catch (e) { failed++; console.error('FAIL - 12. cache compatibility: ' + String(e.message || e).split('\n')[0]); }
   console.log('\nprice-range-display.test: ' + passed + ' passed, ' + failed + ' failed');
   if (failed > 0) process.exit(1);
 })();
