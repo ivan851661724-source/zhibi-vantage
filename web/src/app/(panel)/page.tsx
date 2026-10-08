@@ -89,6 +89,11 @@ function MaterialCard({
   const ev = wbEvidence(m);
   const done = !!decision;
   const burl = wbBrandUrl(m);
+  // 来源标签降噪：「实抓 N 款」「LLM 价格点推算」是取数方式说明，不在卡片上展示（抽屉里仍可溯源）
+  const srcs = (m.sources || []).filter((s) => {
+    const label = typeof s === 'string' ? s : s.label || '';
+    return !/^实抓\s*\d+\s*款/.test(label) && !/LLM\s*价格点推算/.test(label);
+  });
   return (
     <div className={'mat ' + wbSignalOf(m) + (done ? ' done' : '')}>
       <div className="mat-body" style={{ cursor: 'pointer' }} onClick={() => onOpen(m.id)}>
@@ -98,30 +103,27 @@ function MaterialCard({
             {wbBrandName(m)}
             {burl ? <span className="burl">{burl}</span> : null}
           </span>
-          <span className={'ev ' + ev.cls}>{ev.txt}</span>
           <span className="mat-when">{wbWhen(m)}</span>
         </div>
-        <div className="mat-title">{m.summary || m.title || m.body || ''}</div>
         <PriceHTML m={m} />
-        {m.sources && m.sources.length ? (
-          <div className="mat-facts">
-            {m.sources.map((s, i) => {
-              const so = typeof s === 'string' ? { label: s } : s;
-              return (
-                <a
-                  key={i}
-                  className="src"
-                  href={so.url || '#'}
-                  target="_blank"
-                  rel="noopener"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {so.label || String(s)} <span className="t">tier-{so.tier || 3}</span>
-                </a>
-              );
-            })}
-          </div>
-        ) : null}
+        <div className="mat-facts">
+          {srcs.map((s, i) => {
+            const so = typeof s === 'string' ? { label: s } : s;
+            return (
+              <a
+                key={i}
+                className="src"
+                href={so.url || '#'}
+                target="_blank"
+                rel="noopener"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {so.label || String(s)}
+              </a>
+            );
+          })}
+          <span className={'ev ' + ev.cls}>{ev.txt}</span>
+        </div>
         {m.inference && (m.inference.text || m.inference.why) ? (
           <div className="mat-risk">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 3l10 18H2z" strokeLinejoin="round" /><path d="M12 10v4M12 17h.01" strokeLinecap="round" /></svg>
@@ -264,8 +266,6 @@ function WorkbenchInner() {
   return (
     <div className="wb-page">
       {errorBanner}
-      {/* R6.2：顶部诚实条（实查/推测/未探测三色占比，点击展开字段清单） */}
-      <EvidenceBar dist={evidenceDist} />
       {/* 首页 Hero —— 黑底卡片 + 纯白渐变文本 + 白底主操作 */}
       {state?.track ? (
         <section className="wb-hero">
@@ -282,6 +282,8 @@ function WorkbenchInner() {
             </div>
             <button className="wbh-cta" onClick={() => refresh()}>开始监测</button>
           </div>
+          {/* R6.2 诚实条：置于 hero 黑卡底部整行 */}
+          <EvidenceBar dist={evidenceDist} className="in-hero" />
         </section>
       ) : null}
       {/* R7.1：首次报告后的 5 步导读（一次性） */}

@@ -100,6 +100,11 @@ function LoginPageInner() {
     }
   }
 
+  // 前序操作未完成（必填项为空）时按钮置灰：opacity .5（.btn-primary:disabled），不可提交
+  const incomplete = mode === 'register'
+    ? !brand.trim() || !email.trim() || !password
+    : !email.trim() || !password;
+
   // F-04 演示模式禁用屏（复刻旧版 #demoBlocked 结构）
   if (demoBlocked === true) {
     return (
@@ -196,7 +201,7 @@ function LoginPageInner() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
-            <button id="authSubmit" className="btn-primary auth-submit" type="submit" disabled={busy}>
+            <button id="authSubmit" className="btn-primary auth-submit" type="submit" disabled={busy || incomplete}>
               {busy ? '请求中…' : mode === 'login' ? '进入雷达台 →' : '创建工作区 →'}
             </button>
             <p id="authError" className="auth-error">{error}</p>

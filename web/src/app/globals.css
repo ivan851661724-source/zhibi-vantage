@@ -118,7 +118,7 @@ input,select,textarea{font-family:inherit}
 .btn-primary:hover{background:var(--brand-hi)}
 .btn-primary:active{transform:translateY(1px)}
 .btn-primary:disabled{opacity:.5;cursor:default}
-.auth-submit{width:100%;margin-top:24px;background:var(--brand-hi);color:#0D0D0D;border-radius:9999px}
+.auth-submit{width:100%;margin-top:24px;background:var(--brand-hi);color:#0D0D0D;border-radius:9999px;font-size:13.5px;font-weight:700;padding:11px 0}
 .auth-foot{font-size:11px;color:var(--ink4);text-align:center;margin-top:16px;line-height:1.6}
 .auth-link{font-size:12.5px;color:var(--ink3);margin-top:14px;width:100%;text-align:center}
 .auth-link:hover{color:var(--brand-hi)}
@@ -305,17 +305,14 @@ input,select,textarea{font-family:inherit}
   transition:border-color .15s,transform .15s;
 }
 .mat:hover{border-color:var(--line2);transform:translateX(2px)}
-.mat.crisis{border-left:3px solid var(--crisis)}
-.mat.down{border-left:3px solid var(--down)}
-.mat.up{border-left:3px solid var(--up)}
-.mat.new{border-left:3px solid var(--new)}
-.mat.price{border-left:3px solid var(--price)} /* P1-5：跟价信号专色边条 */
 .mat-body{flex:1;min-width:0;cursor:pointer}
 .mat-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .mat-brand{font-size:14.5px;font-weight:700}
-.mat-brand .burl{font-size:11px;color:var(--ink4);font-weight:400;margin-left:4px}
+.mat-top .mat-brand{min-width:0;flex:1}
+.mat-brand .burl{font-size:11px;color:var(--ink4);font-weight:400;display:block;margin:2px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mat-when{font-size:11px;color:var(--ink4);margin-left:auto;white-space:nowrap}
 .mat-title{font-size:13px;color:var(--ink2);margin-top:5px;line-height:1.55}
+.mat-top .mat-title{margin-top:0}
 .mat-title b{color:var(--ink);font-weight:600}
 .mat-price{display:flex;align-items:baseline;gap:12px;margin-top:10px;flex-wrap:wrap}
 .mp-old{font-size:13px;color:var(--ink4);text-decoration:line-through;text-decoration-color:var(--ink4)}
@@ -674,9 +671,10 @@ input,select,textarea{font-family:inherit}
 .auth-tagline { font-size: 13px; color: var(--ink3); text-align: center; margin: 0 0 24px; line-height: 1.7; }
 .auth-tagline b { color: #3F9C65; font-weight: 600; }
 .auth-tabs { display: flex; gap: 6px; margin-bottom: 6px; }
-.auth-tab { flex: 1; padding: 9px 0; border-radius: var(--r-md); border: 1px solid var(--line1); background: transparent;
+.auth-tab { flex: 1; padding: 9px 0; border-radius: 9999px; border: 1px solid var(--line1); background: transparent;
   color: var(--ink2); font-size: 13px; font-weight: 600; cursor: pointer; }
-.auth-tab.active { background: var(--brand-dim); border-color: var(--brand-line); color: var(--brand-hi); }
+/* 对齐 docs/design.md §7 主要（绿色）按钮：#8EF69A 底 / #0D0D0D 字 / 9999px 圆角（Pill 导航标签） */
+.auth-tab.active { background: var(--brand-hi); border-color: var(--brand-hi); color: #0D0D0D; }
 .auth-form { margin-top: 14px; }
 .auth-field { margin-bottom: 6px; }
 .field-label { display: block; font-size: 12.5px; font-weight: 600; color: var(--ink2); margin: 16px 0 7px; }
@@ -684,7 +682,10 @@ input,select,textarea{font-family:inherit}
   border-radius: var(--r-md); color: var(--ink); font-size: 14px; transition: border-color .15s; }
 .text-input::placeholder { color: var(--ink4); }
 .text-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(51,185,140,.08); }
-.btn-primary.auth-submit { width: 100%; margin-top: 24px; background: var(--brand-hi); color: #0D0D0D; border-radius: 9999px; }
+.btn-primary.auth-submit { width: 100%; margin-top: 24px; background: var(--brand-hi); color: #0D0D0D; border-radius: 9999px;
+  /* 对齐 docs/design.md §7 主要（绿色）按钮：#8EF69A 底 / #0D0D0D 字 / 9999px 圆角；CTA 文字 13.5px·700；全宽 CTA 内边距 11px 0 */
+  font-size: 13.5px; font-weight: 700; padding: 11px 0; }
+.btn-primary.auth-submit:disabled { opacity: .5; cursor: default; }
 .auth-foot { font-size:11px; color: var(--ink4); text-align: center; margin-top: 16px; line-height: 1.6; }
 .auth-link { font-size:12.5px; color: var(--ink3); margin-top: 14px; width: 100%; text-align: center; background: none; border: none; cursor: pointer; }
 .auth-link:hover { color: var(--brand-hi); }
@@ -2245,6 +2246,10 @@ box-shadow: var(--shadow); color: var(--text2);
 .src-tag.neg {
  background: var(--red-bg); color: var(--red2); border-color: #5a2a2a; }
 
+/* 机会视图正面来源标签文字色对齐 .gid（O-xxxxx 编号）的 #3F9C65；负面保持红色语义 */
+.opp-src .src-tag.pos {
+ color: #3F9C65; }
+
 .src-more {
  font-size: 11px; color: var(--ink-soft); align-self: center; }
 
@@ -2637,6 +2642,13 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .eb-unverified{background:var(--ink3)}
 .eb-text{padding:4px 10px;font-size:12px;color:var(--ink2);white-space:nowrap}
 .eb-hint{color:var(--ink3);margin-left:6px}
+
+/* —— hero 黑卡内诚实条：占满卡片底部整行，无外框容器（裸色带+文字），深色适配 —— */
+.wb-hero .evidence-bar-wrap.in-hero{flex-basis:100%;min-width:100%;margin:2px 0 0;position:relative;z-index:1}
+.wb-hero .evidence-bar{border:none;background:none;border-radius:0}
+.wb-hero .eb-text{color:rgba(255,255,255,.85)}
+.wb-hero .eb-hint{color:rgba(255,255,255,.5)}
+.wb-hero .evidence-detail{margin-top:8px;background:var(--bg2);border-radius:10px}
 .evidence-detail{border:1px solid var(--line1);border-top:none;border-radius:0 0 10px 10px;padding:10px 12px;background:var(--bg1)}
 .ed-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--ink2)}
 .ed-head{color:var(--ink3)}

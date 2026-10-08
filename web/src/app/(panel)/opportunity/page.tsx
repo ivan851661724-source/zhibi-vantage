@@ -78,7 +78,13 @@ const METHOD_LABEL: Record<string, string> = {
 };
 function methodLabel(oid?: string): string {
   if (!oid) return '';
-  return METHOD_LABEL[oid] || oid;
+  return METHOD_LABEL[oid] || ''; // 未映射的原始编号（O-xxxxx）不再展示
+}
+// gid 标签：仅在有可读方法名时渲染（原始 O-xxxxx 编号隐藏）
+function GidTag({ oid }: { oid?: string }) {
+  const lbl = methodLabel(oid);
+  if (!lbl) return null;
+  return <span className="gid">{lbl}</span>;
 }
 
 const ZONE_ORDER = ['underserved', 'moderate', 'served'] as const;
@@ -135,7 +141,7 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
               </div>
               <div className="opp-body">
                 <div className="opp-title">
-                  <span className="gid">{methodLabel(g.gid)}</span> {g.value || ''} {silent ? <span className="tag warn">沉默需求·待验证</span> : null}
+                  <GidTag oid={g.gid} /> {g.value || ''} {silent ? <span className="tag warn">沉默需求·待验证</span> : null}
                 </div>
                 <div className="opp-metrics">
                   <span>置信度 <b>{conf}</b></span>
@@ -276,7 +282,7 @@ function OppItem({ t, hl }: { t: OppTheme; hl: boolean }) {
       </div>
       <div className="opp-body">
         <div className="opp-title">
-          <span className="gid">{methodLabel(t.oid)}</span> {t.label}
+          <GidTag oid={t.oid} /> {t.label}
           {t.coverageInsufficient ? <span className="tag warn">覆盖率不足</span> : null}
         </div>
         {t.mergedFrom && t.mergedFrom > 1 ? (
@@ -348,10 +354,8 @@ export default function OpportunityPage() {
         <MarketGapSection state={state!} />
         {pt.length ? (
           <>
-            <div className="opp-denom">
-              <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
-              <div className="opp-denom-row"><b>推理</b>：{op.method || ''}</div>
-            </div>
+            <p className="pano-tip">分母：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</p>
+            <p className="pano-tip">推理：{op.method || ''}</p>
             <div className="ws-section opp-section">
               <h4><span className="opp-zone-dot" style={{ background: '#b9b9b9' }} />已识别主题（{pt.length}）· 初步</h4>
               <p className="ws-desc">下列主题来自现有用户声音，因样本不足未做分区排名；每条仍带分母与来源，可逐条核验。</p>
@@ -364,7 +368,7 @@ export default function OpportunityPage() {
                     </div>
                     <div className="opp-body">
                       <div className="opp-title">
-                        <span className="gid">{methodLabel(t.oid)}</span> {t.label} <span className="tag warn">初步·样本不足</span>
+                        <GidTag oid={t.oid} /> {t.label} <span className="tag warn">初步·样本不足</span>
                       </div>
                       <div className="ws-disclaimer">⚠️ {t.note}</div>
                       <OppSourceTags sources={t.sources} />
@@ -377,11 +381,9 @@ export default function OpportunityPage() {
         ) : (
           <p className="hint">当前还没有竞争品牌留出可识别的用户声音（评论主题 / 抱怨点），暂无可展示的初步信号。继续补齐竞争品牌或补采反馈后即可生成正式机会图。</p>
         )}
-        <div className="opp-caveats">
-          {(op.caveats || []).map((c, i) => (
-            <div className="opp-cav" key={i}>· {c}</div>
-          ))}
-        </div>
+        {(op.caveats || []).length ? (
+          <p className="pano-tip">{(op.caveats || []).map((c) => '· ' + c).join(' ')}</p>
+        ) : null}
       </div>
     );
   }
@@ -405,19 +407,15 @@ export default function OpportunityPage() {
         </p>
       </div>
       <MarketGapSection state={state!} />
-      <div className="opp-denom">
-        <div className="opp-denom-row"><b>分母</b>：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</div>
-        <div className="opp-denom-row"><b>推理</b>：{op.method}</div>
-        <div className="opp-caveats">
-          {(op.caveats || []).map((c, i) => (
-            <div className="opp-cav" key={i}>· {c}</div>
-          ))}
-        </div>
-      </div>
       <div className="pano-quad-wrap opp-chart">
         <div className="pano-sec-title">机会分布 · 满意度 × 重要性</div>
         <OppScatter op={op} hl={hl} onPick={onPick} />
         <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝需求呼声较高、负面反馈集中，是建议优先验证的机会区域；右侧＝需求已被较好满足，该区域竞争较为充分。</p>
+        <p className="pano-tip">分母：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</p>
+        <p className="pano-tip">推理：{op.method}</p>
+        {(op.caveats || []).length ? (
+          <p className="pano-tip">{(op.caveats || []).map((c) => '· ' + c).join(' ')}</p>
+        ) : null}
       </div>
       {ZONE_ORDER.map((zk) => {
         const list = (op.themes || []).filter((t) => t.zone === zk);

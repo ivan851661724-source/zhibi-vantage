@@ -26,24 +26,24 @@ function dimLabel(k: string): string {
   return k;
 }
 
-export function EvidenceBar({ dist }: { dist: EvidenceDist | null | undefined }) {
+export function EvidenceBar({ dist, className }: { dist: EvidenceDist | null | undefined; className?: string }) {
   const [open, setOpen] = useState(false);
   if (!dist || !dist.total) return null; // 空报告不显示（避免误导性 0%）
   const { pct } = dist;
   return (
-    <div className="evidence-bar-wrap">
+    <div className={'evidence-bar-wrap' + (className ? ' ' + className : '')}>
       <button
         type="button"
         className="evidence-bar"
         onClick={() => setOpen(!open)}
-        title="点击展开字段级证据清单"
+        title={open ? '收起字段级证据清单' : '展开字段级证据清单'}
       >
         <span className="eb-seg eb-verified" style={{ width: pct.verified + '%' }} />
         <span className="eb-seg eb-inferred" style={{ width: pct.inferred + '%' }} />
         <span className="eb-seg eb-unverified" style={{ width: pct.unverified + '%' }} />
         <span className="eb-text">
           {pct.verified}% 实查 · {pct.inferred}% 推测 · {pct.unverified}% 未探测
-          <span className="eb-hint">{open ? '（收起）' : '（展开字段清单）'}</span>
+          <span className="eb-hint" aria-label={open ? '收起' : '展开字段清单'}>{open ? '↑' : '↓'}</span>
         </span>
       </button>
       {open && (
