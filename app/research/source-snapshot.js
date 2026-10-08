@@ -27,6 +27,7 @@ const crypto = require('crypto');
 const { DATA } = require('../core/paths.js');
 const { sanitizeNs } = require('../core/state-store.js');
 const als = require('../core/als.js');
+const safeId = require('../core/safe-id.js');
 const logger = require('../services/logger.js');
 
 const COLLECTOR_VERSION = 'net-1';
@@ -209,13 +210,18 @@ function record(input) {
   return { recorded: true, meta };
 }
 
-// 按 id 读回元数据：ns 下按日目录扫描（M0 量级：每租户每天两位数，可接受）
+// 按 id 读回元数据：ns 下按日目录扫描（M0 量级：每租户每天两位数，可接受）。
+// P0-1 安全：snapshotId 来自外部请求（/api/demo/*），存储层独立防御——
+// 非法 ID（../ 穿越/盘符/绝对路径）不触盘返回 null；包含性检查保证解析后
+// 路径仍在该租户 snapshots 目录内（day 来自 readdirSync，本就受限）。
 function getById(tenantId, snapshotId) {
+  if (!safeId.isSafeId(snapshotId)) return null;
   const ns = sanitizeNs(tenantId);
   const root = path.join(DATA, 'snapshots', ns);
   if (!fs.existsSync(root)) return null;
   for (const day of fs.readdirSync(root)) {
     const mPath = path.join(root, day, String(snapshotId) + '.json');
+    if (!safeId.isWithinDir(root, mPath)) continue;
     if (fs.existsSync(mPath)) {
       try { return JSON.parse(fs.readFileSync(mPath, 'utf8')); } catch (e) { return null; }
     }
@@ -223,10 +229,12 @@ function getById(tenantId, snapshotId) {
   return null;
 }
 
-// 经 raw_payload_ref 读回原始字节；截断快照返回的是截断后存储字节（调用方看 raw_truncated）
+// 经 raw_payload_ref 读回原始字节；截断快照返回的是截断后存储字节（调用方看 raw_truncated）。
+// P0-1 防御：ref.path 解析后必须仍在 DATA 内（防存储数据异常时外指），否则按不可解析处理。
 function readRawPayload(meta) {
   if (!meta || !meta.raw_payload_ref || !meta.raw_payload_ref.path) return null;
   const p = path.join(DATA, meta.raw_payload_ref.path);
+  if (!safeId.isWithinDir(DATA, p)) return null;
   if (!fs.existsSync(p)) return null;
   return fs.readFileSync(p);
 }

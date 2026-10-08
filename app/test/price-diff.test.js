@@ -225,14 +225,86 @@ t('11. Same fact compared with itself = no_meaningful_change', () => {
   assert.equal(r.meta.status, 'no_meaningful_change');
 });
 
-// ============ 12. min 相同但 max 变 → changed（比较口径覆盖 min+max） ============
-t('12. price_min equal but price_max changed -> changed', () => {
+// ============ 12. min 相同但 max 变 → changed（方向按 max，P1 修复后口径） ============
+t('12. price_min equal, price_max up -> changed, direction by max (increase, delta=+10)', () => {
   const fA = factFromScan(TA, JSON.stringify({ products: [{ id: 1, handle: 'p', title: 'P', variants: [{ id: 1, title: 'a', price: '29' }, { id: 2, title: 'b', price: '49' }] }] }), '2026-10-07T09:00:00.000Z');
   const fB = factFromScan(TA, JSON.stringify({ products: [{ id: 1, handle: 'p', title: 'P', variants: [{ id: 1, title: 'a', price: '29' }, { id: 2, title: 'b', price: '59' }] }] }), '2026-10-07T11:00:00.000Z');
   const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
   assert.equal(r.meta.status, 'changed');
-  assert.equal(r.meta.direction, 'increase'); // min 不变 → delta=0 非负方向
-  assert.equal(r.meta.delta, 0);
+  assert.equal(r.meta.direction, 'increase');   // min 不变、max 上调 → increase（按 max 判定）
+  assert.equal(r.meta.delta, 10);               // 变化边界差（max：59-49）
+  assert.equal(r.meta.pct, 20.4082);            // 10/49*100 = 20.4082…（按 max 基准）
+});
+
+// ============ 12b-12h. P1 方向规则全场景（最终代码审核整改验收） ============
+// 场景工厂：两观察窗口，变体价决定 price_min/price_max
+function rangeFromScan(tenantId, lo, hi, observedAt) {
+  const body = JSON.stringify({ products: [{ id: 1, handle: 'p', title: 'P', variants: [
+    { id: 1, title: 'a', price: String(lo) }, { id: 2, title: 'b', price: String(hi) },
+  ] }] });
+  return factFromScan(tenantId, body, observedAt);
+}
+t('12b. 10-20 -> 10-15: min unchanged, max down -> decrease, delta=-5, pct=-25 (P0 repro, was "increase 0%")', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 10, 15, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.status, 'changed');
+  assert.equal(r.meta.direction, 'decrease');
+  assert.equal(r.meta.delta, -5);
+  assert.equal(r.meta.pct, -25);
+  assert.notEqual(r.meta.direction + ' ' + r.meta.pct, 'increase 0', '绝不产生「上涨 0%」');
+});
+t('12c. 10-20 -> 10-25: min unchanged, max up -> increase, delta=+5, pct=+25', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 10, 25, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.status, 'changed');
+  assert.equal(r.meta.direction, 'increase');
+  assert.equal(r.meta.delta, 5);
+  assert.equal(r.meta.pct, 25);
+});
+t('12d. 10-20 -> 12-20: max unchanged, min up -> increase, delta=+2, pct=+20', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 12, 20, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.direction, 'increase');
+  assert.equal(r.meta.delta, 2);
+  assert.equal(r.meta.pct, 20);
+});
+t('12e. 10-20 -> 8-20: max unchanged, min down -> decrease, delta=-2, pct=-20', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 8, 20, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.direction, 'decrease');
+  assert.equal(r.meta.delta, -2);
+  assert.equal(r.meta.pct, -20);
+});
+t('12f. 10-20 -> 8-25: both bounds move in opposite directions -> mixed, direction/delta/pct all null (honest)', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 8, 25, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.status, 'changed');        // 值确实变了
+  assert.equal(r.meta.direction, null);          // 不伪造单一涨跌方向
+  assert.equal(r.meta.delta, null);
+  assert.equal(r.meta.pct, null);
+});
+t('12g. 10-20 -> 12-15: opposite directions (min up, max down) -> mixed, all null', () => {
+  const fA = rangeFromScan(TA, 10, 20, '2026-10-07T09:00:00.000Z');
+  const fB = rangeFromScan(TA, 12, 15, '2026-10-07T11:00:00.000Z');
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.status, 'changed');
+  assert.equal(r.meta.direction, null);
+  assert.equal(r.meta.delta, null);
+  assert.equal(r.meta.pct, null);
+});
+t('12h. 39-39 -> 29-29: single price down, direction/delta/pct unchanged from original frozen rule', () => {
+  const fA = factFromScan(TA, PRODUCTS_A, '2026-10-07T09:00:00.000Z');   // 39 → min=max=39
+  const fB = factFromScan(TA, PRODUCTS_B, '2026-10-07T11:00:00.000Z');   // 29 → min=max=29
+  const r = Diff.diffPriceFacts({ tenantId: TA, oldFactId: fA.fact_id, newFactId: fB.fact_id });
+  assert.equal(r.meta.status, 'changed');
+  assert.equal(r.meta.direction, 'decrease');
+  assert.equal(r.meta.delta, -10);              // 原 price_min 基准口径不变
+  assert.equal(r.meta.pct, -25.641);
 });
 
 // ============ 13. 零 LLM 零网络（静态断言） ============

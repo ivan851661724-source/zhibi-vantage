@@ -218,7 +218,10 @@ export default function DemoPage() {
             <span>→</span>
             <span className="demo-price-new">{fmtMoney(latest.new_price, latest.currency)}</span>
             {!latest.currency && <span className="demo-cur-note">币种信息暂不可用</span>}
-            <span className="demo-pct">{latest.direction === 'decrease' ? '↓' : '↑'} {latestPct}%</span>
+            {/* P1：direction=null（混合区间变化）不伪造涨跌方向，不显示 0% 箭头 */}
+            {latest.direction === null
+              ? <span className="demo-pct">区间变化</span>
+              : <span className="demo-pct">{latest.direction === 'decrease' ? '↓' : '↑'} {latestPct}%</span>}
           </div>
           <div className="demo-kv">观察时间：{fmtTime(latest.observed_at_old)} → {fmtTime(latest.observed_at_new)}</div>
           {briefAi && (
@@ -324,9 +327,12 @@ export default function DemoPage() {
               <span>→</span>
               <span className="demo-price-new">{fmtMoney(detail.event.new_price, detail.event.currency)}</span>
               {!detail.event.currency && <span className="demo-cur-note">币种信息暂不可用</span>}
-              <span className="demo-pct">{detail.event.direction === 'decrease' ? '↓' : '↑'} {Math.abs(detail.event.pct ?? 0).toFixed(1)}%</span>
+              {/* P1：direction=null（混合区间变化）诚实无方向，不显示 0% 箭头 */}
+              {detail.event.direction === null
+                ? <span className="demo-pct">区间变化</span>
+                : <span className="demo-pct">{detail.event.direction === 'decrease' ? '↓' : '↑'} {Math.abs(detail.event.pct ?? 0).toFixed(1)}%</span>}
             </div>
-            <div className="demo-kv">变化幅度：{detail.event.direction === 'decrease' ? '下降' : '上涨'} {Math.abs(detail.event.pct ?? 0).toFixed(1)}%</div>
+            <div className="demo-kv">变化幅度：{detail.event.direction === null ? '区间边界混合变化（无单一方向）' : (detail.event.direction === 'decrease' ? '下降 ' : '上涨 ') + Math.abs(detail.event.pct ?? 0).toFixed(1) + '%'}</div>
             <div className="demo-kv">时间：观察窗口 {fmtTime(detail.event.observed_at_old)} → {fmtTime(detail.event.observed_at_new)} · 检出 {fmtTime(detail.event.occurred_at)}</div>
             <div className="demo-kv">状态：<b>已确认变化</b></div>
 
@@ -391,7 +397,7 @@ export default function DemoPage() {
                   <div key={i} style={{ marginTop: 6 }}>
                     <div>Snapshot ID：{String(s.snapshot_id)}</div>
                     <div>source_status {String(s.source_status)} · collector {String(s.collector_version)} · content_hash {String(s.content_hash)}</div>
-                    {s.raw_payload_ref ? <div>raw payload：{String((s.raw_payload_ref as Record<string, unknown>).path)}</div> : null}
+                    {/* P2：不展示 raw_payload_ref.path（服务器内部文件路径）；API 层已过滤 */}
                   </div>
                 ))}
               </div>

@@ -70,13 +70,24 @@ function cfgCustomBase(cfgLlm) {
   const b = LLMGateway.normalizeBaseUrl((cfgLlm && cfgLlm.baseUrl) || '');
   return b && b !== LLMGateway.normalizeBaseUrl('https://api.deepseek.com/v1') ? b : '';
 }
-// 接入点解析：显式 opts > 配置里的自定义接入点（与 key 同源使用）> 环境变量（配 env key）> 网关默认。
-// key 与 baseUrl 必须同源：配置 key 打配置接入点，env key 打 env 接入点，混搭必然 401。
+// 接入点解析——「Key 决定整套配置源」的唯一实现点（P0-2 最终审核修复）：
+//   1) opts.baseUrl：调用方显式传入的调用级配置（运维探针/工具明确指定端点），
+//      最高优先级。显式配置 = 调用方自己保证 key 与端点配对，本函数不做混用拦截。
+//   2) config key 非空 → 整套取 config：端点只认 cfg.llm 自定义接入点（legacy
+//      DeepSeek 默认地址视为未设置 → 网关默认）。绝不落入 env LLM_BASE_URL
+//      ——config 密钥禁止发往环境变量端点。
+//   3) config key 为空 + env key 在 → 整套取 env：端点只取 env LLM_BASE_URL。
+//      config 里的自定义接入点（可能是过期残留，如 stale-config.example）绝不
+//      压过 env ——env 密钥绝不发往 config 端点（修复前 cfgCustomBase 会泄漏）。
+//   4) 无 key（key 参数为空且两侧皆无 key）→ 维持旧行为（env LLM_BASE_URL 或
+//      网关默认）；上层因无 key 诚实降级，不发起真实调用。
+// 返回值只含端点 URL，绝不包含任何密钥材料。
 function resolveBaseUrl(key, opts) {
-  if (opts && opts.baseUrl) return opts.baseUrl;
-  const custom = cfgCustomBase(_loadCfg().llm);
-  if (custom) return custom;
-  return key ? '' : String(process.env.LLM_BASE_URL || '').trim();
+  if (opts && opts.baseUrl) return opts.baseUrl; // 显式调用配置（最高优先级，见上 1)
+  const cfg = _loadCfg();
+  if (configKeySet(cfg)) return cfgCustomBase(cfg.llm);          // 2) config key → config 端点
+  if (envKeySet()) return String(process.env.LLM_BASE_URL || '').trim(); // 3) env key → env 端点
+  return key ? '' : String(process.env.LLM_BASE_URL || '').trim();       // 4) 无 key：旧行为
 }
 // opts: { projectId, competitorId, fieldKey } —— 三级归因地基（1-1）；tenantId 由 curTenantId() 兜底
 async function deepseekJSON(messages, key, model, opts) {

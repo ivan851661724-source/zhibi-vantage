@@ -10,11 +10,29 @@
 // 鉴权：注册为 'tenant'（走统一鉴权门；ALS 请求上下文解租户）。
 // ============================================================
 const als = require('../../core/als.js');
+const { isSafeId } = require('../../core/safe-id.js');
 const DomainEvent = require('../../research/domain-event.js');
 const Diff = require('../../research/price-diff.js');
 const FactStore = require('../../research/fact-store.js');
 const EvidenceStore = require('../../research/evidence-store.js');
 const Snapshot = require('../../research/source-snapshot.js');
+
+// P0-1：外部传入 id 的统一格式校验——非法（../ 穿越/URL 编码穿越/Windows ..\ /
+// 盘符/绝对路径/任何路径分隔符）→ 400 INVALID_ID；合法但不存在由存储层返回
+// null → 上层继续 404。存储层另有独立防御（core/safe-id.js），本层是第一道门。
+function invalidIdResponse(ctx, res) {
+  return ctx.sendJSON(res, 400, { error: 'INVALID_ID', message: '非法 id 格式。' });
+}
+
+// P2：API projection 层快照净化——剥离 raw_payload_ref（服务器内部文件路径），
+// 保留 Snapshot ID / content_hash / collector_version / source_status / observed_at
+// 等溯源信息。存储层 raw_payload_ref 原样保留（内部 raw 读回不受影响）。
+function publicSnapshot(s) {
+  if (!s || typeof s !== 'object') return s;
+  const c = Object.assign({}, s);
+  delete c.raw_payload_ref;
+  return c;
+}
 
 // ---------- GET /api/demo/recent-changes?limit=30 ----------
 // 近期 price_change_observed 事件（工作台「今日竞争动态」数据源）。
@@ -45,30 +63,43 @@ async function eventDetail(ctx, req, res, url, p) {
   if (!tenantId) return ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' });
   const id = url && url.searchParams && url.searchParams.get('id');
   if (!id) return ctx.sendJSON(res, 400, { error: 'MISSING_ID', message: '缺少事件 id。' });
+  if (!isSafeId(id)) return invalidIdResponse(ctx, res);
   const event = DomainEvent.getEventById(tenantId, id);
   if (!event) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '事件不存在。' });
   const diff = Diff.getDiffById(tenantId, event.diff_id);
   const oldFact = FactStore.getFactById(tenantId, event.old_fact_id);
   const newFact = FactStore.getFactById(tenantId, event.new_fact_id);
+  // P2：Fact 的 provenance.snapshots 继承 Evidence 快照引用（内含 raw_payload_ref 内部
+  // 路径），出 API 前统一净化——溯源 id/hash/version 全保留，服务器文件路径不出网。
+  const pubFact = (f) => !f || !f.provenance || !Array.isArray(f.provenance.snapshots)
+    ? f
+    : Object.assign({}, f, { provenance: { evidence: f.provenance.evidence, snapshots: f.provenance.snapshots.map(publicSnapshot) } });
   const evidences = [];
   for (const eid of [].concat(event.old_evidence_ids || [], event.new_evidence_ids || [])) {
     const ev = EvidenceStore.getEvidenceById(tenantId, eid);
-    if (ev && !evidences.some(x => x.evidence_id === ev.evidence_id)) evidences.push(ev);
+    if (ev && !evidences.some(x => x.evidence_id === ev.evidence_id)) {
+      // P2：Evidence 的 provenance.snapshots[] 内含 raw_payload_ref.path（内部路径），过滤后出 API
+      evidences.push(Object.assign({}, ev, {
+        provenance: ev.provenance && ev.provenance.snapshots
+          ? { snapshots: ev.provenance.snapshots.map(publicSnapshot) }
+          : ev.provenance,
+      }));
+    }
   }
   const snapshots = [];
   for (const sid of [].concat(event.old_snapshot_ids || [], event.new_snapshot_ids || [])) {
     const sm = Snapshot.getById(tenantId, sid);
     if (sm && !snapshots.some(x => x.snapshot_id === sm.snapshot_id)) {
-      snapshots.push({
+      snapshots.push(publicSnapshot({
         snapshot_id: sm.snapshot_id, capability: sm.capability, provider: sm.provider,
         source_url: sm.source_url, source_status: sm.source_status, observed_at: sm.observed_at,
         partial_scan: sm.partial_scan == null ? null : Boolean(sm.partial_scan),
         content_hash: sm.content_hash, collector_version: sm.collector_version,
         raw_payload_ref: sm.raw_payload_ref || null,
-      });
+      }));
     }
   }
-  ctx.sendJSON(res, 200, { event, diff, facts: { old: oldFact, new: newFact }, evidences, snapshots });
+  ctx.sendJSON(res, 200, { event, diff, facts: { old: pubFact(oldFact), new: pubFact(newFact) }, evidences, snapshots });
   return true;
 }
 
@@ -80,8 +111,15 @@ async function evidenceDetail(ctx, req, res, url, p) {
   if (!tenantId) return ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' });
   const id = url && url.searchParams && url.searchParams.get('id');
   if (!id) return ctx.sendJSON(res, 400, { error: 'MISSING_ID', message: '缺少证据 id。' });
-  const ev = EvidenceStore.getEvidenceById(tenantId, id);
-  if (!ev) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '证据不存在。' });
+  if (!isSafeId(id)) return invalidIdResponse(ctx, res);
+  const evRaw = EvidenceStore.getEvidenceById(tenantId, id);
+  if (!evRaw) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '证据不存在。' });
+  // P2：剥离 raw_payload_ref（服务器内部文件路径），溯源字段全保留
+  const ev = Object.assign({}, evRaw, {
+    provenance: evRaw.provenance && evRaw.provenance.snapshots
+      ? { snapshots: evRaw.provenance.snapshots.map(publicSnapshot) }
+      : evRaw.provenance,
+  });
   ctx.sendJSON(res, 200, { evidence: ev, snapshots: ev.provenance && ev.provenance.snapshots || [] });
   return true;
 }
@@ -113,6 +151,7 @@ async function aiInterpretation(ctx, req, res, url, p) {
   if (!tenantId) return ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' });
   const id = url && url.searchParams && url.searchParams.get('id');
   if (!id) return ctx.sendJSON(res, 400, { error: 'MISSING_ID', message: '缺少事件 id。' });
+  if (!isSafeId(id)) return invalidIdResponse(ctx, res);
   const event = DomainEvent.getEventById(tenantId, id);
   if (!event) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '事件不存在。' });
 

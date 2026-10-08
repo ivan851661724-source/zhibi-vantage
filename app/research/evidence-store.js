@@ -38,6 +38,7 @@ const crypto = require('crypto');
 const { DATA } = require('../core/paths.js');
 const { sanitizeNs } = require('../core/state-store.js');
 const als = require('../core/als.js');
+const safeId = require('../core/safe-id.js');
 const Snapshot = require('./source-snapshot.js');
 const logger = require('../services/logger.js');
 
@@ -135,7 +136,8 @@ function resolveSnapshotProvenance(tenantId, snapshotIds) {
     if (!meta) throw new Error('evidence-store: source_snapshot not resolvable in tenant scope: ' + sid);
     const rawRef = meta.raw_payload_ref && meta.raw_payload_ref.path
       ? path.join(DATA, meta.raw_payload_ref.path) : null;
-    const rawResolvable = !!(rawRef && fs.existsSync(rawRef));
+    // P0-1：raw ref 包含性防御——ref.path 必须仍在 DATA 内（防存储数据被篡改后外指）
+    const rawResolvable = !!(rawRef && safeId.isWithinDir(DATA, rawRef) && fs.existsSync(rawRef));
     out.push({
       snapshot_id: meta.snapshot_id,
       capability: meta.capability,
@@ -286,10 +288,16 @@ function recordEvidence(input) {
   return { recorded: true, meta, duplicate: false };
 }
 
-// 按 id 读回（租户命名空间隔离：B 租户查 A 的 evidence_id → null）
+// 按 id 读回（租户命名空间隔离：B 租户查 A 的 evidence_id → null）。
+// P0-1 安全：evidenceId 来自外部请求（/api/demo/evidence-detail?id=），
+// 存储层独立防御——非法 ID（含 ../ 路径穿越/盘符/绝对路径）一律不触盘返回 null；
+// 包含性检查保证解析后路径仍在该租户 evidence 目录内（双保险）。
 function getEvidenceById(tenantId, evidenceId) {
   if (!tenantId || !evidenceId) return null;
+  if (!safeId.isSafeId(evidenceId)) return null;
+  const dir = evidenceDirOf(tenantId);
   const fPath = evidencePathOf(tenantId, evidenceId);
+  if (!safeId.isWithinDir(dir, fPath)) return null;
   if (!fs.existsSync(fPath)) return null;
   try { return JSON.parse(fs.readFileSync(fPath, 'utf8')); } catch (e) { return null; }
 }

@@ -26,6 +26,7 @@ const crypto = require('crypto');
 const { DATA } = require('../core/paths.js');
 const { sanitizeNs } = require('../core/state-store.js');
 const Diff = require('./price-diff.js');
+const safeId = require('../core/safe-id.js');
 const logger = require('../services/logger.js');
 
 const SCHEMA_VERSION = 1;
@@ -164,10 +165,15 @@ function detectPriceChangeFromFact(input) {
   return { ok: true, diff_id: dr.meta.diff_id, status: dr.meta.status, event_id: er.meta.event_id, duplicate: !!er.duplicate };
 }
 
-// 事件读回 / 近期列表（Demo REST 用；M0 量级全扫可接受，索引归后续票）
+// 事件读回 / 近期列表（Demo REST 用；M0 量级全扫可接受，索引归后续票）。
+// P0-1 安全：存储层独立防御——非法 ID（../ 穿越/盘符/绝对路径）不触盘返回 null；
+// 包含性检查保证解析后路径仍在该租户 events 目录内。
 function getEventById(tenantId, eventId) {
   if (!tenantId || !eventId) return null;
-  const fPath = path.join(eventDirOf(tenantId), String(eventId) + '.json');
+  if (!safeId.isSafeId(eventId)) return null;
+  const dir = eventDirOf(tenantId);
+  const fPath = path.join(dir, String(eventId) + '.json');
+  if (!safeId.isWithinDir(dir, fPath)) return null;
   if (!fs.existsSync(fPath)) return null;
   try { return JSON.parse(fs.readFileSync(fPath, 'utf8')); } catch (e) { return null; }
 }

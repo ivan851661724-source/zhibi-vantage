@@ -37,6 +37,7 @@ const crypto = require('crypto');
 const { DATA } = require('../core/paths.js');
 const { sanitizeNs } = require('../core/state-store.js');
 const als = require('../core/als.js');
+const safeId = require('../core/safe-id.js');
 const Snapshot = require('./source-snapshot.js');
 const EvidenceStore = require('./evidence-store.js');
 const logger = require('../services/logger.js');
@@ -206,10 +207,15 @@ function recordPriceFactFromEvidence(input) {
   return { recorded: true, meta, duplicate: false };
 }
 
-// 按 id 读回（租户命名空间隔离：B 租户查 A 的 fact_id → null）
+// 按 id 读回（租户命名空间隔离：B 租户查 A 的 fact_id → null）。
+// P0-1 安全：存储层独立防御——非法 ID（../ 穿越/盘符/绝对路径）不触盘返回 null，
+// 包含性检查保证解析后路径仍在该租户 facts 目录内。
 function getFactById(tenantId, factId) {
   if (!tenantId || !factId) return null;
+  if (!safeId.isSafeId(factId)) return null;
+  const dir = factDirOf(tenantId);
   const fPath = factPathOf(tenantId, factId);
+  if (!safeId.isWithinDir(dir, fPath)) return null;
   if (!fs.existsSync(fPath)) return null;
   try { return JSON.parse(fs.readFileSync(fPath, 'utf8')); } catch (e) { return null; }
 }

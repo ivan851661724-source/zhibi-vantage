@@ -98,7 +98,7 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     // 隔离环境：temp CONFIG_PATH 写入 legacy 配置（空 key + DeepSeek 默认端点）
     const Paths = require('../core/paths.js');
     fs.writeFileSync(Paths.CONFIG_PATH, JSON.stringify({ llm: { apiKey: '', baseUrl: 'https://api.deepseek.com/v1' } }));
-    process.env.LLM_API_KEY = 'env-bailian-key-for-test';
+    process.env.LLM_API_KEY = 'fake-env-bailian-key-for-test';
     process.env.LLM_BASE_URL = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
     process.env.LLM_MODEL = 'qwen-test-model';
     // 重载解析链，让 llm-gateway 以当前 env 重算默认端点（与生产「env 先于进程启动」语义一致）
@@ -120,14 +120,14 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     assert.equal(sent6[sent6.length - 1].code, 200, 'handler should succeed: ' + JSON.stringify(sent6[sent6.length - 1].obj));
     const body6 = sent6[sent6.length - 1].obj;
     assert.ok(captured, 'gateway must be invoked');
-    assert.equal(captured.apiKey, 'env-bailian-key-for-test');            // env key（config key 为空）
+    assert.equal(captured.apiKey, 'fake-env-bailian-key-for-test');       // env key（config key 为空）
     assert.equal(captured.model, 'qwen-test-model');                      // env 百炼模型
     assert.ok(String(body6.endpoint_base_url).startsWith('https://token-plan.cn-beijing.maas.aliyuncs.com/'),
       'must report Bailian endpoint, got: ' + body6.endpoint_base_url);
     assert.equal(/deepseek/i.test(body6.endpoint_base_url), false, 'legacy DeepSeek config must NOT suppress env Bailian endpoint');
     assert.equal(body6.model, 'qwen-test-model');
     assert.ok(body6.endpoint_base_url.length > 0, 'endpoint_base_url never empty');
-    assert.equal(JSON.stringify(body6).includes('env-bailian-key-for-test'), false, 'API key must never leak into response');
+    assert.equal(JSON.stringify(body6).includes('fake-env-bailian-key-for-test'), false, 'API key must never leak into response');
     passed++; console.log('ok - 6. P0-2 resolution: env Bailian key+endpoint wins over legacy DeepSeek config baseUrl');
   } catch (e) { failed++; console.error('FAIL - 6. P0-2 resolution: ' + String(e.message || e).split('\n')[0]); }
 
