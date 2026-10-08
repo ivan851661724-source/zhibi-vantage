@@ -34,6 +34,99 @@ function publicSnapshot(s) {
   return c;
 }
 
+// ---------- 价格区间展示派生（2026-10-08 P1 下游整改） ----------
+// 规则依据：price-diff.judge v2 方向规则（2026-10-08 冻结）——仅在 API projection
+// 层根据 event.old_value/new_value 派生展示边界（任务书明确允许），不写库、
+// 不新增领域枚举：changed_boundary 取值（price_min/price_max/both/mixed）是
+// projection 描述值，DomainEvent/Diff 存储对象保持原样。
+function changedBoundaryOf(oldV, newV) {
+  if (!oldV || !newV || !Number.isFinite(oldV.price_min) || !Number.isFinite(oldV.price_max)
+    || !Number.isFinite(newV.price_min) || !Number.isFinite(newV.price_max)) return null;
+  const dMin = newV.price_min - oldV.price_min;
+  const dMax = newV.price_max - oldV.price_max;
+  if (dMin === 0 && dMax !== 0) return 'price_max';
+  if (dMax === 0 && dMin !== 0) return 'price_min';
+  if (dMin !== 0 && dMax !== 0) return Math.sign(dMin) === Math.sign(dMax) ? 'both' : 'mixed';
+  return null;
+}
+
+// |pct| 展示：整数省小数（25 → "25"），非整数保留一位（25.641 → "25.6"）
+function fmtPct(p) {
+  if (p == null || !Number.isFinite(p)) return null;
+  const a = Math.abs(p);
+  return a % 1 === 0 ? a.toFixed(0) : a.toFixed(1);
+}
+
+// 展示视图：from/to（区间或单一价字符串）+ change_label（业务话术，direction=null
+// 时为中性表达，绝无箭头/0.0%）。纯函数、只读 event，供 recent-changes /
+// event-detail 下发 display 字段与 AI payload 复用。
+function priceChangeView(ev) {
+  const ov = ev && ev.old_value, nv = ev && ev.new_value;
+  const cur = ev && ev.currency ? ev.currency + ' ' : '';
+  const single = (v) => !!v && v.price_min === v.price_max;
+  const fmtV = (v) => !v ? '—'
+    : (single(v) ? cur + v.price_min : cur + v.price_min + ' – ' + v.price_max);
+  let from = fmtV(ov);
+  let to = fmtV(nv);
+  let changeLabel = null;
+  const b = changedBoundaryOf(ov, nv);
+  const dir = ev && ev.direction;
+  if (b === 'both' && ov && single(ov) && nv && single(nv)) {
+    // 单一价格 39 → 29：方向 + 幅度（25.641 → 25.6%）
+    changeLabel = (dir === 'decrease' ? '下降 ' : dir === 'increase' ? '上升 ' : '变化 ')
+      + (fmtPct(ev.pct) == null ? '—' : fmtPct(ev.pct) + '%');
+  } else if (b === 'price_max') {
+    const p = fmtPct((nv.price_max - ov.price_max) / ov.price_max * 100);
+    changeLabel = (dir === 'decrease' ? '最高价下降 ' : '最高价上升 ') + (p == null ? '—' : p + '%');
+  } else if (b === 'price_min') {
+    const p = fmtPct((nv.price_min - ov.price_min) / ov.price_min * 100);
+    changeLabel = (dir === 'decrease' ? '最低价下降 ' : '最低价上升 ') + (p == null ? '—' : p + '%');
+  } else if (b === 'both') {
+    // 双边界同向：10–20 → 12–25，价格区间上移（口径：不标单一基准幅度）
+    changeLabel = dir === 'decrease' ? '价格区间下移' : dir === 'increase' ? '价格区间上移' : '价格区间变化';
+  } else if (b === 'mixed' || dir == null) {
+    // 双边界反向（10–20 → 12–15 收窄 / 10–20 → 8–25 扩大）：诚实无方向，中性表达
+    const wOld = ov ? ov.price_max - ov.price_min : null;
+    const wNew = nv ? nv.price_max - nv.price_min : null;
+    changeLabel = (wOld != null && wNew != null && wNew < wOld) ? '价格区间收窄，无单一涨跌方向'
+      : (wOld != null && wNew != null && wNew > wOld) ? '价格区间扩大，无单一涨跌方向'
+        : '区间边界变化，无单一涨跌方向';
+  } else {
+    // 防御回退：值缺失等异常形态——沿用旧标量口径，不编造
+    changeLabel = (dir === 'decrease' ? '下降 ' : dir === 'increase' ? '上升 ' : '变化 ')
+      + (fmtPct(ev.pct) == null ? '—' : fmtPct(ev.pct) + '%');
+    if (ov && single(ov)) from = cur + ov.price_min;
+    if (nv && single(nv)) to = cur + nv.price_min;
+  }
+  return { from, to, changed_boundary: b, change_label: changeLabel };
+}
+
+// AI factPayload 装配（纯函数，供 ai-interpretation 与回归测试复用）：
+// 携带完整价格区间（old/new_price_range）+ changed_boundary（projection 派生），
+// 单一价兼容字段 old_price/new_price 保留（区间价时为 null，绝不冒充区间）；
+// direction=null 时 delta/pct 原样 null——绝不用 0 替代未知百分比。
+function aiFactPayloadOf(event) {
+  const v = (x) => x && Number.isFinite(x.price_min) && Number.isFinite(x.price_max)
+    ? { min: x.price_min, max: x.price_max } : null;
+  return {
+    event_type: event.event_type,
+    competitor_brand: (event.entity_ref && event.entity_ref.brand_name) || null,
+    product: (event.entity_ref && event.entity_ref.title) || null,
+    old_price: event.old_price == null ? null : event.old_price,
+    new_price: event.new_price == null ? null : event.new_price,
+    old_price_range: v(event.old_value),
+    new_price_range: v(event.new_value),
+    changed_boundary: changedBoundaryOf(event.old_value, event.new_value),
+    direction: event.direction || null,
+    delta: event.delta == null ? null : event.delta,
+    pct: event.pct == null ? null : event.pct,
+    observed_at_old: event.observed_at_old,
+    observed_at_new: event.observed_at_new,
+    data_source: event.source + '/' + event.provider,
+    data_note: '以下数字均为系统真值链（SourceSnapshot→Evidence→Fact→Diff→Event）产出，是本回复唯一可用数据。价格可能为单一价格（old_price/new_price）或价格区间（old_price_range/new_price_range）；区间变化时请按区间表述，不要把区间简化成单一价格。',
+  };
+}
+
 // ---------- GET /api/demo/recent-changes?limit=30 ----------
 // 近期 price_change_observed 事件（工作台「今日竞争动态」数据源）。
 async function recentChanges(ctx, req, res, url, p) {
@@ -44,7 +137,8 @@ async function recentChanges(ctx, req, res, url, p) {
   const events = DomainEvent.listEvents(tenantId, { limit });
   const all = DomainEvent.listEvents(tenantId);
   ctx.sendJSON(res, 200, {
-    events,
+    // display：projection 层按 old/new value 派生的区间展示视图（不入库）
+    events: events.map(e => Object.assign({}, e, { display: priceChangeView(e) })),
     summary: {
       total: all.length,
       decrease: all.filter(e => e.direction === 'decrease').length,
@@ -99,7 +193,13 @@ async function eventDetail(ctx, req, res, url, p) {
       }));
     }
   }
-  ctx.sendJSON(res, 200, { event, diff, facts: { old: pubFact(oldFact), new: pubFact(newFact) }, evidences, snapshots });
+  ctx.sendJSON(res, 200, {
+    event: Object.assign({}, event, { display: priceChangeView(event) }),
+    diff,
+    facts: { old: pubFact(oldFact), new: pubFact(newFact) },
+    evidences,
+    snapshots,
+  });
   return true;
 }
 
@@ -186,20 +286,9 @@ async function aiInterpretation(ctx, req, res, url, p) {
   // 汇报实际端点（§七 必录）：baseUrl 为空时网关用默认端点，这里如实还原，绝不上报空 URL。
   const endpointUsed = LLM.normalizeBaseUrl(baseUrl) || LLM.DEFAULT_BASE_URL;
 
-  const factPayload = {
-    event_type: event.event_type,
-    competitor_brand: (event.entity_ref && event.entity_ref.brand_name) || null,
-    product: (event.entity_ref && event.entity_ref.title) || null,
-    old_price: event.old_price,
-    new_price: event.new_price,
-    direction: event.direction,
-    delta: event.delta,
-    pct: event.pct,
-    observed_at_old: event.observed_at_old,
-    observed_at_new: event.observed_at_new,
-    data_source: event.source + '/' + event.provider,
-    data_note: '以下数字均为系统真值链（SourceSnapshot→Evidence→Fact→Diff→Event）产出，是本回复唯一可用数据。',
-  };
+  // P1 下游整改：AI 输入携带完整价格区间 + changed_boundary（projection 派生）；
+  // 单一价兼容字段保留；direction=null 时 delta/pct 为 null（绝不用 0 替代）。
+  const factPayload = aiFactPayloadOf(event);
   const messages = [
     { role: 'system', content: '你是跨境电商竞品分析师。严格纪律：只能使用用户消息中给出的结构化数据；禁止编造或推算任何未给出的数字、时间、来源、销量、GMV、AOV；禁止提及数据之外的事件。用不超过 120 字的简体中文输出业务解读：这个价格变化意味着什么、建议卖家关注什么。' },
     { role: 'user', content: JSON.stringify(factPayload) },
@@ -232,4 +321,4 @@ async function aiInterpretation(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { recentChanges, eventDetail, evidenceDetail, seed, aiInterpretation };
+module.exports = { recentChanges, eventDetail, evidenceDetail, seed, aiInterpretation, priceChangeView, aiFactPayloadOf, changedBoundaryOf };

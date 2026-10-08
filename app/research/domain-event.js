@@ -95,9 +95,13 @@ function recordPriceChangeEvent(input) {
     tenant: { tenant_id: tenantId, project_ref: d.tenant && d.tenant.project_ref || null },
     entity_key: d.entity_key,
     entity_ref: d.entity_ref || null,
-    // 价格语义（Demo/AI 只读这些字段；数字全部来自 Diff/Fact，非本层计算）
-    old_price: d.old_value ? d.old_value.price_min : null,
-    new_price: d.new_value ? d.new_value.price_min : null,
+    // 价格语义（Demo/AI 只读这些字段；数字全部来自 Diff/Fact，非本层计算）。
+    // old_price/new_price 仅在单一价格（price_min===price_max）时承载标量价；
+    // 区间价一律 null，完整区间见 old_value/new_value——绝不用 price_min 冒充
+    // 整个区间，杜绝「10 → 10，下降 25%」式自相矛盾表达
+    // （2026-10-08 最终审核 P1 下游整改；单一价 39→29 行为不变）。
+    old_price: d.old_value && d.old_value.price_min === d.old_value.price_max ? d.old_value.price_min : null,
+    new_price: d.new_value && d.new_value.price_min === d.new_value.price_max ? d.new_value.price_min : null,
     old_value: d.old_value || null,
     new_value: d.new_value || null,
     direction: d.direction || null,         // decrease | increase

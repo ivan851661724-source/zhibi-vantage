@@ -18,8 +18,13 @@ type RecentResp = {
 type DemoEvent = {
   event_id: string; event_type: string; occurred_at: string;
   entity_key: string; entity_ref: Record<string, unknown> | null;
-  old_price: number; new_price: number; direction: string | null;
+  old_price: number | null; new_price: number | null; direction: string | null;
   delta: number | null; pct: number | null; currency: string | null;
+  old_value: { price_min: number; price_max: number } | null;
+  new_value: { price_min: number; price_max: number } | null;
+  // P1 下游整改：projection 层派生的区间展示视图（from/to 含完整区间；change_label
+  // 在 direction=null 时为中性表达，绝无箭头/0.0%）
+  display?: { from: string; to: string; changed_boundary: string | null; change_label: string } | null;
   old_evidence_ids: string[]; new_evidence_ids: string[];
   old_snapshot_ids: string[]; new_snapshot_ids: string[];
   observed_at_old: string | null; observed_at_new: string | null;
@@ -70,6 +75,12 @@ function sourceLabel(ev: Record<string, unknown>): string {
   const s = String(ev.source || '');
   if (s === 'shopify') return 'Shopify 商品目录';
   return s || '—';
+}
+// 变化话术颜色：降=红 / 升=橙 / 无方向（区间混合变化）=中性灰（绝无箭头与 0%）
+function changeChipStyle(direction: string | null): Record<string, string> {
+  if (direction === 'increase') return { color: '#b26500' };
+  if (direction === null) return { color: '#888888' };
+  return {};
 }
 
 export default function DemoPage() {
@@ -122,8 +133,14 @@ export default function DemoPage() {
     : null;
   const latestBrand = latest ? String((latest.entity_ref && (latest.entity_ref as Record<string, unknown>).brand_name) || '竞争品牌') : '';
   const latestTitle = latest ? String((latest.entity_ref && (latest.entity_ref as Record<string, unknown>).title) || '商品') : '';
-  const latestPct = latest ? Math.abs(latest.pct ?? 0).toFixed(1) : '';
-  const latestDirWord = latest ? (latest.direction === 'decrease' ? '下调' : latest.direction === 'increase' ? '上调' : '变化') : '';
+  const latestView = latest && latest.display ? latest.display : null;
+  // P1 下游整改：区间事件（如 10–20 → 10–15）展示完整区间与边界话术，
+  // 绝不出现「10 → 10，下降 25%」；direction=null 时为中性表达（无箭头/无 0.0%）
+  const latestFrom = latestView ? latestView.from : (latest ? fmtMoney(latest.old_price, latest.currency) : '');
+  const latestTo = latestView ? latestView.to : (latest ? fmtMoney(latest.new_price, latest.currency) : '');
+  const latestChange = latestView ? latestView.change_label
+    : latest ? (latest.direction === 'decrease' ? '下降 ' + Math.abs(latest.pct ?? 0).toFixed(1) + '%'
+      : latest.direction === 'increase' ? '上涨 ' + Math.abs(latest.pct ?? 0).toFixed(1) + '%' : '区间变化') : '';
   // 确定性「建议关注」（按方向给固定口径，不编造任何数字/事件）
   const advice = latest
     ? (latest.direction === 'decrease'
@@ -136,8 +153,8 @@ export default function DemoPage() {
   const briefText = latest ? [
     '【今日竞争情报】（Demo / Sample Data）',
     '发现 ' + (summary ? summary.total : events.length) + ' 项已确认的竞争变化（价格下调 ' + (summary ? summary.decrease : 0) + ' · 价格上调 ' + (summary ? summary.increase : 0) + '）。',
-    '最重要：' + latestBrand + ' · ' + latestTitle + ' 价格从 ' + fmtMoney(latest.old_price, latest.currency)
-      + ' 调整至 ' + fmtMoney(latest.new_price, latest.currency) + '，' + latestDirWord + ' ' + latestPct + '%'
+    '最重要：' + latestBrand + ' · ' + latestTitle + ' 价格从 ' + latestFrom
+      + ' 调整至 ' + latestTo + '，' + latestChange
       + (latest.currency ? '（币种 ' + latest.currency + '）' : '（币种信息暂不可用）') + '。',
     '观察时间：' + fmtTime(latest.observed_at_old) + ' → ' + fmtTime(latest.observed_at_new),
     advice,
@@ -214,14 +231,12 @@ export default function DemoPage() {
             <b>{latestBrand} · {latestTitle}</b>
           </div>
           <div className="demo-row" style={{ margin: '6px 0' }}>
-            <span className="demo-price-old">{fmtMoney(latest.old_price, latest.currency)}</span>
+            <span className="demo-price-old">{latestFrom}</span>
             <span>→</span>
-            <span className="demo-price-new">{fmtMoney(latest.new_price, latest.currency)}</span>
+            <span className="demo-price-new">{latestTo}</span>
             {!latest.currency && <span className="demo-cur-note">币种信息暂不可用</span>}
-            {/* P1：direction=null（混合区间变化）不伪造涨跌方向，不显示 0% 箭头 */}
-            {latest.direction === null
-              ? <span className="demo-pct">区间变化</span>
-              : <span className="demo-pct">{latest.direction === 'decrease' ? '↓' : '↑'} {latestPct}%</span>}
+            {/* P1：direction=null（混合区间变化）不伪造涨跌方向——中性话术，无箭头/无 0.0% */}
+            <span className="demo-pct" style={changeChipStyle(latest.direction)}>{latestChange}</span>
           </div>
           <div className="demo-kv">观察时间：{fmtTime(latest.observed_at_old)} → {fmtTime(latest.observed_at_new)}</div>
           {briefAi && (
@@ -261,6 +276,12 @@ export default function DemoPage() {
         {events.map(ev => {
           const brand = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).brand_name) || '竞争品牌';
           const title = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).title) || '商品';
+          const view = ev.display || null;
+          const from = view ? view.from : fmtMoney(ev.old_price, ev.currency);
+          const to = view ? view.to : fmtMoney(ev.new_price, ev.currency);
+          const change = view ? view.change_label
+            : ev.direction === 'decrease' ? '下降 ' + Math.abs(ev.pct ?? 0).toFixed(1) + '%'
+              : ev.direction === 'increase' ? '上涨 ' + Math.abs(ev.pct ?? 0).toFixed(1) + '%' : '区间变化';
           return (
             <div key={ev.event_id} style={{ borderTop: '1px solid #F0F0EE', padding: '12px 0' }}>
               <div className="demo-row">
@@ -269,12 +290,12 @@ export default function DemoPage() {
                 <span className="demo-kv">{ev.direction === 'decrease' ? '价格变动 · 下调' : ev.direction === 'increase' ? '价格变动 · 上调' : '竞争变化'}</span>
               </div>
               <div className="demo-row" style={{ marginTop: 4 }}>
-                <span className="demo-price-old">{fmtMoney(ev.old_price, ev.currency)}</span>
+                <span className="demo-price-old">{from}</span>
                 <span>→</span>
-                <span className="demo-price-new">{fmtMoney(ev.new_price, ev.currency)}</span>
+                <span className="demo-price-new">{to}</span>
                 {!ev.currency && <span className="demo-cur-note">币种信息暂不可用</span>}
-                {ev.direction === 'decrease' && <span className="demo-pct">↓ {Math.abs(ev.pct ?? 0).toFixed(1)}%</span>}
-                {ev.direction === 'increase' && <span className="demo-pct" style={{ color: '#b26500' }}>↑ {Math.abs(ev.pct ?? 0).toFixed(1)}%</span>}
+                {/* P1：区间事件展示完整区间与边界话术；direction=null 中性无箭头 */}
+                <span className="demo-pct" style={changeChipStyle(ev.direction)}>{change}</span>
               </div>
               <div className="demo-kv">检出时间：{fmtTime(ev.occurred_at)} · 观察窗口 {fmtTime(ev.observed_at_old)} → {fmtTime(ev.observed_at_new)} · 数据状态：已确认变化</div>
               <div style={{ marginTop: 8 }}>
@@ -323,16 +344,16 @@ export default function DemoPage() {
             <div className="demo-kv">商品：<b>{String((detail.event.entity_ref && (detail.event.entity_ref as Record<string, unknown>).title) || '商品')}</b></div>
             <div className="demo-kv">价格变化：</div>
             <div className="demo-row" style={{ margin: '4px 0 8px' }}>
-              <span className="demo-price-old">{fmtMoney(detail.event.old_price, detail.event.currency)}</span>
+              <span className="demo-price-old">{detail.event.display ? detail.event.display.from : fmtMoney(detail.event.old_price, detail.event.currency)}</span>
               <span>→</span>
-              <span className="demo-price-new">{fmtMoney(detail.event.new_price, detail.event.currency)}</span>
+              <span className="demo-price-new">{detail.event.display ? detail.event.display.to : fmtMoney(detail.event.new_price, detail.event.currency)}</span>
               {!detail.event.currency && <span className="demo-cur-note">币种信息暂不可用</span>}
-              {/* P1：direction=null（混合区间变化）诚实无方向，不显示 0% 箭头 */}
-              {detail.event.direction === null
-                ? <span className="demo-pct">区间变化</span>
-                : <span className="demo-pct">{detail.event.direction === 'decrease' ? '↓' : '↑'} {Math.abs(detail.event.pct ?? 0).toFixed(1)}%</span>}
+              {/* P1：direction=null（混合区间变化）诚实无方向，中性话术无箭头/无 0.0% */}
+              <span className="demo-pct" style={changeChipStyle(detail.event.direction)}>
+                {detail.event.display ? detail.event.display.change_label : '区间变化'}
+              </span>
             </div>
-            <div className="demo-kv">变化幅度：{detail.event.direction === null ? '区间边界混合变化（无单一方向）' : (detail.event.direction === 'decrease' ? '下降 ' : '上涨 ') + Math.abs(detail.event.pct ?? 0).toFixed(1) + '%'}</div>
+            <div className="demo-kv">变化幅度：{detail.event.display ? detail.event.display.change_label : '区间边界变化（无单一方向）'}</div>
             <div className="demo-kv">时间：观察窗口 {fmtTime(detail.event.observed_at_old)} → {fmtTime(detail.event.observed_at_new)} · 检出 {fmtTime(detail.event.occurred_at)}</div>
             <div className="demo-kv">状态：<b>已确认变化</b></div>
 
