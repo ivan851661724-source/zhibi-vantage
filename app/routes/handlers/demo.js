@@ -236,6 +236,8 @@ async function evidenceDetail(ctx, req, res, url, p) {
   if (!isSafeId(id)) return invalidIdResponse(ctx, res);
   const evRaw = EvidenceStore.getEvidenceById(tenantId, id);
   if (!evRaw) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '证据不存在。' });
+  // Phase 1 可观测性：evidence_opened 行为事件（只记脱敏标识与时间，不记证据内容）
+  try { require('../../observability/telemetry.js').recordEvent({ eventType: 'evidence_opened', tenantId, objectType: 'evidence', objectId: id }); } catch (e) { /* 观测失败不影响主链路 */ }
   // P2：剥离 raw_payload_ref（服务器内部文件路径），溯源字段全保留
   const ev = Object.assign({}, evRaw, {
     provenance: evRaw.provenance && evRaw.provenance.snapshots

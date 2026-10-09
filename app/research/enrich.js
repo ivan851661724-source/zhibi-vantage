@@ -29,6 +29,7 @@ const { buildPriceField, parsePriceRange } = require('../lib/pricefield.js');
 const { autoExcludeOwnBrands } = require('../lib/own-brand.js');
 const { channelTypeOf } = require('../lib/blue-ocean.js');
 const { GROWTH_VALUES } = require('../lib/trend.js');
+const Telemetry = require('../observability/telemetry.js'); // Phase 1 真实基线：阶段度量
 
 // ============================================================
 // 步骤2：逐家深研（后台队列 + 全字段）
@@ -51,6 +52,7 @@ function buildResearchQueue(state) {
   const topK = sorted.slice(0, 8);
   const rest = sorted.slice(8);
   const q = getQ(state.projectId);
+  q.enqueuedAt = Date.now(); // Phase 1 可观测性：排队等待计时起点
   q.queue = [
     ...topK.map(c => ({ id: c.id, priority: 2 })),
     ...rest.map(c => ({ id: c.id, priority: 1 }))
@@ -92,11 +94,14 @@ async function runQueue(state, config) {
         continue;
       }
       q.researching.add(job.id);
+      const _queueWaitMs = Date.now() - (q.enqueuedAt || Date.now()); // Phase 1：入队 → 开始深研
       // 心跳续租（修复：此前 heartbeat 零调用，超过 60s 的任务会被 reclaimExpired 翻回
       // pending 被再次认领，与原执行并发重复跑、双倍 LLM/搜索扣费）
       const hb = setInterval(() => { try { Tasks.heartbeat(job.id, job.claimToken, Date.now()); } catch (e) { /* 非致命 */ } }, 20000);
       try {
-        await deepResearchOne(comp, state, config);
+        // Phase 1 可观测性：运行上下文包裹（深层 search/LLM 调用归因到本项目）
+        await Telemetry.withRun({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId },
+          () => deepResearchOne(comp, state, config));
         try { Tasks.finish(job.id, job.claimToken, 'done'); } catch (e) { /* 非致命 */ }
       } catch (e) {
         comp.status = 'error';
@@ -108,12 +113,20 @@ async function runQueue(state, config) {
         comp.researchedAt = new Date().toISOString();
         state.progress.done = state.competitors.filter(c => c.status === 'done').length;
         saveState(state);
+        // Phase 1 可观测性：排队等待时长（每竞争品牌一行）+ 首批结果里程碑
+        Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+          stage: 'competitor_queue_wait', durationMs: _queueWaitMs, status: comp.status === 'done' ? 'ok' : 'error' });
+        if (comp.status === 'done' && state.progress.done === 1) {
+          Telemetry.milestone(state.projectId, 'milestone_first_batch', { tenantId: state.tenantId });
+        }
       }
       await sleep(150);
     }
   } finally {
     q.running = false;
     q.queue = []; // 内存队列已被 tasks 表接管消费，消费完置空
+    // Phase 1 可观测性：全部深研完成 → total + milestone_all_done（调研终点）
+    Telemetry.endRun(state.projectId, 'ok');
     // 在研集空 → 回收 Map 条目，避免无限增长
     if (q.researching.size === 0) researchQueues.delete(state.projectId);
   }
@@ -169,7 +182,11 @@ async function deepResearchOne(comp, state, config) {
   // ---- L3 抓取层：官网正文 + Shopify 结构化价格（verified 级证据） ----
   let officialPage = { ok: false }, shopify = { ok: false }, officialEv = null;
   if (comp.url) {
+    const _tFetch = Date.now();
     [officialPage, shopify] = await Promise.all([fetchPage(comp.url), fetchShopifyProducts(comp.url)]);
+    Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+      stage: 'site_shopify_fetch', durationMs: Date.now() - _tFetch,
+      status: officialPage.ok || shopify.ok ? 'ok' : 'error', provider: 'official+shopify' });
   }
   if (officialPage.ok) officialEv = addEv(comp.url, 'official', comp.name + ' 官网正文', officialPage.text.slice(0, 280), anchorDomain);
   logAttempt(comp, 'official', comp.url || '(无官网URL)', 'official', officialPage.ok, officialPage.ok ? '官网正文抓取成功' : (comp.url ? '官网抓取失败/不可达' : '无官网URL，跳过'));
@@ -293,6 +310,7 @@ async function deepResearchOne(comp, state, config) {
   // 信号量控制并发：复用 CONCURRENCY（原死变量）限制同时发起的搜索数，
   // 避免 9 路并发触发搜索 API 限流/超时导致批量失败（§1 根因）。
   let _pi = 0;
+  const _tProbe = Date.now(); // Phase 1 可观测性：定向渠道探测段计时
   const probeWorker = async () => {
     while (_pi < probeKeys.length) {
       const k = probeKeys[_pi++];
@@ -319,6 +337,9 @@ async function deepResearchOne(comp, state, config) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, probeKeys.length) }, () => probeWorker()));
+  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+    stage: 'channel_probe', durationMs: Date.now() - _tProbe,
+    status: probeFails.length ? 'partial' : 'ok', provider: (config.search && config.search.provider) || 'search' });
   // 记录每个定向探测的执行结果（hit 四态：true 命中 / false 真实零命中 / null 探测失败或 error 哨兵）
   probeKeys.forEach(k => {
     const raw = probeRaw[k];
@@ -478,6 +499,7 @@ async function deepResearchOne(comp, state, config) {
   const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'deep-research', competitorId: comp.id, thinking: false });
 
   // ---- 合并：置信度由 deriveBasis 从引用证据推导，LLM 无权自评 ----
+  const _tMerge = Date.now(); // Phase 1 可观测性：字段合并 + 引用复核段计时（含复核 LLM 调用）
   const citedEvs = (cites) => (Array.isArray(cites) ? cites : []).map(id => evidences.find(e => e.id === id)).filter(Boolean);
   const citeAudit = []; // verified 字段的引用复核清单：值必须真出自所引证据（见下方批量复核）
   const applyBasis = (obj, cites, fieldName) => {
@@ -732,9 +754,12 @@ async function deepResearchOne(comp, state, config) {
   // ---- #304 字段撕裂交叉校验（discover 归类推测 vs enrich 官网实抓事实）----
   try { crossValidateTearing(comp, state.track); } catch (e) { /* 不阻断主链路 */ }
   try { enforceBasisEvidence(comp); } catch (e) { /* 不阻断主链路 */ }
+  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+    stage: 'field_merge_citation_check', durationMs: Date.now() - _tMerge, status: 'ok' });
 
   // ---- R2：真实口碑采集（Reddit 公开端点 + 独立站评论页 + 已配 key 的平台）----
   // 失败/未配置静默返回空（voice-collector 纪律）；归一化带来源 URL，供机会视图/voice 域溯源。
+  const _tVoice = Date.now(); // Phase 1 可观测性：口碑采集段计时
   try {
     // R2.1 增量：持久化游标按对手记住上次采集点，作为 since 只取更新内容（配合 URL 去重双保险）
     const _cursorAll = state.projectId ? voiceStore.loadCursor(state.tenantId, state.projectId) : {};
@@ -757,6 +782,8 @@ async function deepResearchOne(comp, state, config) {
       voiceStore.saveCursor(state.tenantId, state.projectId, _cursorAll);
     }
   } catch (e) { comp.voiceItems = []; } // 采声失败不阻断主链路（忠实：缺数据好过编数据；游标不推进）
+  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+    stage: 'voice_collection', durationMs: Date.now() - _tVoice, status: 'ok', provider: 'voice-collector' });
 
   comp.status = 'done';
 }
@@ -770,6 +797,7 @@ async function lookupBrand(name, url, config, bodyIntent) {
     s.tenantId = resolveTenantId(); // 绑定租户（P0-2.1）
     setCurrentId(s.projectId, s.tenantId);
     mirrorProjectToDb(s.projectId, requestScope.getStore() || s.tenantId, s.track); // T3-1：镜像进 db 项目清单
+    Telemetry.beginRun({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId }); // 指定品牌检索也是一次完整调研
   } else if (!s.tenantId) {
     s.tenantId = resolveTenantId(); // 既有档案补打租户标（升级后首次访问）
   }
@@ -787,7 +815,10 @@ async function lookupBrand(name, url, config, bodyIntent) {
       if (!s.excluded.includes(ex.id)) s.excluded.push(ex.id);
       s.excludedReasons[ex.id] = 'own-brand';
     }
+    const _tDer0 = Date.now();
     s.whiteSpace = computeWhiteSpace(s);
+    Telemetry.recordStage({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId,
+      stage: 'derived_analysis', durationMs: Date.now() - _tDer0, status: 'ok' });
     return s;
   }
   const comp = {
@@ -812,7 +843,10 @@ async function lookupBrand(name, url, config, bodyIntent) {
   try { await deepResearchOne(comp, s, config); }
   catch (e) { comp.status = 'error'; comp.evidence = '检索失败：' + String(e.message || e); }
   finally { saveState(s); }
+  const _tDer1 = Date.now();
   s.whiteSpace = computeWhiteSpace(s);
+  Telemetry.recordStage({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId,
+    stage: 'derived_analysis', durationMs: Date.now() - _tDer1, status: 'ok' });
   return s;
 }
 // 点卡优先调研（P0-1 修复：操作本项目队列，不污染其他项目）

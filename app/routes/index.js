@@ -19,6 +19,7 @@ const MiscH = require('./handlers/misc.js');
 const TelemetryH = require('./handlers/telemetry.js');
 const AuthH = require('./handlers/auth.js'); // P0 恢复：login/register
 const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
+const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
 
 function registerAll() {
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
@@ -71,6 +72,10 @@ function registerAll() {
   registry.register('POST', '/api/deepdive', 'tenant', CollectH.deepdive);
   // —— 纠错/意图/排除/反馈组 ——
   registry.register('POST', '/api/field-correct', 'tenant', CorrectionH.fieldCorrect);
+
+  // —— Phase 1 真实基线与可观测性 ——
+  registry.register('GET', '/api/admin/observability/summary', 'admin', ObsH.adminSummary);
+  registry.register('POST', '/api/events/product', 'tenant', ObsH.productEvent);
   registry.register('POST', '/api/field-review', 'tenant', CorrectionH.fieldReview);
   registry.register('POST', '/api/field-correct/revoke', 'tenant', CorrectionH.fieldRevoke);
   registry.register('POST', '/api/intent', 'tenant', CorrectionH.intent);

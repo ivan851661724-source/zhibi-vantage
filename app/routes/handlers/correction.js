@@ -25,6 +25,9 @@ async function fieldCorrect(ctx, req, res, url, p) {
   const _isLegacyGlobal = _ident.ghost === true;
   const _tid = _ident.tenantId || ctx.curTenantId();
   const _uid = _ident.userId || 'owner';
+  // Phase 1 可观测性：correction_submitted 行为事件（只记对象脱敏标识，不记纠错内容/理由）
+  try { require('../../observability/telemetry.js').recordEvent({ eventType: 'correction_submitted',
+    tenantId: _tid, projectId: s.projectId, objectType: 'field', objectId: id + ':' + field }); } catch (e) { /* 观测失败不影响主链路 */ }
   const CHANNELS = ctx.CHANNELS;
   const CATEGORIES = ctx.CATEGORIES;
   const isPrice = /^price/.test(field);

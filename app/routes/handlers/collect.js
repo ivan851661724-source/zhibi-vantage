@@ -217,9 +217,19 @@ async function brief(ctx, req, res, url, p) {
       ctx.saveState(cur);
     };
     try {
+      const _tRep = Date.now(); // Phase 1 可观测性：报告生成段计时
       const briefRes = await ctx.buildReport(s, config);
+      const Telemetry = require('../../observability/telemetry.js');
+      Telemetry.recordStage({ runId: s.projectId, tenantId: tid, projectId: s.projectId,
+        stage: 'report_generation', durationMs: Date.now() - _tRep, status: 'ok', provider: 'llm' });
+      Telemetry.milestone(s.projectId, 'milestone_first_report', { tenantId: tid });
       done({ brief: briefRes, briefStatus: 'done' });
     } catch (e) {
+      try {
+        const Telemetry = require('../../observability/telemetry.js');
+        Telemetry.recordStage({ runId: s.projectId, tenantId: tid, projectId: s.projectId,
+          stage: 'report_generation', status: 'error', errorCode: String((e && e.message) || e).slice(0, 64), provider: 'llm' });
+      } catch (e2) { /* 观测失败不影响主链路 */ }
       done({ briefStatus: 'failed', briefError: String((e && e.message) || e) });
     } finally {
       briefInflight.delete(tid); // 成败都注销：下一轮 POST 可重新受理

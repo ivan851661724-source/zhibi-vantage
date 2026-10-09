@@ -177,4 +177,4 @@ async function handleAdminRoutes(req, res, ctx) {
   return false;
 }
 
-module.exports = { handleAdminRoutes };
+module.exports = { handleAdminRoutes, requireAdmin }; // Phase 1：requireAdmin 供 observability 复用

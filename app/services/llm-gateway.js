@@ -106,10 +106,35 @@ async function call(messages, opts) {
 
   let lastErr = null;
   const _callStart = Date.now();
+  // ---- Phase 1 可观测性：llm_header_wait / llm_body_read 阶段度量 ----
+  // 每次尝试先攒在内存，调用结局（成功/降级/抛错）确定后统一落盘——这样 degraded
+  // 标志能正确标注到整次调用的全部尝试行上。观测失败不影响调用本身（best-effort）。
+  const _tObs = () => { try { return require('../observability/telemetry.js'); } catch { return null; } };
+  const _attemptRows = []; // {kind:'header'|'body', durationMs, status, errorCode, cacheHit}
+  const _flushObs = (degraded) => {
+    const T = _tObs();
+    if (!T) return;
+    for (const r of _attemptRows) {
+      T.recordStage({
+        stage: r.kind === 'header' ? 'llm_header_wait' : 'llm_body_read',
+        durationMs: r.durationMs, status: r.status, provider: 'llm', model,
+        retryCount: r.attempt, cacheHit: !!r.cacheHit, degraded, errorCode: r.errorCode,
+        tenantId: tid || 'anonymous', projectId: o.projectId, competitorId: undefined,
+      });
+    }
+  };
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) await new Promise(r => setTimeout(r, RETRY_BASE_MS * 2 ** (attempt - 1)));
+    const _attemptStart = Date.now();
+    let _headersArrived = false;
+    let _bodyT0 = 0;
     try {
       const { response: r, release } = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs, o.thinking);
+      _headersArrived = true;
+      _attemptRows.push({
+        kind: 'header', attempt, durationMs: Date.now() - _attemptStart,
+        status: r.ok ? 'ok' : 'http_' + r.status, errorCode: r.ok ? null : 'DEEPSEEK_' + r.status,
+      });
       try {
         // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
         try {
@@ -124,9 +149,12 @@ async function call(messages, opts) {
           if (tid) metering.recordCall(tid, 'enrichRuns', metering.shouldBill(r.status) ? 1 : 0);
           throw new Error('DEEPSEEK_' + r.status);
         }
-        const _bodyT0 = Date.now();
+        _bodyT0 = Date.now();
         const j = await r.json(); // 200 已受理：解析失败不重试（防双计费）；body 挂起由同一 deadline abort 后按超时重试
-        // 可观测性：body 读取耗时（排查 fetch headers 快但 body 挂起的问题）
+        _attemptRows.push({
+          kind: 'body', attempt, durationMs: Date.now() - _bodyT0, status: 'ok',
+          cacheHit: !!(j.usage && (j.usage.prompt_cache_hit_tokens || 0) > 0),
+        });        // 可观测性：body 读取耗时（排查 fetch headers 快但 body 挂起的问题）
         try {
           const logger = require('./logger.js');
           logger && logger.info('llm-body', { fieldKey: o.fieldKey, bodyMs: Date.now() - _bodyT0, totalMs: Date.now() - _callStart });
@@ -143,13 +171,29 @@ async function call(messages, opts) {
           });
         }
         br.failures = 0; br.openedAt = 0;                   // 成功 → 复位该 key 的熔断计数
+        _flushObs(0);                                        // 结局=成功：落盘本次全部尝试行（degraded=0）
         if (!o.json) return content;
         try { return JSON.parse(content); }
         catch { try { return JSON.parse(content.replace(/```json|```/g, '').trim()); } catch { return {}; } }
       } finally { release(); } // 正文读取完成/失败后统一解除 deadline（中间任何 return/throw 都会经过）
     } catch (e) {
       lastErr = e;
-      if (e && (e.message === 'ENRICH_QUOTA' || e.message === 'NO_LLM_KEY')) throw e; // 配额/无 key 不重试
+      // 响应头未到达即失败（连接拒绝/头等待超时 abort）→ 补 header 失败行
+      if (!_headersArrived && !_attemptRows.some(x => x.kind === 'header' && x.attempt === attempt)) {
+        _attemptRows.push({
+          kind: 'header', attempt, durationMs: Date.now() - _attemptStart, status: 'error',
+          errorCode: String((e && e.message) || e).slice(0, 64),
+        });
+      }
+      // 正文读取阶段失败（headers 已到但 body 挂起/中断）→ 补 body 失败行（header 行已记）
+      if (_headersArrived && !_attemptRows.some(x => x.kind === 'body' && x.attempt === attempt)) {
+        _attemptRows.push({
+          kind: 'body', attempt, durationMs: _bodyT0 ? Date.now() - _bodyT0 : Date.now() - _attemptStart,
+          status: 'error',
+          errorCode: String((e && e.message) || e).slice(0, 64),
+        });
+      }
+      if (e && (e.message === 'ENRICH_QUOTA' || e.message === 'NO_LLM_KEY')) { _flushObs(0); throw e; } // 配额/无 key 不重试
       const m = e && /^DEEPSEEK_(\d{3})$/.exec(e.message);
       if (m && m[1] !== '429' && m[1] !== '408' && m[1][0] === '4') {
         // 确定性 4xx（key 失效/参数错误）：重试必然复现，直接出局
@@ -160,7 +204,8 @@ async function call(messages, opts) {
     }
   }
   // 重试耗尽：LLM_DEGRADE=0 时还原抛错（测试/运维可用）；默认字段级降级
-  if (degradeDisabled()) throw lastErr;
+  if (degradeDisabled()) { _flushObs(0); throw lastErr; }
+  _flushObs(1); // 结局=字段级降级：全部尝试行标 degraded=1
   try {
     const logger = require('./logger.js');
     logger && logger.warn('llm 调用失败已降级', { fieldKey: o.fieldKey, competitorId: o.competitorId, err: String(lastErr && lastErr.message) });

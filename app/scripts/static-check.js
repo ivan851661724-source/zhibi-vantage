@@ -1,6 +1,6 @@
 'use strict';
 // =============================================================================
-// static-check.js —— 防回归静态扫描（B-8，2026-09-12 任务书）
+// static-check.js —— 防回归静态扫描（B-8，2026-09-12 任务书；Phase 1 EBUSY 加固）
 //
 // 背景：连续 3 例同族事故（research/llm.js:10 / research/search.js / research/decorate.js
 // ——均为 server.js 拆分时遗漏 import / 错用命名空间），肉眼评审已证明靠不住。本脚本治本。
@@ -13,12 +13,28 @@
 //   4) e2e stub 冒烟：stub LLM/搜索/抓取后跑一轮最小 discover（抓 curTenantId-型——
 //      函数体内才触发的 ReferenceError，静态扫描抓不到）
 //
+// Windows EBUSY 根因与修复（2026-10-09）：
+//   · 根因：Windows 上 Defender/AV 或进程护栏在 node.exe 镜像刚映射时短暂持锁，
+//     spawnSync 返回 { error: EBUSY, status: null }（stderr 为空）——旧脚本把
+//     status!==0 一律判失败，产生大量空报错的幽灵 [SYNTAX]/[REQ] 行；
+//     受限环境（如沙箱）甚至对所有 node 子进程持续性 EBUSY，重试无效。
+//   · 修复（三层，检查语义不放宽、不跳过、不改警告）：
+//     ① 稳定可执行文件路径：一律 process.execPath（不依赖 PATH 解析）；
+//     ② 瞬态 EBUSY/EAGAIN 指数退避重试（scripts/lib/spawn-node.js）；
+//     ③ spawn 级失败（重试耗尽仍 EBUSY）→ 同一检查切换到**进程内等价实现**：
+//        语法=vm.Script 编译（等价 --check，只编译不执行）；require-all=进程内
+//        require（数据目录指向隔离临时根）；stub 冒烟=进程内 Module._load 打桩
+//        + 清 discover/llm 缓存后重载。
+//
 // 用法：node scripts/static-check.js   退出码 0=绿 / 1=红
+//       也可被测试壳进程内调用：const { runAll } = require(...); await runAll({ tmpRoot })
 // =============================================================================
-const { execFileSync, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
+const { spawnNode } = require('./lib/spawn-node.js');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
 
 const APP_ROOT = path.join(__dirname, '..');
 const SKIP_DIRS = new Set(['node_modules', 'test', '.git']);
@@ -124,16 +140,59 @@ function scanNamespace(file) {
   });
 }
 
-// ---- 检查 3：require-all 冒烟 ----
-function requireAll(files) {
+// ---- 检查 1：语法（spawn 优先，EBUSY 重试耗尽 → 进程内 vm 编译等价检查） ----
+function checkSyntax(files, tmpRoot) {
+  let spawnBlocked = false;
   for (const f of files) {
-    const r = spawnSync(process.execPath, ['-e', 'require(process.argv[1])', f], {
-      encoding: 'utf8', timeout: 30000,
-      env: Object.assign({}, process.env, { ZB_DATA_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-req-')) }),
-    });
+    const r = spawnNode(['--check', f], { encoding: 'utf8', timeout: 30000, tmpRoot });
+    if (r.error) { spawnBlocked = true; break; } // spawn 级失败（EBUSY 等，已重试）——整批切换进程内
+    if (r.status !== 0) report('SYNTAX', f, 0, String(r.stderr || '').trim().split('\n')[0]);
+  }
+  if (spawnBlocked) {
+    for (const f of files) {
+      try {
+        // 进程内等价 node --check：vm.Script 只编译不执行（require 未定义也无妨）
+        new vm.Script(fs.readFileSync(f, 'utf8'), { filename: f });
+      } catch (e) {
+        report('SYNTAX', f, 0, '语法错误: ' + String(e.message || e).split('\n')[0]);
+      }
+    }
+  }
+}
+
+// ---- 检查 3：require-all 冒烟（spawn 优先，EBUSY → 进程内 require） ----
+function collectRequireFiles() {
+  const reqDirs = ['research', 'lib', 'services'].map(d => path.join(APP_ROOT, d));
+  const reqFiles = [];
+  for (const d of reqDirs) {
+    if (!fs.existsSync(d)) continue;
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.js')) reqFiles.push(path.join(d, e.name));
+      if (e.isDirectory() && !SKIP_DIRS.has(e.name)) {
+        for (const e2 of fs.readdirSync(path.join(d, e.name), { withFileTypes: true })) {
+          if (e2.isFile() && e2.name.endsWith('.js')) reqFiles.push(path.join(d, e.name, e2.name));
+        }
+      }
+    }
+  }
+  return reqFiles;
+}
+function requireAll(files, tmpRoot) {
+  let spawnBlocked = false;
+  for (const f of files) {
+    const r = spawnNode(['-e', 'require(process.argv[1])', f], { encoding: 'utf8', timeout: 30000, tmpRoot });
+    if (r.error) { spawnBlocked = true; break; }
     if (r.status !== 0) {
       const firstErr = String(r.stderr || '').split('\n').find(l => l.includes('Error')) || String(r.stderr || '').slice(0, 200);
       report('REQ', f, 0, '顶层 require 抛错: ' + firstErr.trim());
+    }
+  }
+  if (spawnBlocked) {
+    // 进程内等价：先隔离数据目录再加载（子模块按 ZB_DATA_DIR 缓存路径）
+    process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || tmpRoot;
+    for (const f of files) {
+      try { require(f); }
+      catch (e) { report('REQ', f, 0, '顶层 require 抛错(进程内): ' + String(e.message || e).slice(0, 200)); }
     }
   }
 }
@@ -197,61 +256,116 @@ runDiscover('stub widget', { regions: ['us'] }, config, null, null)
   .catch(e => { console.error(String(e && e.stack || e)); console.error('SMOKE_FAIL ' + String((e && e.message) || e)); process.exit(2); });
 `;
 
-function runStubDiscoverSmoke() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-staticcheck-'));
+function runStubDiscoverSmoke(tmpRoot) {
+  const tmp = fs.mkdtempSync(path.join(tmpRoot, 'smoke-'));
   const preload = path.join(tmp, 'stub-preload.js');
   const driver = path.join(tmp, 'stub-driver.js');
   fs.writeFileSync(preload, STUB_PRELOAD);
   fs.writeFileSync(driver, STUB_DRIVER);
-  const r = spawnSync(process.execPath, ['--require', preload, driver], {
-    encoding: 'utf8', timeout: 90000,
+  const r = spawnNode(['--require', preload, driver], {
+    encoding: 'utf8', timeout: 90000, tmpRoot,
     env: Object.assign({}, process.env, { APP_ROOT: APP_ROOT }),
   });
-  const out = String(r.stdout || '') + String(r.stderr || '');
-  if (r.status !== 0 || /SMOKE_FAIL/.test(out)) {
-    console.error('---- stub discover 冒烟完整输出 ----\n' + out + '---- 完整输出结束 ----');
-    const m = out.match(/SMOKE_FAIL[ ]*([^\r\n]+)/);
-    const msg = (m && m[1] && m[1].trim()) || ('exit=' + r.status + ' tail=' + out.slice(-300).replace(/\s+/g, ' '));
-    report('SMOKE', path.join(APP_ROOT, 'research', 'discover.js'), 0, 'stub discover 冒烟失败: ' + msg);
+  if (!r.error) {
+    const out = String(r.stdout || '') + String(r.stderr || '');
+    if (r.status !== 0 || /SMOKE_FAIL/.test(out)) {
+      console.error('---- stub discover 冒烟完整输出 ----\n' + out + '---- 完整输出结束 ----');
+      const m = out.match(/SMOKE_FAIL[ ]*([^\r\n]+)/);
+      const msg = (m && m[1] && m[1].trim()) || ('exit=' + r.status + ' tail=' + out.slice(-300).replace(/\s+/g, ' '));
+      report('SMOKE', path.join(APP_ROOT, 'research', 'discover.js'), 0, 'stub discover 冒烟失败: ' + msg);
+    }
+    return Promise.resolve();
+  }
+  // spawn 级失败（EBUSY 等，已重试）→ 进程内等价冒烟：打桩 + 清相关缓存 + 重载 discover
+  return smokeInProcess(tmp);
+}
+async function smokeInProcess(tmp) {
+  const Module = require('module');
+  const origLoad = Module._load;
+  const stubLlm = {
+    deepseekJSON: async () => ({}),
+    deepseekText: async () => '',
+    llmApiKey: () => 'stub-key',
+    resolveModel: () => 'stub-model',
+    resolveBaseUrl: () => 'http://127.0.0.1:9',
+  };
+  const empty = async () => ({ results: [] });
+  const stubSearch = {
+    serperSearch: empty, normalizeSerperKeys: () => [], classifySerperError: () => 'STUB',
+    serperSearchWithFailover: empty, getSerperPool: () => ({ keys: [], disabled: [] }),
+    tavilySearch: empty, braveSearch: empty, bochaSearch: empty,
+    glFromRegions: () => 'us', activeSearchKey: () => 'stub',
+  };
+  Module._load = function (request, parent, isMain) {
+    let resolved = null;
+    try {
+      resolved = request.startsWith('.') && parent && parent.filename
+        ? require.resolve(path.resolve(path.dirname(parent.filename), request))
+        : require.resolve(request, { paths: parent ? parent.paths : undefined });
+    } catch (e) { resolved = String(request); }
+    const norm = String(resolved || '').split(path.sep).join('/');
+    if (norm.endsWith('/research/llm.js')) return stubLlm;
+    if (norm.endsWith('/services/providers/search.js')) return stubSearch;
+    if (norm.endsWith('/research/net.js')) {
+      try { delete require.cache[resolved]; } catch (e) {} // 摘缓存重新装配，保证打桩生效
+      const real = origLoad(request, parent, isMain);
+      return Object.assign({}, real, {
+        fetchPage: async () => ({ ok: false, error: 'stub' }),
+        fetchShopifyProducts: async () => ({ ok: false, error: 'stub' }),
+      });
+    }
+    return origLoad(request, parent, isMain);
+  };
+  // 清掉 research/ 下全部缓存：discover/enrich/candidates/search 等都在首载时绑定了
+  // llm.js 与 providers/search.js 的真实引用——必须经打桩 loader 重载才能生效
+  for (const k of Object.keys(require.cache)) {
+    if (k.startsWith(APP_ROOT + path.sep + 'research' + path.sep)) {
+      try { delete require.cache[k]; } catch (e) {}
+    }
+  }
+  process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || tmp;
+  try {
+    const { runDiscover } = require(path.join(APP_ROOT, 'research', 'discover.js'));
+    const config = { search: { provider: 'tavily', tavilyKey: 'stub-key' }, deepseekKey: 'stub-key' };
+    await runDiscover('stub widget', { regions: ['us'] }, config, null, null);
+    console.log('SMOKE_OK discover 完成（进程内 stub，全链路无 ReferenceError）');
+  } catch (e) {
+    report('SMOKE', path.join(APP_ROOT, 'research', 'discover.js'), 0,
+      'stub discover 冒烟失败(进程内): ' + String(e.message || e).slice(0, 200));
+  } finally {
+    Module._load = origLoad;
   }
 }
 
-// ---- 主流程 ----
-function main() {
+// ---- 主流程（可被测试壳进程内调用） ----
+async function runAll(opts) {
+  const o = opts || {};
   console.log('static-check：app 根 = ' + APP_ROOT);
+  // 一次性隔离临时根：全部子进程的 TMPDIR/TEMP/TMP/ZB_DATA_DIR 重定向到此处
+  const RUN_TMP = o.tmpRoot || fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-staticcheck-run-'));
   const files = listAppJs();
   console.log(`① 语法检查 ${files.length} 个文件…`);
-  for (const f of files) {
-    const r = spawnSync(process.execPath, ['--check', f], { encoding: 'utf8', timeout: 30000 });
-    if (r.status !== 0) report('SYNTAX', f, 0, String(r.stderr || '').trim().split('\n')[0]);
-  }
+  checkSyntax(files, RUN_TMP);
   console.log('② 命名空间启发式扫描…');
   for (const f of files) scanNamespace(f);
   console.log('③ require-all 冒烟（research/lib/services）…');
-  const reqDirs = ['research', 'lib', 'services'].map(d => path.join(APP_ROOT, d));
-  const reqFiles = [];
-  for (const d of reqDirs) {
-    if (!fs.existsSync(d)) continue;
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      if (e.isFile() && e.name.endsWith('.js')) reqFiles.push(path.join(d, e.name));
-      // services/providers 子目录
-      if (e.isDirectory() && !SKIP_DIRS.has(e.name)) {
-        for (const e2 of fs.readdirSync(path.join(d, e.name), { withFileTypes: true })) {
-          if (e2.isFile() && e2.name.endsWith('.js')) reqFiles.push(path.join(d, e.name, e2.name));
-        }
-      }
-    }
-  }
-  requireAll(reqFiles);
-  console.log(`④ e2e stub discover 冒烟…`);
-  runStubDiscoverSmoke();
-
-  if (problems.length) {
-    console.error('\nstatic-check 失败，共 ' + problems.length + ' 处：');
-    for (const p of problems) console.error('  ' + p);
-    process.exit(1);
-  }
-  console.log('\nstatic-check 全绿（语法 / 命名空间 / require-all / stub discover 冒烟）');
-  process.exit(0);
+  requireAll(collectRequireFiles(), RUN_TMP);
+  console.log('④ e2e stub discover 冒烟…');
+  await runStubDiscoverSmoke(RUN_TMP);
+  return problems;
 }
-main();
+
+module.exports = { runAll, listAppJs, stripCommentsAndStrings, declaredNames, scanNamespace, problems };
+
+// CLI 直跑（被测试壳 require 时不自动退出）
+if (require.main === module) {
+  runAll({}).then(() => {
+    if (problems.length) {
+      console.error('\nstatic-check 失败，共 ' + problems.length + ' 处：');
+      for (const p of problems) console.error('  ' + p);
+      process.exit(1);
+    }
+    console.log('\nstatic-check 全绿（语法 / 命名空间 / require-all / stub discover 冒烟）');
+    process.exit(0);
+  }).catch(e => { console.error('static-check 异常: ' + String(e && e.stack || e)); process.exit(1); });
+}

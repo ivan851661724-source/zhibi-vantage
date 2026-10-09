@@ -21,6 +21,7 @@ const db = require('../services/db.js');
 const { safeWrite } = require('../lib/fs-util.js');
 const { glFromRegions } = require('../services/providers/search.js');
 const { autoExcludeOwnBrands } = require('../lib/own-brand.js');
+const Telemetry = require('../observability/telemetry.js'); // Phase 1 真实基线：阶段度量
 const path = require('path');
 
 // ============================================================
@@ -167,6 +168,10 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const emitT = (t, p) => (typeof emit === 'function') ? emit(t, Object.assign({}, p, { tenantId: _initState.tenantId })) : undefined;
   setCurrentId(pid, _initState.tenantId);
   saveState(_initState);                                  // ← 关键：首个外部 await 之前落盘
+  // Phase 1 可观测性：调研起点（request_received + runs 起始时间戳），运行上下文供深层
+  // searchProvider/LLM 调用零签名归因到本项目
+  const _runCtx = { runId: pid, tenantId: _initState.tenantId, projectId: pid };
+  Telemetry.beginRun(_runCtx);
   // 关键：项目立即进 db 清单。tenantId 必须用 RAW（requestScope）对齐 db.listProjects 的过滤键——
   // resolveTenantId 返回 sanitizeNs 后的（tenant:xxx → tenant_xxx），而 db 存 RAW（tenant:xxx），
   // 用错键会导致 /api/projects 查不到（0812 加固实测发现，与原中部 mirrorProjectToDb 口径对齐）。
@@ -189,6 +194,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const enumP = llmEnumerate(track, intent, dsKey).then(v => { _stage('llmEnumerate-done'); return v; });
   await translateP;
   _stage('translate');
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'translate', durationMs: Date.now() - _tR1, status: 'ok' }));
   // 承接上一轮的学习信号（用户反馈）：按名字×赛道记的 suppressed / 用户补的对手，跨次 discover 保留
   const prevState = loadState() || {};
   const carrySuppressed = Array.isArray(prevState.suppressed) ? prevState.suppressed : [];
@@ -198,10 +204,13 @@ async function runDiscover(track, intent, config, emit, projectId) {
   // SERP 扇出只依赖翻译结果构造查询：翻译完成即启动，与枚举重叠——
   // 枚举结果到第二轮候选验证才需要，不让 90s 级的枚举挡住 15s 级的搜索
   const queries = buildFanoutQueries(trackWork, intent);
-  const fanoutP = fanoutSearch(queries, config, gl).then(v => { _stage('fanout-done'); return v; });
+  const _tFan = Date.now();
+  const fanoutP = Telemetry.withRun(_runCtx, () => fanoutSearch(queries, config, gl)).then(v => { _stage('fanout-done'); return v; });
   fanoutP.catch(() => {}); // enumP 先失败时避免 fanout 成为未处理的 rejection
   const llmCands = await enumP;
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'candidate_enumeration', durationMs: Date.now() - _tR1, status: 'ok' }));
   const fanout = await fanoutP;
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'search_round_1', durationMs: Date.now() - _tFan, status: 'ok' }));
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'enumerating', label: '已枚举候选品牌，正在全网搜索…', pct: 15, found: llmCands.length });
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'searching', label: '正在多维度搜索竞争品牌（覆盖各体量）…', pct: 30, found: fanout.length });
   _stage('round1（total ' + ((Date.now() - _tR1) / 1000).toFixed(1) + 's）');
@@ -210,6 +219,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const _tH = Date.now();
   const h1 = await harvestCandidates(trackWork, intent, fanout, dsKey, queries);
   _stage('harvest（total ' + ((Date.now() - _tH) / 1000).toFixed(1) + 's）');
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'harvest', durationMs: Date.now() - _tH, status: 'ok' }));
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'harvesting', label: '已抓取到一批线索，正在校验…', pct: 45, found: h1.candidates.length });
   let allFanout = fanout.slice();
   let labels2 = [];
@@ -222,8 +232,10 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const round2 = h1.moreQueries.concat(llmOnlyNames);
   if (round2.length) {
     labels2 = round2;
-    const fan2 = await fanoutSearch(round2, config, gl);
+    const _tF2 = Date.now();
+    const fan2 = await Telemetry.withRun(_runCtx, () => fanoutSearch(round2, config, gl));
     allFanout = allFanout.concat(fan2);
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'search_round_2', durationMs: Date.now() - _tF2, status: 'ok' }));
   }
   _stage('round2');
 
@@ -234,6 +246,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   for (const c of candidates.slice(0, 24)) {
     const _id = slug(c.name, _leadIds.length);
     _leadIds.push(_id);
+    if (_leadIds.length === 1) Telemetry.milestone(pid, 'milestone_first_brand'); // 里程碑：创建 → 首个品牌卡
     if (emit) emitT('brand_found', { projectId: pid, tier: 'lead', card: {
       id: _id, name: c.name || ('线索' + (_leadIds.length)), url: c.url || '', tier: c.tier || 'unknown',
       matchScore: 0, why: c.why || '全网/维度命中线索', status: 'lead', evidenceCount: c.evidenceCount || 0, confidence: 'low' } });
@@ -244,8 +257,10 @@ async function runDiscover(track, intent, config, emit, projectId) {
   candidates = candidates.filter(c => !(c.src === 'llm' && (c.evidenceCount || 0) === 0 && !c.serpKnown));
   const afterCross = candidates.slice();
   // 相关性二次裁判：捕获"设备/打印机/OEM代工/原材料供应商/平台"等周边企业（harvest 自报分漏判的无关项）
+  const _tRj = Date.now();
   const judgments = await rejudgeRelevance(trackWork, candidates, allFanout, dsKey);
   _stage('rejudge');
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'relevance_check', durationMs: Date.now() - _tRj, status: 'ok' }));
   candidates = applyRelevanceJudgments(candidates, judgments);
   candidates = candidates.filter(c => c.relevant && (Number(c.categoryFit) || 0) >= 60);
   // 市场存在度门槛：剔除"基本没浏览/没曝光"的单次噪声（跨 <2 个查询且无官网）
@@ -355,6 +370,7 @@ function discoverLaunch(track, intent, config, gate) {
         const code = e.message === 'NO_KEYS' ? 'NO_KEYS'
                    : (e.message === 'SEARCH_QUOTA' || e.message === 'ENRICH_QUOTA') ? 'quota'
                    : 'DISCOVER_FAILED';
+        Telemetry.endRun(projectId, 'error', code); // Phase 1 可观测性：调研失败终点
         try { Logger.error('discover-failed', { projectId, code, message: String(e.message || e), stack: String(e.stack || '').slice(0, 600) }); } catch {}
         emitSSE('discover_error', { projectId, code, message: String(e.message || e) });
       })

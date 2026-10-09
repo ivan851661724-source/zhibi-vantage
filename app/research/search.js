@@ -60,12 +60,31 @@ async function searchProvider(query, config, gl, kind) {
   const cacheKey = gl ? (query + ' [gl:' + gl + ']') : query;
   if (ckind !== 'off') {
     const hit = Cache.get(ckind, cacheKey);
-    if (hit) return hit;
+    if (hit) {
+      // Phase 1 可观测性：缓存命中单列（不计入外部调用次数）
+      try {
+        const T = require('../observability/telemetry.js');
+        T.recordSourceCall({ source: 'cache', kind: ckind, status: 'cache', resultCount: (hit.results || []).length, durationMs: 0 });
+      } catch (e) {}
+      return hit;
+    }
   }
   const tid = curTenantId();
   if (!metering.withinQuota(tid, 'searchCalls')) {
     return { results: [], error: 'quota', note: 'SEARCH_QUOTA' };
   }
+  // 观测埋点：记录每次真实外部调用（source/status/结果数/耗时），不记录查询词本身
+  const _T = (() => { try { return require('../observability/telemetry.js'); } catch { return null; } })();
+  const _srcCall = (source, status, resultCount, t0, err) => {
+    if (!_T) return;
+    try {
+      _T.recordSourceCall({
+        source, kind: ckind, status,
+        resultCount, durationMs: Date.now() - t0,
+        tenantId: tid, errorCode: err ? String(err).slice(0, 64) : undefined,
+      });
+    } catch (e) {}
+  };
   // 候选顺序：主 provider 在前，其余按健康度（不健康者垫底）；exhausted（额度类失败）源直接排除早退
   // 2026-09-06 B-01：全源 402/429 时不再每 query 把配置源全打一遍——recordFail 已按错误标记 exhausted
   const main = providerMain(config);
@@ -80,9 +99,11 @@ async function searchProvider(query, config, gl, kind) {
   let lastErr = null;
   const _s0 = Date.now();
   for (const name of candidates) {
+    const _pT0 = Date.now();
     try {
       const result = await providerCall(name, query, config, gl);
       ProviderHealth.recordOk(name);
+      _srcCall(name, 'ok', (result && result.results || []).length, _pT0);
       // 可观测性：记录搜索耗时（供 discover 耗时排查）
       try { Logger.info('search-call', { provider: name, kind: ckind, status: 'ok', durationMs: Date.now() - _s0, q: String(query).slice(0, 60) }); } catch (e) {}
       // 成功路径：写缓存（后续同 query 命中免配额）+ 本次搜索到达供应商即计费 1
@@ -92,6 +113,7 @@ async function searchProvider(query, config, gl, kind) {
     } catch (e) {
       lastErr = e;
       ProviderHealth.recordFail(name, e);
+      _srcCall(name, 'error', 0, _pT0, e && e.message);
       try { Logger.info('search-call', { provider: name, kind: ckind, status: 'fail', durationMs: Date.now() - _s0, err: String(e.message || '').slice(0, 80), q: String(query).slice(0, 60) }); } catch (e2) {}
       // 无 key（配置缺失）与真实失败都继续尝试下一候选
     }

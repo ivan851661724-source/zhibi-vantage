@@ -95,6 +95,18 @@ async function materialAction(ctx, req, res, url, p) {
   if (!sid) { ctx.sendJSON(res, 400, { error: 'BAD_INPUT', message: '非法材料 id' }); return true; }
   if (!action || action === '') delete s.decisions[sid];
   else s.decisions[sid] = action;
+  // Phase 1 可观测性：材料三动作行为事件（keep=收录 / later=稍后处理 / ignore=忽略；撤销不记）
+  {
+    const _evMap = { keep: 'material_saved', later: 'material_deferred', ignore: 'material_ignored' };
+    const _ev = _evMap[action];
+    if (_ev) {
+      try {
+        const _ap = ctx.getAuthPayload(req);
+        require('../../observability/telemetry.js').recordEvent({ eventType: _ev,
+          tenantId: _ap && _ap.payload && _ap.payload.tid || '', objectType: 'material', objectId: sid });
+      } catch (e) { /* 观测失败不影响主链路 */ }
+    }
+  }
   ctx.saveState(s);
   ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[sid] || null, decisions: s.decisions });
   return true;
