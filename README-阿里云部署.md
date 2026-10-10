@@ -18,7 +18,8 @@
 | `app/` | 后端源码（server.js + core/research/lib/services/routes/middleware，零 npm 依赖） |
 | `web/` | 前端源码（Next.js 15 + TypeScript，规范见 docs/） |
 | `.env.example` | 环境变量模板（复制为 `.env` 使用） |
-| `scripts/deploy.sh` | 一键部署（构建 + 启动 + 双服务健康检查） |
+| `scripts/deploy.sh` | 一键部署（构建 + 启动 + 双服务健康检查）；结果推送飞书群机器人（成功/失败卡片，环境变量 `FEISHU_WEBHOOK` 可覆盖目标） |
+| `scripts/deploy-cron.sh` | 定时自动部署脚本（服务器侧 `/opt/zhibi-vantage/deploy.sh` 的源码副本，cron 每分钟检查 main 新提交；仅有真实部署才推飞书，无新提交不推送；`FORCE_DEPLOY=1` 可强制重建当前 main） |
 | `scripts/backup.sh` | 备份数据卷到 `backups/` |
 | `scripts/logs.sh` | 滚动查看日志 |
 
