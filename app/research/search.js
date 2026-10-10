@@ -9,8 +9,13 @@ const Logger = require('../services/logger.js');
 const ProviderHealth = require('../services/providers/health.js');
 const SourceFusion = require('../lib/source-fusion.js');
 const metering = require('../services/metering.js');
-const { bochaSearch, braveSearch, getSerperPool, normalizeSerperKeys, serperSearchWithFailover, tavilySearch } = require('../services/providers/search.js');
+const cost = require('../services/cost.js');
+const { bochaSearch, braveSearch, getSerperPool, normalizeSerperKeys, serperSearchWithFailover, tavilySearch, wigoloSearch } = require('../services/providers/search.js');
 const { curTenantId } = require('../core/als.js'); // B-1（2026-09-12 任务书）：拆分时遗漏导入，正文 L64 调用会 ReferenceError
+
+// 搜索单次成本（¥/次，成本埋点口径）：按 Serper $0.30/1k 折算 ≈ ¥0.0022/次；
+// 各源同量级，混源时不逐一区分（成本归因精确到调用层即可，换价改此常量或 ZB_SEARCH_COST_YUAN）。
+const SEARCH_COST_YUAN = Number(process.env.ZB_SEARCH_COST_YUAN) || 0.002;
 
 // 搜索适配层：根据 config.search.provider 选择搜索源，统一返回 {results:[{title,url,content}]}
 // T1-1：每次外部搜索都经 metering 闸门并计费。searchProvider 委托给各 provider（tavily/serper/brave/bocha），
@@ -21,6 +26,7 @@ const { curTenantId } = require('../core/als.js'); // B-1（2026-09-12 任务书
 // 模块 0-3：命中缓存直接返回（不 recordCall —— 天然免配额）；缓存键含地域 gl 防美/英串数据
 // 模块 2-2：跨 provider 健康度路由 —— 主 provider（config 指定）失败时按序尝试有 key 的备用源；
 //           serper 内部多 key failover（serperSearchWithFailover）原样保留，本层在其外层叠加。
+//           Wigolo（自托管 $0，无 key）为链尾降级源：付费源全断/全 exhausted 时兜底，永不参与付费源排序与融合。
 const PROVIDER_ORDER = ['serper', 'brave', 'bocha', 'tavily'];
 const PROVIDER_ALIAS = { serper: 'serper', google: 'serper', brave: 'brave', bocha: 'bocha', tavily: 'tavily' };
 function providerMain(config) {
@@ -33,6 +39,7 @@ function providerConfigured(config, name) {
   if (name === 'brave') return !!sc.braveKey;
   if (name === 'bocha') return !!sc.bochaKey;
   if (name === 'tavily') return !!(sc.tavilyKey || sc.apiKey);
+  if (name === 'wigolo') return !!(String(sc.wigoloUrl || '').trim() || String(process.env.WIGOLO_URL || '').trim());
   return false;
 }
 async function providerCall(name, query, config, gl) {
@@ -50,6 +57,13 @@ async function providerCall(name, query, config, gl) {
     const k = config.search.bochaKey;
     if (!k) throw new Error('NO_BOCHA_KEY');
     return bochaSearch(query, k);
+  }
+  if (name === 'wigolo') {
+    const sc = config.search || {};
+    const base = String(sc.wigoloUrl || process.env.WIGOLO_URL || '').trim();
+    if (!base) throw new Error('NO_WIGOLO_URL');
+    const token = String(sc.wigoloToken || process.env.WIGOLO_API_TOKEN || '').trim();
+    return wigoloSearch(query, base, token);
   }
   const k = config.search.tavilyKey || config.search.apiKey;
   if (!k) throw new Error('NO_TAVILY_KEY');
@@ -91,14 +105,19 @@ async function searchProvider(query, config, gl, kind) {
   const rest = PROVIDER_ORDER.filter(p => p !== main)
     .sort((a, b) => (ProviderHealth.isHealthy(b) ? 1 : 0) - (ProviderHealth.isHealthy(a) ? 1 : 0));
   const candidates = [main, ...rest].filter(p => providerConfigured(config, p) && !ProviderHealth.isExhausted(p));
-  // 所有配置源都已 exhausted（额度耗尽）→ 直接抛清晰 SEARCH_QUOTA，不再发起任何外部调用
-  if (!candidates.length) {
+  // Wigolo 降级源（自托管 $0，永远垫底）：付费链全断——包括全源 exhausted/未配任何付费源——才轮到。
+  // 健康度同一套语义：daemon 连续失败（10 分钟窗口失败率 ≥60%）时跳过，不让每次搜索白等 30s 超时。
+  const wigoloReady = providerConfigured(config, 'wigolo')
+    && !ProviderHealth.isExhausted('wigolo') && ProviderHealth.isHealthy('wigolo');
+  const chain = wigoloReady ? candidates.concat(['wigolo']) : candidates;
+  // 所有配置源（含降级源）都不可用 → 直接抛清晰 SEARCH_QUOTA，不再发起任何外部调用
+  if (!chain.length) {
     metering.recordCall(tid, 'searchCalls', 0);
     throw new Error('SEARCH_QUOTA');
   }
   let lastErr = null;
   const _s0 = Date.now();
-  for (const name of candidates) {
+  for (const name of chain) {
     const _pT0 = Date.now();
     try {
       const result = await providerCall(name, query, config, gl);
@@ -109,6 +128,9 @@ async function searchProvider(query, config, gl, kind) {
       // 成功路径：写缓存（后续同 query 命中免配额）+ 本次搜索到达供应商即计费 1
       if (ckind !== 'off') Cache.set(ckind, cacheKey, result);
       metering.recordCall(tid, 'searchCalls', 1);
+      // 成本埋点（抓取需求 §2.1 欠账）：搜索成功记一条 kind=search，供日预算/归因报表；
+      // wigolo 自托管无边际成本 → 记 0（调用次数照常计，供配额与可观测性）
+      if (tid) cost.record({ tenantId: tid, kind: 'search', fieldKey: ckind, calls: 1, costYuan: name === 'wigolo' ? 0 : SEARCH_COST_YUAN });
       return result;
     } catch (e) {
       lastErr = e;
@@ -150,6 +172,8 @@ async function multiSourceSearch(query, config, gl, kind) {
   try {
     altResults = await providerCall(alt, query, config, gl);
     ProviderHealth.recordOk(alt);
+    const tidF = curTenantId();
+    if (tidF) cost.record({ tenantId: tidF, kind: 'search', fieldKey: 'fusion', calls: 1, costYuan: SEARCH_COST_YUAN });
   } catch (e) {
     ProviderHealth.recordFail(alt, e);
     return primary; // 备用源失败：不影响主结果，主源结论照常返回

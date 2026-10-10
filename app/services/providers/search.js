@@ -51,6 +51,13 @@ function classifySerperError(e) {
   const status = e && e.status;
   const t = String((e && e.bodyText) || (e && e.message) || '').toLowerCase();
   if (status === 402 || status === 429) return 'exhausted'; // 402 付费额度耗尽 / 429 限流
+  if (status === 400) {
+    // 实证（2026-10-04 部署）：serper 欠费不走 402，而是 400 + body "Not enough credits"——
+    // 归 other 会级联打满全部查询（部署阻塞项根因）。欠费/无效 key 必须按语义归类，快速熔断。
+    if (/not enough credit|out of credit|credit balance|insufficient/i.test(t)) return 'exhausted';
+    if (/invalid api key|api key (is )?invalid|not a valid key/i.test(t)) return 'invalid';
+    return 'other';
+  }
   if (status === 401 || status === 403) {
     if (/unauthor|invalid|forbidden|not a valid|wrong|denied/.test(t)) return 'invalid';
     if (/limit|quota|exhaust|plan|monthly|searche?s? left|credit|reached|overuse|exceeded/.test(t)) return 'exhausted';
@@ -148,6 +155,34 @@ async function bochaSearch(query, key) {
   return { results: items.map(o => ({ title: o.name || '', url: o.url || '', content: o.summary || o.snippet || '' })) };
 }
 
+// Wigolo：自托管本地优先多引擎搜索（github.com/KnockOutEZ/wigolo）——$0/次、无外部 key，
+// 作为付费搜索链（serper/brave/bocha/tavily）全断时的降级兜底源。
+// REST 契约：POST {base}/v1/search {query, max_results, search_depth} → {results:[{title,url,snippet|excerpt}]}；
+// 非回环绑定强制 Bearer token（WIGOLO_API_TOKEN）；服务端 search 响应 deadline 60s → 客户端 30s 有界超时。
+async function wigoloSearch(query, baseUrl, token) {
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!base) throw new Error('NO_WIGOLO_URL');
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(base + '/v1/search', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query, max_results: 10, search_depth: 'fast' }),
+    signal: AbortSignal.timeout(30000) // 有界超时：多引擎扇出比单 API 慢，仍不得拖住 sweep/failover
+  });
+  if (!r.ok) {
+    let bodyText = '';
+    try { bodyText = await r.text(); } catch { /* 忽略读取失败 */ }
+    const err = new Error('WIGOLO_' + r.status);
+    err.status = r.status;
+    err.bodyText = bodyText;
+    throw err;
+  }
+  const j = await r.json();
+  const items = Array.isArray(j.results) ? j.results : [];
+  return { results: items.map(o => ({ title: o.title || '', url: o.url || '', content: o.content || o.excerpt || o.snippet || '' })) };
+}
+
 // 区域 -> Google 地理码（北美默认 us）
 function glFromRegions(regions) {
   if (!regions || !regions.length) return 'us';
@@ -156,17 +191,19 @@ function glFromRegions(regions) {
   return 'us';
 }
 
-// 当前生效搜索 key（供 NO_KEYS 快速判定）：serper 池优先，其次 tavily/brave/bocha
+// 当前生效搜索 key（供 NO_KEYS 快速判定）：serper 池优先，其次 tavily/brave/bocha；
+// wigolo 自托管无 key——配置了 wigoloUrl 即视为具备搜索能力（返回其 URL 供真值判断）
 function activeSearchKey(config) {
   const sc = (config && config.search) || {};
   if ((sc.provider || 'tavily') === 'serper') {
     const k = normalizeSerperKeys(sc)[0];
     if (k) return k;
   }
-  return sc.tavilyKey || sc.apiKey || sc.braveKey || sc.bochaKey || null;
+  return sc.tavilyKey || sc.apiKey || sc.braveKey || sc.bochaKey
+    || (String(sc.wigoloUrl || '').trim() || process.env.WIGOLO_URL || '') || null;
 }
 
 module.exports = {
   serperSearch, normalizeSerperKeys, classifySerperError, serperSearchWithFailover, getSerperPool,
-  tavilySearch, braveSearch, bochaSearch, glFromRegions, activeSearchKey,
+  tavilySearch, braveSearch, bochaSearch, wigoloSearch, glFromRegions, activeSearchKey,
 };

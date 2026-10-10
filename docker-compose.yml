@@ -29,6 +29,9 @@ services:
       LLM_BASE_URL: "${LLM_BASE_URL:-}"
       LLM_MODEL: "${LLM_MODEL:-}"
       LLM_API_KEY: "${LLM_API_KEY:-}"
+      # Wigolo 自托管搜索降级源（付费搜索全断时的 $0 兜底；留空则不启用）
+      WIGOLO_URL: "${WIGOLO_URL:-}"
+      WIGOLO_API_TOKEN: "${WIGOLO_API_TOKEN:-}"
     volumes:
       - zhibi_data:/app/data             # 数据（配置/档案/数据库/日志）持久化
     healthcheck:
@@ -64,6 +67,29 @@ services:
       retries: 3
     # Phase 5：唯一 Web 入口（旧静态前端与 3300 回退映射已移除）。
 
+  # ---------- Wigolo 自托管搜索降级源（KnockOutEZ/wigolo，$0/次、无外部 key） ----------
+  # 仅容器网络内可达（不映射宿主机端口）；后端经 WIGOLO_URL=http://wigolo:3333 调用。
+  # 非回环绑定强制鉴权：WIGOLO_API_TOKEN 必须与 .env 中传给后端的一致。
+  # 首次搜索会按需下载引擎/模型到 wigolo_data 卷（约数百 MB，一次性）。
+  wigolo:
+    image: ghcr.io/knockoutez/wigolo:latest
+    container_name: wigolo
+    restart: always
+    command: serve --host 0.0.0.0
+    environment:
+      TZ: Asia/Shanghai
+      WIGOLO_API_TOKEN: "${WIGOLO_API_TOKEN:-}"
+    volumes:
+      - wigolo_data:/data                # 引擎/模型/缓存持久化（重建容器不丢）
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3333/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s                 # 首次启动下载组件较慢
+      retries: 3
+
 volumes:
   zhibi_data:
     name: zhibi_data
+  wigolo_data:
+    name: wigolo_data

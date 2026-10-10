@@ -6,7 +6,7 @@
 // 本模块只做「记录 + 判定」，路由顺序由调用方（searchProvider）编排。
 // ============================================================
 
-const PROVIDERS = ['serper', 'brave', 'bocha', 'tavily'];
+const PROVIDERS = ['serper', 'brave', 'bocha', 'tavily', 'wigolo']; // wigolo：自托管降级源，同一套健康度语义（失败率≥60% 垫底、_429 类 exhausted）
 
 const ST = {};
 PROVIDERS.forEach(p => {

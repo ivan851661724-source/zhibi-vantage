@@ -11,9 +11,15 @@
     "serperKeys": [],
     "braveKey": "",
     "bochaKey": "",
-    "tavilyKey": ""
+    "tavilyKey": "",
+    "wigoloUrl": "",
+    "wigoloToken": "",
+    "marketLang": "en"
   },
   "crunchbase": {
     "apiKey": ""
+  },
+  "metaAds": {
+    "token": ""
   }
 }

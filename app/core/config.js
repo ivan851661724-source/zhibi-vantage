@@ -16,7 +16,7 @@ function ensureData() { if (!fs.existsSync(DATA)) fs.mkdirSync(DATA, { recursive
 const SECRET_PATHS = [
   ['search', 'serperKey'], ['search', 'serperKeys'], ['search', 'apiKey'],
   ['search', 'tavilyKey'], ['search', 'braveKey'], ['search', 'bochaKey'],
-  ['llm', 'apiKey']
+  ['search', 'wigoloToken'], ['llm', 'apiKey']
 ];
 function extractSecrets(cfg) {
   const sec = { search: {}, llm: {} };
@@ -77,14 +77,18 @@ function migrateConfigSecrets() {
   safeWrite(CONFIG_PATH, out, true);
   console.log('[config] 已将明文密钥迁移为加密存储（MT_MASTER_KEY 已启用）。');
 }
-// 返回当前搜索源的 key（按 provider 选择），无则 null
+// 返回当前搜索源的 key（按 provider 选择），无则 null；
+// wigolo 自托管无 key——配置了 wigoloUrl 即视为具备搜索能力（真值判断用）
 function activeSearchKey(config) {
   if (!config || !config.search) return null;
-  const p = config.search.provider || 'tavily';
-  if (p === 'serper') return normalizeSerperKeys(config.search)[0] || null;
-  if (p === 'brave') return config.search.braveKey || null;
-  if (p === 'bocha') return config.search.bochaKey || null;
-  return config.search.tavilyKey || config.search.apiKey || null;
+  const sc = config.search;
+  const p = sc.provider || 'tavily';
+  if (p === 'serper') {
+    const k = normalizeSerperKeys(sc)[0];
+    if (k) return k;
+  }
+  return sc.tavilyKey || sc.apiKey || sc.braveKey || sc.bochaKey
+    || (String(sc.wigoloUrl || '').trim() || String(process.env.WIGOLO_URL || '').trim()) || null;
 }
 
 
