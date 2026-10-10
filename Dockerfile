@@ -20,6 +20,7 @@ COPY app/lib ./lib
 COPY app/services ./services
 COPY app/routes ./routes
 COPY app/middleware ./middleware
+COPY app/observability ./observability
 COPY app/scripts ./scripts
 
 # 预置配置种子（模板，不含密钥；密钥通过环境/平台安全配置注入）
