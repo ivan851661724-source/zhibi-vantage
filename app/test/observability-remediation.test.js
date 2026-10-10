@@ -7,7 +7,12 @@
 // §三 隐私：project_hash 化、SQLite 无明文、跨租户伪造拒绝（测试 5/6）
 // §四 static-check 异步假通过：注入失败使进程失败（测试 7）
 // §五 指标准确性：并行阶段独立计时、空 duration 不产 0ms、保留期清理（测试 8/9/10）
-// 附加：旧库 project_id → project_hash 迁移兼容
+// 附加：旧库 project_id → project_hash 迁移兼容（测试 11）
+// 第三轮整改（R12-R17）：
+//   §二 runQueue 终态聚合：全成功 ok / 部分失败 degraded / 全失败 error，
+//       失败与降级绝不产 milestone_all_done；历史遗留 error 品牌不参与判断；
+//       独立点卡重研与 discover 后台深研互不污染（R12-R16）
+//   §三 保留期：0 关闭、非法回退+警告、分段清理、边界（R17）
 // ============================================================
 const assert = require('assert');
 const fs = require('fs');
@@ -201,25 +206,60 @@ await t('R7 static-check 测试壳：注入异步失败 → 进程非零退出�
   // 含注入回归）且注入回归行存在——若壳回归为同步假通过，此断言不会成立
   const { execFileSync } = require('child_process');
   for (const sub of ['r7-tmp', 'r7-data']) fs.mkdirSync(path.join(process.env.ZB_DATA_DIR, sub), { recursive: true });
-  const out = execFileSync(process.execPath, [path.join(__dirname, 'static-check.test.js')], {
-    encoding: 'utf8', timeout: 420000,
-    env: Object.assign({}, process.env, {
-      TMPDIR: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
-      TEMP: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
-      TMP: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
-      ZB_DATA_DIR: path.join(process.env.ZB_DATA_DIR, 'r7-data'),
-    }),
-  });
-  assert.ok(out.includes('回归：异步 runAll 失败必须使 harness 计入失败'), '注入失败回归已运行');
-  assert.ok(out.includes('static-check.test: all passed'), '壳全绿');
-  // 反向证明：异步注入失败在 harness 内确实产生非零失败计数（直接驱动内核断言）
+  let out = null;
+  try {
+    out = execFileSync(process.execPath, [path.join(__dirname, 'static-check.test.js')], {
+      encoding: 'utf8', timeout: 420000,
+      env: Object.assign({}, process.env, {
+        TMPDIR: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
+        TEMP: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
+        TMP: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
+        ZB_DATA_DIR: path.join(process.env.ZB_DATA_DIR, 'r7-data'),
+      }),
+    });
+  } catch (e) {
+    // 受限环境补偿（第三轮整改）：node 子进程被持续拦截（EBUSY）→ 进程内执行
+    // 同一 harness（壳已改为 require 安全：require 不自动退出），失败语义不放宽
+    if (!(e && (e.code === 'EBUSY' || /EBUSY/.test(String(e.message || ''))))) throw e;
+    process.stdout.write('[observability-remediation] R7 子进程 spawn 被拦截（EBUSY），降级进程内执行壳 harness（非完全等价，失败可见）…\n');
+    const shell = require('./static-check.test.js');
+    const logs = [];
+    const origLog = console.log, origErr = console.error;
+    console.log = (m) => logs.push(String(m));
+    console.error = (m) => logs.push(String(m));
+    let failedN;
+    try { failedN = await shell.runHarness(); }
+    finally { console.log = origLog; console.error = origErr; }
+    if (failedN !== 0) throw new Error('进程内 harness 失败数=' + failedN + '\n' + logs.join('\n'));
+    assert.ok(logs.some(l => l.includes('回归：异步 runAll 失败必须使 harness 计入失败')), '注入失败回归已运行');
+  }
+  if (out !== null) {
+    assert.ok(out.includes('回归：异步 runAll 失败必须使 harness 计入失败'), '注入失败回归已运行');
+    assert.ok(out.includes('static-check.test: all passed'), '壳全绿');
+  }
+  // 反向证明：异步注入失败在 harness 内确实产生非零失败计数（直接驱动内核断言）。
+  // 子进程探针在正常环境执行；EBUSY 环境降级为进程内直接驱动同一内核。
+  let asyncFailed = 0, printedAllPassed = false;
   const { execSync } = require('child_process');
   const probe = 'const m=require("assert");' +
     'async function core(){let failed=0;const t=async(n,fn)=>{try{await fn()}catch(e){failed++}};' +
     'await t("x",async()=>{throw new Error("BOOM")});return failed};' +
     'core().then(f=>{m.strictEqual(f,1);console.log("async-fail-visible")})';
-  const r = execFileSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
-  assert.ok(r.includes('async-fail-visible'), '异步异常使失败计数为 1（不假通过）');
+  try {
+    const r = execFileSync(process.execPath, ['-e', probe], { encoding: 'utf8' });
+    assert.ok(r.includes('async-fail-visible'), '异步异常使失败计数为 1（不假通过）');
+  } catch (e) {
+    if (!(e && (e.code === 'EBUSY' || /EBUSY/.test(String(e.message || ''))))) throw e;
+    const shell = require('./static-check.test.js');
+    const f = await shell.runHarnessCore({
+      runner: async () => { throw new Error('INJECTED_ASYNC_FAILURE'); },
+      log: () => {},
+      err: (m) => { if (/INJECTED_ASYNC_FAILURE/.test(String(m))) asyncFailed++; },
+      onDone: () => { printedAllPassed = true; },
+    });
+    assert.strictEqual(f, 1, '异步异常使失败计数为 1（不假通过）');
+    assert.ok(!printedAllPassed, '异步失败后不触发 onDone（不打印 all passed）');
+  }
 });
 
 // ---------- §五 指标准确性与保留 ----------
@@ -324,6 +364,273 @@ await t('R11 旧库迁移：project_id 明文列 → project_hash（存量行哈
   assert.ok(!String(row.project_hash || '').includes(TRACK) && !String(row.project_hash || '').includes('旧赛道'), '存量 projectId 已哈希（无明文残留）');
   assert.ok(row.project_hash && row.project_hash.length === 24, '哈希形状正确（24 hex）');
   assert.ok(TM, '迁移后模块可用');
+});
+
+// ---------- 第三轮整改 §二：runQueue 终态聚合（真实 runQueue + 注入深研替身 + 数据库实测） ----------
+// 注意：R11 已把 OBS_DB_PATH 改指 legacy 库并重建 telemetry 缓存实例——
+// R12 起统一重建实例（TV）并换独立库文件，enrich.js 首次 require 时绑定同一实例。
+let TV = T;
+function _mkRunState(pid, tid, comps) {
+  return {
+    projectId: pid, tenantId: tid, track: 'r3-test',
+    runId: TV.newRunId(),
+    competitors: comps,
+    progress: { done: 0 },
+  };
+}
+
+await t('R12 runQueue 两任务全成功 → run=ok + milestone_all_done（数据库实测）', async () => {
+  T._resetForTest();
+  process.env.OBS_DB_PATH = path.join(process.env.ZB_DATA_DIR, 'obs-r12.sqlite');
+  delete require.cache[require.resolve('../observability/telemetry.js')];
+  TV = require('../observability/telemetry.js'); // enrich.js 随后 require 时绑定同一实例
+  // R7 的进程内降级可能已把 research/services 装入缓存并绑定旧 telemetry 实例——
+  // 必须一并摘除，enrich 首载时才会绑定本处新建的 TV 实例（否则终态写错库）
+  for (const k of Object.keys(require.cache)) {
+    if (k.includes(path.join('research', '')) || k.includes(path.join('services', ''))) {
+      delete require.cache[k];
+    }
+  }
+  const Tasks = require('../services/tasks.js');
+  const enrich = require('../research/enrich.js');
+  Tasks.init();
+  const state = _mkRunState('proj-r12-ok', 'tenant:r12', [
+    { id: 'c1', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c2', name: 'BrandB', rankScore: 9, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: state.runId, tenantId: state.tenantId, projectId: state.projectId });
+  enrich.buildResearchQueue(state);
+  await enrich.runQueue(state, {}, { deepResearchOneFn: async (comp) => { comp.status = 'done'; } });
+  const d = openDb();
+  const run = d.prepare('SELECT status FROM runs WHERE run_id=?').get(state.runId);
+  const allDone = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_done'").get(state.runId).n;
+  const processed = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_processed'").get(state.runId).n;
+  const totalRow = d.prepare("SELECT status FROM stage_metrics WHERE run_id=? AND stage='total'").get(state.runId);
+  d.close();
+  assert.strictEqual(run.status, 'ok', '全成功 → 终态 ok');
+  assert.strictEqual(totalRow.status, 'ok', 'total.status=ok');
+  assert.strictEqual(allDone, 1, '成功完成里程碑 all_done 恰好一条');
+  assert.strictEqual(processed, 0, 'ok 运行不产生 all_processed');
+});
+
+await t('R13 runQueue 一成一败 → run=degraded + all_processed，绝不产 all_done（数据库实测）', async () => {
+  const Tasks = require('../services/tasks.js');
+  const enrich = require('../research/enrich.js');
+  Tasks.init();
+  const state = _mkRunState('proj-r13-deg', 'tenant:r13', [
+    { id: 'c1', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c2', name: 'BrandB', rankScore: 9, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: state.runId, tenantId: state.tenantId, projectId: state.projectId });
+  enrich.buildResearchQueue(state);
+  await enrich.runQueue(state, {}, { deepResearchOneFn: async (comp) => {
+    if (comp.id === 'c1') { comp.status = 'done'; return; }
+    throw new Error('BOOM_DEEP_RESEARCH');
+  } });
+  const d = openDb();
+  const run = d.prepare('SELECT status FROM runs WHERE run_id=?').get(state.runId);
+  const allDone = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_done'").get(state.runId).n;
+  const processed = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_processed'").get(state.runId).n;
+  const totalRow = d.prepare("SELECT status, error_code FROM stage_metrics WHERE run_id=? AND stage='total'").get(state.runId);
+  const comp2 = d.prepare("SELECT status FROM stage_metrics WHERE run_id=? AND stage='competitor_queue_wait'").all(state.runId);
+  d.close();
+  assert.strictEqual(run.status, 'degraded', '部分失败 → 终态 degraded');
+  assert.strictEqual(totalRow.status, 'degraded', 'total.status=degraded');
+  assert.strictEqual(allDone, 0, 'degraded 绝不产生 all_done');
+  assert.strictEqual(processed, 1, 'degraded 改产「全部处理结束」里程碑');
+  assert.strictEqual(comp2.filter(r => r.status === 'error').length, 1, '失败任务有 error 阶段行');
+});
+
+await t('R14 runQueue 全失败 → run=error，无 all_done 无 all_processed', async () => {
+  const Tasks = require('../services/tasks.js');
+  const enrich = require('../research/enrich.js');
+  Tasks.init();
+  const state = _mkRunState('proj-r14-err', 'tenant:r14', [
+    { id: 'c1', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c2', name: 'BrandB', rankScore: 9, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: state.runId, tenantId: state.tenantId, projectId: state.projectId });
+  enrich.buildResearchQueue(state);
+  await enrich.runQueue(state, {}, { deepResearchOneFn: async () => { throw new Error('BOOM_ALL'); } });
+  const d = openDb();
+  const run = d.prepare('SELECT status FROM runs WHERE run_id=?').get(state.runId);
+  const allDone = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_done'").get(state.runId).n;
+  const processed = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_processed'").get(state.runId).n;
+  d.close();
+  assert.strictEqual(run.status, 'error', '全失败 → 终态 error');
+  assert.strictEqual(allDone, 0, '全失败绝不产生 all_done');
+  assert.strictEqual(processed, 0, '全失败不产生 all_processed');
+});
+
+await t('R15 同项目第二次全成功不受第一次失败影响（runId 归属聚合）', async () => {
+  const Tasks = require('../services/tasks.js');
+  const enrich = require('../research/enrich.js');
+  Tasks.init();
+  // 第一次：一成一败 → degraded
+  const s1 = _mkRunState('proj-r15-again', 'tenant:r15', [
+    { id: 'c1', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c2', name: 'BrandB', rankScore: 9, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: s1.runId, tenantId: s1.tenantId, projectId: s1.projectId });
+  enrich.buildResearchQueue(s1);
+  await enrich.runQueue(s1, {}, { deepResearchOneFn: async (comp) => {
+    if (comp.id === 'c1') { comp.status = 'done'; return; }
+    throw new Error('BOOM_FIRST');
+  } });
+  // 第二次（同一项目，新 runId，全新任务）：全成功
+  const s2 = _mkRunState('proj-r15-again', 'tenant:r15', [
+    { id: 'c1b', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c2b', name: 'BrandB', rankScore: 9, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: s2.runId, tenantId: s2.tenantId, projectId: s2.projectId });
+  enrich.buildResearchQueue(s2);
+  await enrich.runQueue(s2, {}, { deepResearchOneFn: async (comp) => { comp.status = 'done'; } });
+  const d = openDb();
+  const st1 = d.prepare('SELECT status FROM runs WHERE run_id=?').get(s1.runId).status;
+  const st2 = d.prepare('SELECT status FROM runs WHERE run_id=?').get(s2.runId).status;
+  const done2 = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_done'").get(s2.runId).n;
+  d.close();
+  assert.strictEqual(st1, 'degraded', '第一次 degraded');
+  assert.strictEqual(st2, 'ok', '第二次全成功 → ok（不受第一次失败影响）');
+  assert.strictEqual(done2, 1, '第二次产生自己的 all_done');
+});
+
+await t('R16 独立点卡重研失败不污染 discover run 终态（互不污染）', async () => {
+  const Tasks = require('../services/tasks.js');
+  const enrich = require('../research/enrich.js');
+  Tasks.init();
+  const ownRunId = TV.newRunId(); // 用户点卡重研的独立 run（≠ state.runId）
+  const state = _mkRunState('proj-r16-own', 'tenant:r16', [
+    { id: 'c1', name: 'BrandA', rankScore: 10, status: 'pending' },
+    { id: 'c3', name: 'BrandC', rankScore: 5, status: 'pending' },
+  ]);
+  TV.beginRun({ runId: state.runId, tenantId: state.tenantId, projectId: state.projectId });
+  // 先入队独立重研任务（payload.runId ≠ state.runId）——buildResearchQueue 的 c3 入队
+  // 会被任务表幂等去重挡掉（pending 同竞品只留一条），认领到的 c3 便带着独立 runId
+  Tasks.enqueue({ tenantId: state.tenantId, projectId: state.projectId, type: 'deep-research',
+    payload: { competitorId: 'c3', runId: ownRunId }, priority: 1 });
+  enrich.buildResearchQueue(state); // c1 入队（discover run 归属）；c3 被 LIKE 去重跳过
+  await enrich.runQueue(state, {}, { deepResearchOneFn: async (comp) => {
+    if (comp.id === 'c1') { comp.status = 'done'; return; }
+    if (comp.id === 'c3') throw new Error('BOOM_OWN_RUN'); // 独立重研失败
+    throw new Error('unexpected-comp');
+  } });
+  const d = openDb();
+  const discover = d.prepare('SELECT status FROM runs WHERE run_id=?').get(state.runId);
+  const own = d.prepare('SELECT status FROM runs WHERE run_id=?').get(ownRunId);
+  const discoverAllDone = d.prepare("SELECT COUNT(*) n FROM stage_metrics WHERE run_id=? AND stage='milestone_all_done'").get(state.runId).n;
+  d.close();
+  assert.ok(own, '独立重研 run 有自己的 runs 行');
+  assert.strictEqual(own.status, 'error', '独立重研失败 → 其 run=error');
+  assert.strictEqual(discover.status, 'ok', 'discover run 不被独立重研失败污染 → ok');
+  assert.strictEqual(discoverAllDone, 1, 'discover run 正常产生 all_done');
+});
+
+// ---------- 第三轮整改 §三：保留期配置与分段清理 ----------
+await t('R17a retentionDays 语义：未设置=30 / 0=关闭 / 正数=对应 / 非法=回退默认+警告', () => {
+  const envKey = 'OBS_RETENTION_DAYS';
+  const saved = process.env[envKey];
+  const warnCalls = [];
+  const origErr = console.error;
+  console.error = (m) => { warnCalls.push(String(m)); };
+  try {
+    delete process.env[envKey];
+    assert.strictEqual(T.retentionDays(), 30, '未设置 → 默认 30 天');
+    process.env[envKey] = '0';
+    assert.strictEqual(T.retentionDays(), 0, '0 → 显式关闭');
+    process.env[envKey] = '15';
+    assert.strictEqual(T.retentionDays(), 15, '正整数 → 对应天数');
+    process.env[envKey] = '7.9';
+    assert.strictEqual(T.retentionDays(), 7, '小数 → 向下取整');
+    // 警告为「一次」语义（_retentionWarned 进程内只告警一次）：首个非法值必须告警，
+    // 其余非法值只断言回退值（告警去抖本身即被测行为）
+    warnCalls.length = 0;
+    process.env[envKey] = '-5';
+    assert.strictEqual(T.retentionDays(), 30, '非法值 -5 → 回退默认 30 天');
+    assert.strictEqual(warnCalls.length, 1, '首个非法值输出一次配置警告');
+    assert.ok(/取值非法/.test(warnCalls[0]), '警告为受控文案（不含敏感信息）');
+    for (const bad of ['abc', 'NaN', '30天']) {
+      process.env[envKey] = bad;
+      assert.strictEqual(T.retentionDays(), 30, `非法值 ${bad} → 回退默认 30 天`);
+    }
+  } finally {
+    console.error = origErr;
+    if (saved === undefined) delete process.env[envKey]; else process.env[envKey] = saved;
+  }
+});
+
+await t('R17b pruneOld 显式 0 → skipped；调度器在 0 下不删除不 checkpoint', async () => {
+  const out = T.pruneOld(0);
+  assert.ok(out.skipped, '显式 0 → skipped');
+  assert.strictEqual(out.reason, 'retention disabled');
+  // 调度器：env=0 时不调度删除与 checkpoint（env 必须先于首次惰性建表生效，
+  // 否则模块初始化自带的调度会以默认 30 天空跑，_lastPruneInfo 出现竞态污染）
+  T._resetForTest();
+  process.env.OBS_DB_PATH = path.join(process.env.ZB_DATA_DIR, 'obs-r17.sqlite');
+  const savedEnv0 = process.env.OBS_RETENTION_DAYS;
+  process.env.OBS_RETENTION_DAYS = '0';
+  delete require.cache[require.resolve('../observability/telemetry.js')];
+  const T17 = require('../observability/telemetry.js');
+  T17.summary({ windowHours: 1 }); // 惰性建表（初始化调度因 0=关闭而完全跳过）
+  const d = openDb();
+  const old = Date.now() - 40 * 24 * 3600000;
+  d.prepare(`INSERT INTO runs (run_id, tenant_hash, project_hash, started_at, status) VALUES ('r17-old','th','ph',?,'ok')`).run(old);
+  d.close();
+  try {
+    T17._schedulePrune();
+    await new Promise(r => setImmediate(() => setImmediate(r)));
+    const d2 = openDb();
+    const n = d2.prepare("SELECT COUNT(*) AS n FROM runs WHERE run_id='r17-old'").get().n;
+    d2.close();
+    assert.strictEqual(n, 1, '关闭自动清理时过期行不被删除');
+    assert.strictEqual(T17._lastPruneInfo(), null, '关闭时不产生清理/checkpoint 记录');
+  } finally {
+    if (savedEnv0 === undefined) delete process.env.OBS_RETENTION_DAYS; else process.env.OBS_RETENTION_DAYS = savedEnv0;
+  }
+});
+
+await t('R17c 分段清理：大批量过期数据跨多个 setImmediate 轮次删完，checkpoint 恰好一次，边界行保留', async () => {
+  const T17 = require('../observability/telemetry.js');
+  const DAY = 24 * 3600000;
+  const d = openDb();
+  const ins = d.prepare(`INSERT INTO stage_metrics (run_id, tenant_hash, project_hash, stage, duration_ms, status, created_at)
+    VALUES ('r17-bulk','th','ph','translate',?,'ok',?)`);
+  const now = Date.now();
+  const N = 8100; // 17 批（batch=500）→ 必然跨多个调度轮次（每轮 ≤16 批）
+  d.exec('BEGIN');
+  for (let i = 0; i < N; i++) ins.run(i, now - 40 * DAY);
+  // 边界带：确定性地卡住「恰好保留期」两侧（±2s 远大于分段调度耗时）
+  ins.run(777777, now - 30 * DAY + 2000); // 保留期内 → 必须保留
+  ins.run(888888, now - 30 * DAY - 2000); // 过期 → 必须删除
+  d.exec('COMMIT');
+  d.prepare(`INSERT INTO runs (run_id, tenant_hash, project_hash, started_at, status) VALUES ('r17-bulk2','th','ph',?,'ok')`).run(now - 40 * DAY);
+  d.close();
+  const savedEnv = process.env.OBS_RETENTION_DAYS;
+  process.env.OBS_RETENTION_DAYS = '30';
+  try {
+    T17._schedulePrune();
+    // 等待分段调度完成（轮询 _pruneScheduled 释放，上限 10s）
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10000) {
+      const info = T17._lastPruneInfo();
+      if (info) break;
+      await new Promise(r => setImmediate(r));
+    }
+    const info = T17._lastPruneInfo();
+    assert.ok(info, '分段清理完成并产出状态');
+    assert.ok(info.rounds >= 2, `跨多个 setImmediate 轮次（实测 rounds=${info.rounds}）`);
+    assert.strictEqual(info.deleted.stage_metrics, N + 1, '过期阶段行全删（含过期边界行 888888）');
+    assert.strictEqual(info.deleted.runs, 2, '过期 runs 删除（r17-bulk2 + R17b 留下的 r17-old）');
+    assert.strictEqual(info.wal_checkpoint, 'truncated', '全部清完后 checkpoint 恰好一次');
+    const d2 = openDb();
+    const kept = d2.prepare('SELECT COUNT(*) AS n FROM stage_metrics WHERE duration_ms=777777').get().n;
+    const gone = d2.prepare('SELECT COUNT(*) AS n FROM stage_metrics WHERE duration_ms=888888').get().n;
+    d2.close();
+    assert.strictEqual(kept, 1, '保留期边界内的行保留（不误删）');
+    assert.strictEqual(gone, 0, '保留期边界外的行删除');
+  } finally {
+    if (savedEnv === undefined) delete process.env.OBS_RETENTION_DAYS; else process.env.OBS_RETENTION_DAYS = savedEnv;
+  }
 });
 
 console.log(failed ? `\nobservability-remediation.test: ${failed} failed` : '\nobservability-remediation.test: all passed');

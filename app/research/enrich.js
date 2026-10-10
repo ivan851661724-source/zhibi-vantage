@@ -1,7 +1,7 @@
 'use strict';
 // ============================================================
 // 本文件由拆分脚本自 server.js 机械搬运（行为保持不变，历史见 git）。
-// research/enrich.js —— 导出: getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence
+// research/enrich.js —— 导出: getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence, runTerminalStatus
 // ============================================================
 
 const { loadState, mirrorProjectToDb, newProjectId, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
@@ -73,10 +73,29 @@ function enqueueResearch(state, config) {
 
 function ensureQueue(state, config) { const q = getQ(state.projectId); if (!q.running) runQueue(state, config); }
 
-async function runQueue(state, config) {
+// 第三轮整改 §二：一次 discover run 的终态聚合（纯函数，可测）。
+// outcomes = 属于本次 runId 的每个任务的成功布尔（按完成顺序）。
+//   全部成功（含空数组=本次无事可做）→ 'ok'；
+//   部分成功 → 'degraded'（不计入成功率，产 milestone_all_processed 而非 all_done）；
+//   全部失败 → 'error'。
+// 铁律：只按属于当前 runId 的任务结果计算——项目里历史遗留的 error 品牌绝不参与；
+//       用户点卡独立重研（payload.runId 独立）有自己的 begin/end，同样不参与。
+function runTerminalStatus(outcomes) {
+  const o = Array.isArray(outcomes) ? outcomes : [];
+  if (o.length === 0) return 'ok';
+  if (o.some(s => !s)) return o.some(Boolean) ? 'degraded' : 'error';
+  return 'ok';
+}
+
+async function runQueue(state, config, opts) {
   const q = getQ(state.projectId);
   if (q.running) return;
   q.running = true;
+  // 第三轮整改 §二：按属于本次 runId 的任务收集结局（成功=true/失败=false）；
+  // _jobOwnRun（独立点卡重研）不收集——它有自己的 run 终态，绝不污染 discover run。
+  const _outcomes = [];
+  // 测试接缝（第三轮整改 §二）：可注入 deepResearchOne 替身，其余行为不变
+  const _deepResearchOne = (opts && typeof opts.deepResearchOneFn === 'function') ? opts.deepResearchOneFn : deepResearchOne;
   try {
     // 模块 0-4：先回收崩溃遗留（running 且租期过期 → pending，kill -9 后断点续跑）
     try { Tasks.reclaimExpired(Date.now()); } catch (e) { /* 非致命 */ }
@@ -106,7 +125,7 @@ async function runQueue(state, config) {
       try {
         // Phase 1 可观测性：运行上下文包裹（深层 search/LLM 调用归因到本次运行）
         await Telemetry.withRun({ runId: _jobRunId, tenantId: state.tenantId, projectId: state.projectId },
-          () => deepResearchOne(comp, state, config, _jobRunId));
+          () => _deepResearchOne(comp, state, config, _jobRunId));
         try { Tasks.finish(job.id, job.claimToken, 'done'); } catch (e) { /* 非致命 */ }
       } catch (e) {
         comp.status = 'error';
@@ -126,14 +145,22 @@ async function runQueue(state, config) {
         }
         // 审核整改 §一/§二：独立重研 run 的终点（成功→ok；失败→error，绝不产生 all_done）
         if (_jobOwnRun) Telemetry.endRun(_jobRunId, comp.status === 'done' ? 'ok' : 'error', comp.status === 'done' ? undefined : 'RESEARCH_FAILED');
+        // 第三轮整改 §二：仅统计属于 discover run（state.runId）的任务结局；独立重研不参与
+        if (!_jobOwnRun) _outcomes.push(comp.status === 'done');
       }
       await sleep(150);
     }
   } finally {
     q.running = false;
     q.queue = []; // 内存队列已被 tasks 表接管消费，消费完置空
-    // Phase 1 可观测性：全部深研完成 → discover run 终点（milestone_all_done 仅成功运行产生）
-    if (state.runId) Telemetry.endRun(state.runId, 'ok');
+    // 第三轮整改 §二：discover run 终态按本次 runId 所属任务聚合——
+    //   全部成功 → ok（milestone_all_done）；部分失败 → degraded（milestone_all_processed，
+    //   不计入成功率）；全部失败 → error；任一非 ok 终态绝不产生 milestone_all_done。
+    //   历史遗留 error 品牌（非本次 run 认领）绝不影响本判断；独立点卡重研不参与。
+    if (state.runId) {
+      const _terminal = runTerminalStatus(_outcomes);
+      Telemetry.endRun(state.runId, _terminal, _terminal === 'error' ? 'RESEARCH_FAILED' : undefined);
+    }
     // 在研集空 → 回收 Map 条目，避免无限增长
     if (q.researching.size === 0) researchQueues.delete(state.projectId);
   }
@@ -939,4 +966,4 @@ function enforceBasisEvidence(comp) {
 }
 
 
-module.exports = { getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence };
+module.exports = { getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence, runTerminalStatus };

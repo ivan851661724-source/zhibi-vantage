@@ -202,6 +202,9 @@ function requireAll(files, tmpRoot) {
     // 故仅作受控环境补偿；生产门禁以子进程路径为准（见文件头说明）
     notice(`require-all 冒烟：spawn 被拦截，${files.length} 个文件降级为进程内 require（非完全等价：共享 require 缓存，无法验证模块级隔离）`);
     process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || tmpRoot;
+    // 第三轮整改 §一：设置的目录必须存在——node:sqlite 不建父目录，全新副本无 data 目录
+    // 时进程内 require 顶层即抛 "unable to open database file"。创建失败让它抛出，不吞。
+    fs.mkdirSync(path.resolve(process.env.ZB_DATA_DIR), { recursive: true });
     for (const f of files) {
       try { require(f); }
       catch (e) { report('REQ', f, 0, '顶层 require 抛错(进程内): ' + String(e.message || e).slice(0, 200)); }
@@ -337,6 +340,9 @@ async function smokeInProcess(tmp) {
     }
   }
   process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || tmp;
+  // 第三轮整改 §一：同 requireAll——设置后必须确保目录真实存在（全新副本必现的
+  // "unable to open database file" 根因点之一）。创建失败让它抛出，不吞。
+  fs.mkdirSync(path.resolve(process.env.ZB_DATA_DIR), { recursive: true });
   try {
     const { runDiscover } = require(path.join(APP_ROOT, 'research', 'discover.js'));
     const config = { search: { provider: 'tavily', tavilyKey: 'stub-key' }, deepseekKey: 'stub-key' };

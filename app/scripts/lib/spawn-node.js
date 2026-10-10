@@ -20,6 +20,7 @@
 // ============================================================
 const DEFAULT_RETRYABLE = new Set(['EBUSY', 'EAGAIN']);
 const RETRY_DELAYS_MS = [50, 100, 200, 400];
+const path = require('path');
 
 function sleepSync(ms) {
   const { spawnSync } = require('child_process');
@@ -40,6 +41,12 @@ function spawnNode(args, opts) {
   const spawnFn = o.spawnFn || require('child_process').spawnSync;
   const file = process.execPath; // 稳定路径：绝不走 PATH 解析
   const baseEnv = Object.assign({}, process.env, o.env || {});
+  // 第三轮整改 §一：调用方传入自定义 ZB_DATA_DIR 时必须确保目录存在——
+  // node:sqlite 打开数据库不建父目录，目录缺失直接 "unable to open database file"
+  //（全新源码副本无 gitignored data 目录时必现）。创建失败让错误自然抛出，不吞。
+  if (baseEnv.ZB_DATA_DIR) {
+    require('fs').mkdirSync(path.resolve(baseEnv.ZB_DATA_DIR), { recursive: true });
+  }
   // 隔离临时目录：注入到子进程三个标准临时目录变量 + 数据目录
   if (o.tmpRoot) {
     baseEnv.TMPDIR = o.tmpRoot;

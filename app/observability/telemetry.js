@@ -11,10 +11,13 @@
 //   · projectId 仅作为关联键（且入库前一律加盐哈希为 project_hash）；
 //   · 同一 projectId 连续运行两次 → runs 必然两条独立记录，互不污染。
 //
-// 终态语义（审核整改 §二）：
+// 终态语义（审核整改 §二 / 第三轮整改 §二）：
 //   · endRun 幂等：首次终态落库后，重复调用直接返回（不追加 total、不改状态）；
 //   · 仅 status='ok'（真正完成全部任务）才补 milestone_all_done；
-//     失败运行保留 total.status=error + 受控 error_code，绝不产生 all_done。
+//     失败运行保留 total.status=error + 受控 error_code，绝不产生 all_done；
+//   · degraded（第三轮整改 §二新增）：部分任务成功、部分失败——total.status=degraded，
+//     不计入成功率、不产生 all_done，改产 milestone_all_processed（「全部处理结束」
+//     与「成功完成」分开表达）。
 //
 // 隐私铁律（任务书 §一/§三 + 审核整改 §三）：
 //   · tenantId、projectId 一律经加盐 sha256 不可逆脱敏（盐落 data/.obs-salt）；
@@ -28,12 +31,14 @@
 //
 // 四张表（node:sqlite，库文件 data/observability.sqlite，ZB_DATA_DIR/OBS_DB_PATH 可重定向）：
 //   runs            一次运行的起止（run_id 全局唯一，project_hash 关联项目）
-//   stage_metrics   阶段耗时与结局（17 阶段 + 4 里程碑）
+//   stage_metrics   阶段耗时与结局（17 阶段 + 5 里程碑）
 //   source_calls    搜索数据源逐次调用（含缓存命中，外部调用与命中分开计）
 //   product_events  产品行为事件（9 类白名单）
 //
-// 数据保留（审核整改 §五）：默认 30 天（OBS_RETENTION_DAYS 可配），启动后异步
-// 分批清理过期数据并做一次 WAL checkpoint（TRUNCATE）；绝不在请求路径 VACUUM。
+// 数据保留（第三轮整改 §三）：OBS_RETENTION_DAYS 未设置=默认 30 天；正数=对应天数；
+// 0=显式关闭（不调度删除、不调度 checkpoint）；负数/NaN/非法=回退默认并输出一次配置
+// 警告。启动后异步【分段】清理（每轮有限批次 + 时间盒，setImmediate 让出事件循环），
+// 全部完成后做一次 WAL checkpoint（TRUNCATE）；绝不在请求路径 VACUUM。
 //
 // 运行上下文：AsyncLocalStorage 携带 {runId, tenantId, projectId}，使 search.js /
 // llm-gateway.js 等深层调用点零签名改动即可归因到本次运行（withRun 包裹管线入口）。
@@ -56,19 +61,34 @@ const STAGES = new Set([
   'field_merge_citation_check', 'derived_analysis', 'report_generation', 'total',
   // 里程碑（durationMs 语义 = 从本次运行创建起的累计耗时）
   'milestone_first_brand', 'milestone_first_batch', 'milestone_first_report', 'milestone_all_done',
+  // 第三轮整改 §二：「全部处理结束」里程碑——degraded 运行专用，与「成功完成」
+  //（milestone_all_done）严格分开，统计聚合分别读取
+  'milestone_all_processed',
 ]);
 const EVENT_TYPES = new Set([
   'intelligence_viewed', 'evidence_opened', 'material_saved', 'material_deferred',
   'material_ignored', 'correction_submitted', 'opportunity_viewed', 'report_viewed', 'alert_opened',
 ]);
-// 终态白名单（endRun status 只接受这些值）
-const RUN_STATUSES = new Set(['ok', 'error', 'aborted']);
+// 终态白名单（endRun status 只接受这些值）。第三轮整改 §二：新增 degraded——
+// 部分任务成功、部分失败的可观测终态：不计入成功率、不产生 milestone_all_done，
+// 改产 milestone_all_processed（「全部处理结束」与「成功完成」分开表达）。
+const RUN_STATUSES = new Set(['ok', 'error', 'aborted', 'degraded']);
 
-// 数据保留（审核整改 §五）：默认 30 天，0/负数=关闭自动清理
+// 数据保留（第三轮整改 §三）：未设置=默认 30 天；正数=对应天数（向下取整）；
+// 0=显式关闭自动清理（不调度删除、不调度 checkpoint）；负数/NaN/非法字符串=
+// 回退默认值并输出一次不含敏感信息的配置警告。
 const RETENTION_DAYS_DEFAULT = 30;
+let _retentionWarned = false;
 function retentionDays() {
-  const v = Number(process.env.OBS_RETENTION_DAYS);
-  return Number.isFinite(v) && v > 0 ? Math.floor(v) : RETENTION_DAYS_DEFAULT;
+  const raw = process.env.OBS_RETENTION_DAYS;
+  if (raw == null || String(raw).trim() === '') return RETENTION_DAYS_DEFAULT;
+  const v = Number(raw);
+  if (Number.isFinite(v) && v >= 0) return Math.floor(v);
+  if (!_retentionWarned) {
+    _retentionWarned = true;
+    try { console.error('[observability] 配置警告：OBS_RETENTION_DAYS 取值非法（要求 ≥0 的数字），已回退默认 ' + RETENTION_DAYS_DEFAULT + ' 天'); } catch { /* ignore */ }
+  }
+  return RETENTION_DAYS_DEFAULT;
 }
 
 let _db = null;
@@ -251,10 +271,12 @@ function milestone(runId, name, extra) {
       Object.assign({ stage: name, durationMs: Date.now() - run.started_at, status: 'ok' }, extra || {}));
   } catch { /* best-effort */ }
 }
-// 终点（审核整改 §二）：
+// 终点（审核整改 §二 / 第三轮整改 §二）：
 //   · 幂等——runs 行已有 ended_at 时直接返回：重复调用不产生第二条 total、不覆盖首次终态；
-//   · 失败语义——status != 'ok' 时保留 total.status=error/aborted + 受控 error_code，
-//     绝不补 milestone_all_done；仅真正完成（'ok'）的成功运行才产生 all_done。
+//   · 失败语义——status != 'ok' 时保留 total.status=error/degraded/aborted + 受控 error_code，
+//     绝不补 milestone_all_done；仅真正完成（'ok'）的成功运行才产生 all_done；
+//   · degraded 语义——部分任务成功的运行：total.status=degraded（阶段聚合不计入失败率、
+//     不计入成功率），改产 milestone_all_processed（全部处理结束 ≠ 全部成功）。
 function endRun(runId, status, errorCode) {
   try {
     if (!runId) return;
@@ -266,8 +288,9 @@ function endRun(runId, status, errorCode) {
       .run(Date.now(), st, runId);
     _insertStage({ runId, tenantHash: run.tenant_hash, projectHash: run.project_hash },
       { stage: 'total', durationMs: Date.now() - run.started_at, status: st,
-        errorCode: st === 'ok' ? undefined : (token(errorCode) || 'RUN_FAILED') });
+        errorCode: st === 'ok' ? undefined : (token(errorCode) || (st === 'degraded' ? 'PARTIAL_FAILED' : 'RUN_FAILED')) });
     if (st === 'ok') milestone(runId, 'milestone_all_done');
+    else if (st === 'degraded') milestone(runId, 'milestone_all_processed');
   } catch { /* best-effort */ }
 }
 
@@ -303,11 +326,18 @@ function recordEvent(entry) {
   } catch { return null; }
 }
 
-// ---- 数据保留（审核整改 §五）：分批删除过期行 + 一次 WAL checkpoint；可测试、不阻塞主链路 ----
+// ---- 数据保留（第三轮整改 §三）：分批删除过期行；可测试、不阻塞主链路 ----
+// pruneOld 为「一次性同步清干净」（测试/运维显式调用）；启动自动清理走 _schedulePrune
+// 的分段调度（每轮有限批次 + 时间盒，setImmediate 让出事件循环，全部完成后 checkpoint 一次）。
 function pruneOld(retentionDaysOverride, batchSizeOverride) {
-  const days = Number.isFinite(retentionDaysOverride) && retentionDaysOverride > 0
-    ? Math.floor(retentionDaysOverride) : retentionDays();
-  if (days <= 0) return { skipped: true, reason: 'retention disabled' };
+  let days;
+  if (retentionDaysOverride != null) {
+    const v = Number(retentionDaysOverride);
+    days = (Number.isFinite(v) && v >= 0) ? Math.floor(v) : retentionDays();
+  } else {
+    days = retentionDays();
+  }
+  if (days === 0) return { skipped: true, reason: 'retention disabled' }; // 显式 0 = 关闭
   const batch = Math.min(Math.max(Number.isFinite(batchSizeOverride) ? batchSizeOverride : 500, 10), 5000);
   const cutoff = Date.now() - days * 24 * 3600000;
   const d = db();
@@ -328,10 +358,56 @@ function pruneOld(retentionDaysOverride, batchSizeOverride) {
   return out;
 }
 let _pruneScheduled = false;
+let _lastPruneInfo = null;
+// 分段调度（第三轮整改 §三）：不再在一个 setImmediate 回调里同步执行最多
+// 800 次删除（旧实现 200 批 × 4 表）。每轮最多 PRUNE_ROUND_BATCHES 批且不超过
+// PRUNE_ROUND_BUDGET_MS 毫秒，随即 setImmediate 让出事件循环；全部表清完后
+// 只做一次 WAL checkpoint。OBS_RETENTION_DAYS=0（关闭）时完全不调度删除与 checkpoint。
+const PRUNE_ROUND_BATCHES = 16;
+const PRUNE_ROUND_BUDGET_MS = 25;
 function _schedulePrune() {
   if (_pruneScheduled) return;
+  const days = retentionDays();
+  if (days === 0) return; // 显式关闭：不调度删除、不调度 checkpoint
   _pruneScheduled = true;
-  setImmediate(() => { try { pruneOld(); } catch (e) { try { console.error('[observability] 保留期清理失败（不阻断）: ' + String(e && e.message || e)); } catch (e2) { /* ignore */ } } });
+  const cutoff = Date.now() - days * 24 * 3600000;
+  const batch = 500;
+  const tables = Object.entries(TS_COLUMN);
+  let ti = 0, rounds = 0, walDone = false;
+  const deleted = {};
+  const step = () => {
+    let finished = false;
+    try {
+      const t0 = Date.now();
+      let batchesThisRound = 0;
+      while (ti < tables.length && batchesThisRound < PRUNE_ROUND_BATCHES
+             && (Date.now() - t0) < PRUNE_ROUND_BUDGET_MS) {
+        const [table, tsCol] = tables[ti];
+        const info = db().prepare(`DELETE FROM ${table} WHERE rowid IN
+          (SELECT rowid FROM ${table} WHERE ${tsCol} < ? LIMIT ?)`).run(cutoff, batch);
+        const n = Number(info.changes) || 0;
+        deleted[table] = (deleted[table] || 0) + n;
+        batchesThisRound++;
+        if (n < batch) ti++; // 该表已清完 → 下一张表
+      }
+      rounds++;
+      if (ti >= tables.length) {
+        // 全部表清理完成 → checkpoint 恰好一次
+        try { db().exec('PRAGMA wal_checkpoint(TRUNCATE)'); walDone = true; } catch { walDone = true; /* WAL 关闭等场景忽略 */ }
+        finished = true;
+      }
+    } catch (e) {
+      try { console.error('[observability] 保留期清理失败（不阻断）: ' + String(e && e.message || e)); } catch (e2) { /* ignore */ }
+      finished = true;
+    }
+    if (finished) {
+      _lastPruneInfo = { rounds, deleted, wal_checkpoint: walDone ? 'truncated' : 'skipped' };
+      _pruneScheduled = false;
+      return;
+    }
+    setImmediate(step); // 未清完：让出事件循环后继续
+  };
+  setImmediate(step);
 }
 
 // ---- 统计聚合 ----
@@ -457,9 +533,9 @@ function summary(opts) {
     }
   }
 
-  // ---- 里程碑（运行创建 → 首品牌 / 首批结果 / 初版报告 / 全部完成；无样本=insufficient_sample） ----
+  // ---- 里程碑（运行创建 → 首品牌 / 首批结果 / 初版报告 / 全部完成 / 全部处理结束；无样本=insufficient_sample） ----
   const milestones = {};
-  for (const m of ['milestone_first_brand', 'milestone_first_batch', 'milestone_first_report', 'milestone_all_done']) {
+  for (const m of ['milestone_first_brand', 'milestone_first_batch', 'milestone_first_report', 'milestone_all_done', 'milestone_all_processed']) {
     milestones[m] = INSUFFICIENT;
     const durs = stageRows.filter(r => r.stage === m && r.duration_ms != null).map(r => r.duration_ms);
     if (durs.length < MIN_PER_METRIC) { milestones[m] = INSUFFICIENT; continue; }
@@ -478,7 +554,7 @@ function summary(opts) {
 // 测试接缝：关闭/重置（仅测试用）
 function _resetForTest() {
   try { if (_db) { _db.close(); } } catch { /* ignore */ }
-  _db = null; _salt = null; _pruneScheduled = false;
+  _db = null; _salt = null; _pruneScheduled = false; _lastPruneInfo = null; _retentionWarned = false;
 }
 
 module.exports = {
@@ -487,6 +563,9 @@ module.exports = {
   hashId, token, newRunId, withRun, currentRun,
   recordStage, beginRun, milestone, endRun, recordSourceCall, recordEvent,
   pruneOld, percentile, summary, _resetForTest,
+  // 第三轮整改 §三：分段清理调度状态（测试/运维只读）
+  _lastPruneInfo() { return _lastPruneInfo; },
+  _schedulePrune, // 测试接缝：显式触发分段清理调度（生产由首次初始化自动触发）
   // 测试/运维接缝：显式指定库路径（必须在首次写之前设置）
   _setDbPathForTest(p) { if (_db) throw new Error('already initialized'); DB_PATH = p; },
 };

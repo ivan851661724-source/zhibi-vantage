@@ -35,6 +35,10 @@ async function runHarness() {
 
   await t('static-check 四道检查全绿（语法/命名空间/require-all/stub discover 冒烟）', async () => {
     const runTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-staticcheck-test-'));
+    // 第三轮整改 §一：ZB_DATA_DIR 指向的目录必须先创建——node:sqlite 打开数据库
+    // 不建父目录，全新源码副本（无 gitignored data 目录）直接 SMOKE_FAIL
+    // "unable to open database file"（真实复现 → 根因 → 本行为修复）
+    fs.mkdirSync(path.join(runTmp, 'shell-data'), { recursive: true });
     try {
       // 路径 A：子进程执行（常规 Windows/Linux 环境；正式生产门禁）
       const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'static-check.js')], {
@@ -61,6 +65,57 @@ async function runHarness() {
       }
       if (problems.length) {
         throw new Error('static-check 进程内执行发现 ' + problems.length + ' 处问题:\n' + problems.join('\n'));
+      }
+    }
+  });
+
+  // 第三轮整改 §一：全新且执行前不存在的 ZB_DATA_DIR —— 整条链（测试壳/子进程/
+  // spawn-node/进程内降级）都必须自建目录，四道检查仍全部执行并成功
+  await t('回归 R3-§一：执行前不存在的 ZB_DATA_DIR，四道检查仍全部执行并成功', async () => {
+    const runTmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-staticcheck-fresh-'));
+    const freshData = path.join(runTmp2, 'fresh-data-' + Date.now());
+    if (fs.existsSync(freshData)) throw new Error('前置断言失败：ZB_DATA_DIR 在执行前已存在（假测试）');
+    try {
+      // 路径 A（生产门禁）：子进程携带不存在的 ZB_DATA_DIR——修复后由 static-check/spawn-node 自建
+      const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'static-check.js')], {
+        encoding: 'utf8', timeout: 300000,
+        env: Object.assign({}, process.env, {
+          TMPDIR: runTmp2, TEMP: runTmp2, TMP: runTmp2,
+          ZB_DATA_DIR: freshData, // 刻意不预先创建
+        }),
+      });
+      if (!fs.existsSync(freshData)) throw new Error('子进程未创建 ZB_DATA_DIR 目录');
+      process.stdout.write(out);
+    } catch (e) {
+      const blocked = e && (e.code === 'EBUSY' || /EBUSY/.test(String(e.message || '')));
+      if (!blocked) throw e;
+      // 路径 B（受控补偿，同第一用例纪律）：spawn 被持续拦截 →
+      // ① spawnNode 单元核验：调用方传入的 env.ZB_DATA_DIR 必须被自建
+      process.stdout.write('[static-check.test] 子进程 spawn 被持续拦截（EBUSY），切换进程内受控补偿…\n');
+      const { spawnNode } = require('../scripts/lib/spawn-node.js');
+      const fresh2 = path.join(runTmp2, 'fresh-data-spawnnode');
+      if (fs.existsSync(fresh2)) throw new Error('前置断言失败：spawnNode 测试目录已存在（假测试）');
+      const r = spawnNode(['-e', 'process.exit(0)'], { encoding: 'utf8', env: { ZB_DATA_DIR: fresh2 } });
+      if (r.error && r.error.code !== 'EBUSY' && r.error.code !== 'EAGAIN') throw r.error;
+      if (!fs.existsSync(fresh2)) throw new Error('spawnNode 未确保调用方传入的 ZB_DATA_DIR 存在');
+      // ② 进程内 runAll：ZB_DATA_DIR 指向执行前不存在的目录，四道检查仍全部执行并成功
+      const sc = require('../scripts/static-check.js');
+      const prevData = process.env.ZB_DATA_DIR;
+      process.env.ZB_DATA_DIR = freshData;
+      sc.problems.length = 0;
+      sc.notices.length = 0;
+      try {
+        const problems = await sc.runAll({ tmpRoot: path.join(runTmp2, 'inprocess-fresh') });
+        if (sc.notices.length) {
+          console.log('[static-check.test] 进程内补偿降级通知（失败可见）:');
+          for (const n of sc.notices) console.log('  ' + n);
+        }
+        if (problems.length) {
+          throw new Error('全新 ZB_DATA_DIR 下 static-check 发现 ' + problems.length + ' 处问题:\n' + problems.join('\n'));
+        }
+        if (!fs.existsSync(freshData)) throw new Error('进程内路径未创建 ZB_DATA_DIR 目录');
+      } finally {
+        process.env.ZB_DATA_DIR = prevData;
       }
     }
   });
@@ -104,7 +159,12 @@ async function main() {
   }
   console.log('static-check.test: all passed');
 }
-main().catch(e => {
-  console.error('static-check.test: harness 异常（异步失败可见）: ' + String(e && e.stack || e));
-  process.exit(1);
-});
+// 第三轮整改：CLI 直跑保持自动退出；被 require（R7 EBUSY 进程内降级）时只导出不执行，
+// 由调用方 await runHarness() 并自行断言——杜绝 require 副作用退出测试进程。
+if (require.main === module) {
+  main().catch(e => {
+    console.error('static-check.test: harness 异常（异步失败可见）: ' + String(e && e.stack || e));
+    process.exit(1);
+  });
+}
+module.exports = { runHarness, runHarnessCore };
