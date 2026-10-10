@@ -55,5 +55,18 @@ t('新连回放：sanitize 键写入的事件对 RAW 连接可回放', () => {
   assert.ok(evs.some(e => e.type === 'discover_error' && e.projectId === 'pR'), '回放必须命中同一桶');
 });
 
+t('回放缓冲每租户项目数上限：超限淘汰旧项目，最新项目回放不受影响', () => {
+  const tid = 'tenant:captest0001';
+  const N = hub.MAX_REPLAY_PROJECTS + 4;
+  for (let i = 0; i < N; i++) {
+    hub.emitSSE('discover_stage', { projectId: 'pcap' + i, tenantId: tid, stage: 's' + i });
+  }
+  const res = fakeRes();
+  const cleanup = hub.connect(res, tid); // 回放读 lastProjectByTenant → 最新项目
+  cleanup();
+  const evs = dataLines(res);
+  assert.ok(evs.some(e => e.type === 'discover_stage' && e.stage === 's' + (N - 1)), '上限淘汰不得影响最新项目回放');
+});
+
 console.log('\n=== sse-hub.test: ' + passed + ' passed, ' + failed + ' failed ===');
 process.exit(failed ? 1 : 0);

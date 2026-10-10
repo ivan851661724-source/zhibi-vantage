@@ -19,6 +19,9 @@ const dns = require('dns');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zb-m0-01-'));
 process.env.ZB_DATA_DIR = TMP;
 delete process.env.ZB_SNAPSHOT_MAX_BYTES;
+// net.js 合规门（fetch-gate）同域节流在 require 时读环境变量：测试内同 host 串行用例多，
+// 不调小则每例多等 3s。必须在 require 业务模块之前设置。
+process.env.ZB_FETCH_INTERVAL_MS = '1';
 // cache.js 硬编码 app/data/cache.sqlite（既有行为，不属本票改动范围）；测试期清残留防串场
 fs.mkdirSync(path.join(__dirname, '..', 'data'), { recursive: true });
 for (const suffix of ['', '-wal', '-shm']) fs.rmSync(path.join(__dirname, '..', 'data', 'cache.sqlite' + suffix), { force: true });
@@ -302,21 +305,23 @@ const BASE = 'http://example.com';
     assert.throws(() => Snapshot.record({ capability: 'x', provider: 'x', source_status: 'partial_success', tenantId: TENANT_A }), /invalid source_status/, '别名 partial_success 必须被拒');
   });
 
-  // 16. P0 终审：Shopify 首页满额不得宣称完整枚举 → partial + 冻结术语 partial_scan=true
-  await t('16 P0：首页满额（100 款）→ partial + partial_scan=true（05 §5.2 冻结术语）', async () => {
-    const hundred = { products: Array.from({ length: 100 }, (_, i) => ({ title: 'P' + i, product_type: 'fig', variants: [{ price: '9.9' }] })) };
+  // 16. P0 终审：枚举不完整不得宣称完整枚举 → partial + 冻结术语 partial_scan=true
+  // （原 M0-01 版按「首页 limit=100 满额」判定；分页 4×250 落地后改为预算耗尽判定——
+  //   stub 每页恒返 250 款，4 页拉满仍可能有更多 = partial）
+  await t('16 P0：分页预算耗尽（4×250 款）→ partial + partial_scan=true（05 §5.2 冻结术语）', async () => {
+    const fullPage = { products: Array.from({ length: 250 }, (_, i) => ({ title: 'P' + i, product_type: 'fig', variants: [{ price: '9.9' }] })) };
     fetchRoutes = {
       [BASE + '/big-site']: () => jsonResponse('<p>site</p>'),
       'https://example.com/cart.js': () => jsonResponse({ currency: 'USD' }),
-      'https://example.com/products.json': () => jsonResponse(hundred),
+      'https://example.com/products.json': () => jsonResponse(fullPage),
     };
     const out = await net.fetchShopifyProducts(BASE, { tenantId: TENANT_A });
-    assert.ok(out.ok && out.total === 100, '业务行为不变（items/total 契约兼容）');
+    assert.ok(out.ok && out.total === 1000, '业务行为不变（items/total 契约兼容）');
     const meta = Snapshot.getById(TENANT_A, out.snapshotId);
-    assert.equal(meta.source_status, 'partial', 'M0-04 分页落地前不得记 success');
+    assert.equal(meta.source_status, 'partial', '分页预算耗尽不得记 success');
     assert.equal(meta.partial_scan, true, 'partial_scan=true（枚举不完整，冻结术语）');
-    assert.equal(meta.partial_scan_reason, 'products_json_first_page_limit_100_pagination_pending_m0_04');
-    assert.equal(meta.partial_scan_observed_count, 100);
+    assert.equal(meta.partial_scan_reason, 'products_json_pagination_budget_250x4_exhausted');
+    assert.equal(meta.partial_scan_observed_count, 1000);
     assert.ok(meta.observed_at, 'body 已接收 → observed_at 非空（P1-1 同样适用）');
     assert.ok(!('coverage' in meta), '无业务 Coverage 字段（P0-3）');
     assert.ok(!('scan' in meta), '不得存在平行词汇 scan.*（P0 终审）');

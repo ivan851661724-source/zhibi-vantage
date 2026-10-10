@@ -18,7 +18,7 @@ for (const m of ['core/paths.js', 'services/providers/serper-budget.js', 'servic
   delete require.cache[require.resolve('../' + m)];
 }
 const Budget = require('../services/providers/serper-budget.js');
-const { serperSearchWithFailover } = require('../services/providers/search.js');
+const { serperSearchWithFailover, classifySerperError } = require('../services/providers/search.js');
 const budgetFile = path.join(TMP, 'serper-budget.json');
 
 function usedOf(key) {
@@ -118,6 +118,30 @@ function usedOf(key) {
     assert.ok(!JSON.stringify(st).includes(K), '完整 key 不得回传');
     assert.strictEqual(st.keys[0].used, 4);
     assert.strictEqual(st.keys[0].remaining, 2496);
+  });
+
+  await t('classifySerperError：欠费走 400 + "Not enough credits"（部署实证）→ exhausted 而非 other', () => {
+    // 实证根因（2026-10-04）：serper 欠费返回 400 + {"message":"Not enough credits"}，
+    // 归 other 会级联打满全部扇出查询、发现必挂（部署阻塞项）
+    const e = new Error('SERPER_400'); e.status = 400; e.bodyText = '{"message":"Not enough credits","statusCode":400}';
+    assert.strictEqual(classifySerperError(e), 'exhausted');
+    const e2 = new Error('SERPER_400'); e2.status = 400; e2.bodyText = 'Invalid API key';
+    assert.strictEqual(classifySerperError(e2), 'invalid', '400 + 无效 key 文案 → invalid');
+    const e3 = new Error('SERPER_400'); e3.status = 400; e3.bodyText = 'malformed q';
+    assert.strictEqual(classifySerperError(e3), 'other', '真正参数错的 400 仍归 other');
+  });
+
+  await t('failover 接线：欠费 400 被归 exhausted → key 立即 disabled，后续查询不再打', async () => {
+    const K = 'keyNoCredit';
+    let calls = 0;
+    await assert.rejects(
+      () => serperSearchWithFailover('q1', [K], 'us', {
+        budgetTotal: Infinity,
+        call: async () => { calls++; const e = new Error('SERPER_400'); e.status = 400; e.bodyText = '{"message":"Not enough credits"}'; throw e; }
+      }),
+      /SERPER_ALL_KEYS_EXHAUSTED/ // 上层 fanout 正则匹配 EXHAUSTED → 转 SEARCH_QUOTA 干净上报
+    );
+    assert.strictEqual(calls, 1, '首查即熔断（语义归类生效）');
   });
 
   console.log(`\nserper-budget.test: ${passed} passed, ${failed} failed`);

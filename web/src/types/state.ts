@@ -11,6 +11,27 @@ export interface Competitor {
     basis?: string;
     confidence?: string;
   } | null;
+  /** 客单价三件套（算法规格 §三；Shopify 实抓才有） */
+  priceStats?: {
+    median?: number | null;
+    band?: { min?: number; max?: number } | null;
+    currency?: string | null;
+    basis?: string;
+    truncatedBy?: string | null;
+    multiPeak?: boolean;
+    sample?: {
+      total?: number; onSale?: number; used?: number; dropped?: number;
+      soldOut?: number; free?: number;
+      dropList?: { title?: string; price?: number; reason?: string }[];
+    };
+    verdict?: { code?: string; note?: string; pendingHuman?: boolean };
+  } | null;
+  /** S3 价格带判定（in_band/above/below/partial/pending/insufficient/undetermined/no_target） */
+  priceVerdict?: { code?: string; note?: string; pendingHuman?: boolean } | null;
+  /** 全变体不可售款数（断货信号数据基础，规格 5.2） */
+  soldOutCount?: number;
+  /** product_type 结构化类目占比（S2 数据基础） */
+  typeDist?: { total?: number; unclassified?: number; items?: { type: string; n: number }[] } | null;
   channelFields?: Record<string, unknown>;
   reviewField?: { rating?: { value?: number | string } } | null;
   pendingCorrections?: unknown[];

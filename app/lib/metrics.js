@@ -344,7 +344,11 @@ const ACC_CHANNELS = new Set([
 function recordAccuracySample(rec) {
   const dimension = String((rec && rec.dimension) || '').trim();
   if (!dimension) return { ok: false, error: 'NO_DIMENSION' };
-  const correct = rec && (rec.correct === true || rec.correct === 'true');
+  // correct 三态：true/false = 已评估；null/undefined = 待评估（seed-pending 同语义，不进分母）。
+  // 此前 `rec.correct === true || rec.correct === 'true'` 会把 null 强转 false——
+  // 待标注样本被记成"已评估=错"，污染准确率分母（与 2026-10-02 修订的 pending 语义冲突）。
+  const judged = rec && rec.correct != null && rec.correct !== '';
+  const correct = judged ? (rec.correct === true || rec.correct === 'true') : null;
   const s = {
     id: (rec && rec.id) || ('acc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6)),
     at: rec && rec.at ? rec.at : new Date().toISOString(),

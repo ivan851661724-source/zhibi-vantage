@@ -12,6 +12,8 @@ const { llmApiKey } = require('./llm.js');
 const { curSym } = require('./vocab.js');
 const PH = require('../lib/price-history.js');
 const priceStore = require('./price-store.js');
+const StockStore = require('./stock-store.js');
+const Net = require('./net.js');
 const Alerts = require('../services/alerts.js');
 const Logger = require('../services/logger.js');
 const M = require('../lib/metrics.js');
@@ -56,50 +58,115 @@ async function sweepProject(proj, config) {
   const tid = state.tenantId || proj.tenantId;
   let priceList = priceStore.load(tid, proj.id);
   const priceEvents = [];
+  // R2 滞回状态（断货连续计数 / 商品 ID 集合），轮末统一落盘
+  const stockState = StockStore.load(tid, proj.id);
+  const stockEvents = [];
   for (const comp of state.competitors) {
     if (comp.status !== 'done' || comp.suppressed) continue;
-    if (!hasLlm) break; // 无 LLM key：变化探测无法执行（搜索仅能带回原始片段）
-    try {
-      const r = await deepDiveField(state, comp, 'recentMoves', config);
-      probed++;
-      if (JSON.stringify(comp.recentMoves || []) !== beforeMoves.get(comp.id)) {
-        changed++;
-        // diff：after 中不在 before 的条目 = 新增动作（按 JSON 归一化匹配）
-        let prev = [];
-        try { prev = JSON.parse(beforeMoves.get(comp.id) || '[]'); } catch (e) {}
-        const added = (comp.recentMoves || []).filter(x => !prev.some(y => JSON.stringify(y) === JSON.stringify(x)));
-        if (added.length) newMoves.push({ competitorId: comp.id, name: comp.name, moves: added });
-      }
-    } catch (e) { /* 单家探测失败不阻断整轮 */ }
-    // ---- R1：探价 → 快照 → 变价事件（1 搜索 + 1 LLM/竞品，成本由 LLM 日预算熔断兜底） ----
-    try {
-      await deepDiveField(state, comp, 'price', config);
-      probed++; // 价格探测也计入探测数
-      const price = priceStore.currentScalarPrice(comp);
-      const res = PH.applySnapshot(priceList, {
-        competitorId: comp.id,
-        price,
-        display: (comp.priceField && comp.priceField.display) || (price != null ? String(price) : null),
-        currency: comp.currency || 'USD',
-        url: (comp.priceField && (comp.priceField.sources || [])[0] && comp.priceField.sources[0].url) || comp.url || '',
-        at: new Date().toISOString(),
-        basis: (comp.priceField && comp.priceField.basis) || 'unverified',
-      });
-      priceList = res.list;
-      if (res.event) {
-        priceEvents.push({ comp, event: res.event });
-        if (res.event.kind === 'changed') {
-          // 变价进雷达动态（append 在 moves diff 之后，下一趟 beforeMoves 已含本条，不会误报）
-          comp.recentMoves = Array.isArray(comp.recentMoves) ? comp.recentMoves : [];
-          comp.recentMoves.push({ type: 'price', desc: PH.describeChange(res.event, curSym), when: res.event.at, basis: res.event.basis === 'verified' ? 'verified' : 'inferred' });
-          if (comp.recentMoves.length > 8) comp.recentMoves = comp.recentMoves.slice(-8);
+    if (hasLlm) {
+      // 无 LLM key 时跳过 LLM 型探测（搜索仅能带回原始片段），但不影响下方 Shopify 直抓
+      try {
+        const r = await deepDiveField(state, comp, 'recentMoves', config);
+        probed++;
+        if (JSON.stringify(comp.recentMoves || []) !== beforeMoves.get(comp.id)) {
+          changed++;
+          // diff：after 中不在 before 的条目 = 新增动作（按 JSON 归一化匹配）
+          let prev = [];
+          try { prev = JSON.parse(beforeMoves.get(comp.id) || '[]'); } catch (e) {}
+          const added = (comp.recentMoves || []).filter(x => !prev.some(y => JSON.stringify(y) === JSON.stringify(x)));
+          if (added.length) newMoves.push({ competitorId: comp.id, name: comp.name, moves: added });
         }
-      }
-    } catch (e) { /* 单家探价失败不阻断整轮 */ }
+      } catch (e) { /* 单家探测失败不阻断整轮 */ }
+      // ---- R1：探价 → 快照 → 变价事件（1 搜索 + 1 LLM/竞品，成本由 LLM 日预算熔断兜底） ----
+      try {
+        await deepDiveField(state, comp, 'price', config);
+        probed++; // 价格探测也计入探测数
+        const price = priceStore.currentScalarPrice(comp);
+        const res = PH.applySnapshot(priceList, {
+          competitorId: comp.id,
+          price,
+          display: (comp.priceField && comp.priceField.display) || (price != null ? String(price) : null),
+          currency: comp.currency || 'USD',
+          url: (comp.priceField && (comp.priceField.sources || [])[0] && comp.priceField.sources[0].url) || comp.url || '',
+          at: new Date().toISOString(),
+          basis: (comp.priceField && comp.priceField.basis) || 'unverified',
+        });
+        priceList = res.list;
+        if (res.event) {
+          priceEvents.push({ comp, event: res.event });
+          if (res.event.kind === 'changed') {
+            // 变价进雷达动态（append 在 moves diff 之后，下一趟 beforeMoves 已含本条，不会误报）
+            comp.recentMoves = Array.isArray(comp.recentMoves) ? comp.recentMoves : [];
+            comp.recentMoves.push({ type: 'price', desc: PH.describeChange(res.event, curSym), when: res.event.at, basis: res.event.basis === 'verified' ? 'verified' : 'inferred' });
+            if (comp.recentMoves.length > 8) comp.recentMoves = comp.recentMoves.slice(-8);
+          }
+        }
+      } catch (e) { /* 单家探价失败不阻断整轮 */ }
+    }
+    // ---- R2：断货/上新（Shopify /products.json 直抓，零 LLM；算法规格 5.2 事件规则） ----
+    // 断货：全变体 available=false 且连续 ≥2 趟（滞回防单日噪声，streak 在 stock-store 累积）；
+    // 上新：新增商品 ID 且上架时间字段佐证（防下架重上架误判）。
+    if (comp.url && comp.isShopify) {
+      try {
+        const sh = await Net.fetchShopifyProducts(comp.url);
+        if (sh && sh.ok) {
+          const cur = StockStore.entryOf(stockState, comp.id);
+          const ids = sh.items.map(x => x.id).filter(x => x != null);
+          const known = new Set(cur.productIds || []);
+          const newIds = ids.filter(id => !known.has(id));
+          const newIdSet = new Set(newIds);
+          const soldOutNow = sh.items.filter(x => x.soldOut).length;
+          const now = new Date().toISOString();
+          comp.recentMoves = Array.isArray(comp.recentMoves) ? comp.recentMoves : [];
+          if (soldOutNow > 0) {
+            cur.soldOutStreak = (cur.soldOutStreak || 0) + 1;
+            if (cur.soldOutStreak === 2) { // 恰在第 2 趟生成一次事件（此后 streak 继续涨不重复报）
+              const ev = { type: 'stockout', desc: `${soldOutNow} 款断货`, when: now, basis: 'verified' };
+              comp.recentMoves.push(ev);
+              stockEvents.push({ comp, event: { kind: 'stockout', count: soldOutNow, text: `${comp.name} ${soldOutNow} 款断货` } });
+            }
+          } else {
+            cur.soldOutStreak = 0; // 恢复在售：滞回归零（规格 5.2 对称）
+          }
+          if ((cur.productIds || []).length && newIds.length) {
+            // 上新佐证：新 ID 商品至少一款带 published_at（字段缺失=无法佐证，不报）
+            const withPub = sh.items.filter(x => x.id != null && newIdSet.has(x.id) && x.publishedAt);
+            if (withPub.length) {
+              const ev = { type: 'launch', desc: `新增 ${newIds.length} 款`, when: now, basis: 'verified' };
+              comp.recentMoves.push(ev);
+              stockEvents.push({ comp, event: { kind: 'launch', count: newIds.length, text: `${comp.name} 上新 ${newIds.length} 款` } });
+            }
+          }
+          if (comp.recentMoves.length > 8) comp.recentMoves = comp.recentMoves.slice(-8);
+          cur.productIds = ids.slice(-StockStore.MAX_IDS_PER_COMP);
+          cur.updatedAt = now;
+        }
+      } catch (e) { /* 单家断货/上新探测失败不阻断整轮 */ }
+    }
   }
   if (priceList.length) priceStore.save(tid, proj.id, priceList);
-  if (changed > 0) {
-    // 变化：重新派生（domainVerdicts/materials 等）+ 记时序事件（timeline 数据源）
+  if (Object.keys(stockState).length) StockStore.save(tid, proj.id, stockState);
+  // ---- R2 事件推送 + 时序记忆（滞回通过后才成事件：事件落库即定稿，各处渲染同一对象） ----
+  if (stockEvents.length) {
+    const webhookUrl = (config.alerts && config.alerts.webhookUrl) || '';
+    try {
+      stockEvents.forEach(({ comp, event }) => {
+        Alerts.push(tid, {
+          type: event.kind === 'stockout' ? 'stockout' : 'product-launch',
+          projectId: proj.id, track: state.track,
+          competitorId: comp.id, competitorName: comp.name,
+          text: event.text, count: event.count,
+          sourceUrl: comp.url || null,
+          basis: 'verified',
+        }, webhookUrl);
+        try { M.logEvent({ changeType: 'stock_' + event.kind, competitorId: comp.id, to: String(event.count), source: comp.url || null, confidence: 'high', tenantId: tid }); } catch (e2) {}
+      });
+      Logger.info('sweep 断货/上新事件', { projectId: proj.id, count: stockEvents.length });
+    } catch (e) { /* 推送失败不影响落盘 */ }
+  }
+  if (changed > 0 || stockEvents.length) {
+    // 变化（LLM 动作 diff 或断货/上新事件）：重新派生（domainVerdicts/materials/雷达最近动作等）
+    // + 记时序事件（timeline 数据源）——纯断货轮也刷新，事件不必等下次装饰才可见
     try {
       decorateState(state);
       M.logEvent({ changeType: 'sweep_changes', source: 'sweep', from: String(probed), to: String(changed), confidence: null });

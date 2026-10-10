@@ -55,7 +55,8 @@ for (const f of files) {
 
 // 已知误报白名单（函数名/变量名族，非密钥）——新增误报在此登记 sha256 前 12 位，勿放宽正则
 // eb6127cff99d = api-admin.js adminLogin（函数名）；5fcf23c18df8 = auth.test.js issueAdminToken（测试函数名）
-const WHITELIST_HASH_PREFIXES = ['eb6127cff99d', '5fcf23c18df8'];
+// 28c7287fbe39 = demo-fixture.test.js 固定模拟凭据（LLM.call 已 stub，非真实密钥）
+const WHITELIST_HASH_PREFIXES = ['eb6127cff99d', '5fcf23c18df8', '28c7287fbe39'];
 
 const real = findings.filter((x) => x.class === 'potentially real' && !WHITELIST_HASH_PREFIXES.some((p) => x.hash.startsWith(p)));
 for (const x of findings) console.log(`[${x.class}] ${x.file}:${x.line} provider=${x.provider} len=${x.length} hash=${x.hash}`);

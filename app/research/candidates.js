@@ -21,6 +21,7 @@ const EXCLUDE_REASONS = {
   irrelevant:   { zh: '不相关（非竞品）', isTractionBlind: false },
   noTraction:   { zh: '无体量（没流量）', isTractionBlind: true },
   wrongSegment: { zh: '错品类（错位）', isTractionBlind: false },
+  priceMismatch: { zh: '价格带错位（客单价偏离目标价 ±30%）', isTractionBlind: false }, // S3 价格带准入（算法规格 §二/§三）
   duplicate:    { zh: '重复（同名异写）', isTractionBlind: false },
   defunct:      { zh: '已退市 / 信息陈旧', isTractionBlind: false },
 };

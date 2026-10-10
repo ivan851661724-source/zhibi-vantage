@@ -10,7 +10,8 @@ const VC = require('../lib/voice-collector.js');
 const voiceStore = require('./voice-store.js');
 const { multiSourceSearch, recordProbeHealth, searchProvider } = require('./search.js');
 const { deepseekJSON, llmApiKey } = require('./llm.js');
-const { domainOf, fetchPage, fetchShopifyProducts } = require('./net.js');
+const { domainOf, fetchPage, fetchShopifyProducts, fetchShopifyCollections } = require('./net.js');
+const S2Match = require('../lib/s2-match.js');
 const { belongsToBrand, deriveBasis, sourceTier } = require('./evidence.js');
 const { CHANNELS, COLLAB_TYPES, CONTENT_FORMS, FULFILLMENT, PRICE_BANDS, REGIONS, SELLING_POINTS, TACTICS, curSym, detectCurrency, fmtMoney, marketCurrency, normalizeIntent, resolvePlatforms } = require('./vocab.js');
 const { scoreConfidence } = require('./corrections.js');
@@ -20,6 +21,7 @@ const { normalizeCustomization, parseGradedList } = require('./deepdive.js');
 const { computeWhiteSpace } = require('./whitespace.js');
 const Guard = require('../lib/inference-guard.js');
 const M = require('../lib/metrics.js');
+const PriceStats = require('../lib/price-stats.js');
 const PF = require('../lib/price-forensics.js');
 const Sizing = require('../lib/sizing.js');
 const Tasks = require('../services/tasks.js');
@@ -235,37 +237,114 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   comp.currencyBasis = detectedCur ? 'detected' : 'assumed'; // assumed = 未探测到，按市场默认，前端须标出
 
   comp.priceVerified = false;
+  comp.freebies = [];        // 重研残留清除（shopify.ok 时下方重填；此前上一轮的免费品清单会跨轮残留）
+  comp.priceStats = null;    // 同上：客单价三件套按本轮实抓重算
+  comp.priceVerdict = null;  // S3 判定同步重算
+  comp.soldOutCount = 0;     // 断货信号数据基础（规格 5.2；事件滞回逻辑后续接入）
+  comp.typeDist = null;      // S2 类目占比数据基础（结构化，替代 LLM 猜的前置）
+  comp.s2Match = null;       // S2 结构化匹配分（本轮实抓重算）
+  comp.shopifyCollections = null;
+  comp.shopCurrency = null;      // 重研残留清除：本轮 shopify 抓取失败时不得残留上一轮的店铺币种
+  comp.shopifyTruncated = false; // 同上
+  comp.adLibrary = null;     // Meta 广告库（本轮重取；token 未配置保持 null = 未探测）
+  comp.adCreatives = null;   // S-D 广告主推信号（hero-product 消费），随广告库重取
   let shopifyEv = null;
   if (shopify.ok) {
     // ▶ 报告-数据同源 §5：价格点前置过滤 $0 —— 免费品/赠品/错误条目不进价格点，
     // 单列 comp.freebies（不参与价格带聚合），避免 $0 脏值污染"全价格带覆盖"结论。
     // 注意先取整再过滤：$0.49 这类小额价"先滤后取整"会归 0 漏进价格带下限。
-    const rawPts = shopify.items.map(x => x.minPrice).filter(n => n != null);
+    // 已下架/全变体不可售不计入客单价口径（规格 §四 #1：不卖的东西不构成客单价），单记 soldOutCount。
+    const onSaleItems = shopify.items.filter(x => !x.soldOut);
+    comp.soldOutCount = shopify.items.length - onSaleItems.length;
+    const rawPts = onSaleItems.map(x => x.minPrice).filter(n => n != null);
     comp.freebies = Array.from(new Set(shopify.items.filter(x => x.minPrice === 0).map(x => x.title || '免费/赠品').filter(Boolean))).slice(0, 20);
     // ▶ 币种守卫（Ovalware 实证）：products.json 价格以店铺结账币种计且不带币种字段，
     // 店铺币种 ≠ 市场币种（如日销店 ¥800 被当 $800）时无汇率源不换算 → 实抓价格不入带，
     // 渠道证据（shopifyDTC 在售正证据）与款数保留，价格诚实降级回 LLM/官网正文路径。
+    // compCur = 本竞品裁决币种（detected 优先，assumed 兜底），与外层市场币种 mktCur 语义不同。
     const shopCur = String(shopify.currency || '').toUpperCase();
-    const mktCur = String(comp.currency || '').toUpperCase();
+    const compCur = String(comp.currency || '').toUpperCase();
     comp.shopCurrency = shopCur || null;
-    if (shopCur && mktCur && shopCur !== mktCur) {
+    if (shopCur && compCur && shopCur !== compCur) {
       comp.pricePoints = [];
       comp.currencyMismatch = shopCur;
-      logAttempt(comp, 'shopify-currency', shopify.url, 'shopify', false, `店铺币种 ${shopCur} ≠ 市场币种 ${mktCur}，实抓价格不换算不入带（价格降级回推断路径）`);
+      logAttempt(comp, 'shopify-currency', shopify.url, 'shopify', false, `店铺币种 ${shopCur} ≠ 市场币种 ${compCur}，实抓价格不换算不入带（价格降级回推断路径）`);
     } else {
+      comp.currencyMismatch = null; // 重研残留清除：币种判定翻转时旧的不匹配标记不得残留
       comp.pricePoints = Array.from(new Set(rawPts.map(n => Math.round(n)).filter(n => n > 0))).sort((a, b) => a - b).slice(0, 40);
+      if (!shopCur) {
+        // 守卫盲区可见化：cart.js 不可达 → 店铺币种未探出，守卫失效（fail-open）。
+        // 价格按 compCur 计（官网探测或市场假定），错币种风险靠 currencyBasis 标注兜底。
+        logAttempt(comp, 'shopify-currency', shopify.url, 'shopify', null, `店铺币种未探出（cart.js 不可达），币种守卫盲区：价格按 ${compCur || '?'} 计（${comp.currencyBasis === 'detected' ? '官网探测' : '市场假定'}）`);
+      }
     }
     comp.priceVerified = comp.pricePoints.length > 0;
+
+    // ▶ 客单价三件套 + S3 价格带判定（算法规格 20261003 §三）：中位数 + 主力带(P25-P75) + 样本明细。
+    // repPrice=变体中位价（商品代表价）；P5/P95 双截尾带剔除明细；多峰无销量权重不裁决。
+    // 统计币种 = 实抓币种（shopCur；币种不匹配时 median 仍是原币真实数字，verdict 按币种不一致拒绝裁决）。
+    // 目标价 = 用户画像 intent.profile.priceBand（min=max=点值；币种跟随目标市场）。
+    const _profile = (state.intent && state.intent.profile) || null;
+    comp.priceStats = PriceStats.computePriceStats(shopify.items, {
+      currency: shopCur || comp.currency,
+      target: _profile && _profile.priceBand ? _profile.priceBand : null,
+    });
+    comp.priceVerdict = comp.priceStats.verdict;
+    // 币种守卫盲区（店铺币种未探出）时判定建立在假定币种上，不得用于自动排除（防 Ovalware 场景误踢）
+    if (!shopCur && comp.priceVerdict) comp.priceVerdict.pendingHuman = true;
+    const _st = comp.priceStats;
+    logAttempt(comp, 'price-stats', shopify.url, 'shopify', true,
+      `客单价样本 ${_st.sample.used}/${_st.sample.onSale} 计入（剔除 ${_st.sample.dropped}，断货 ${_st.sample.soldOut}，免费 ${_st.sample.free}），` +
+      `中位数 ${_st.median != null ? fmtMoney(_st.median, _st.currency || comp.currency) : 'n/a'}，主力带 ${_st.band ? `${fmtMoney(_st.band.min, _st.currency || comp.currency)}-${fmtMoney(_st.band.max, _st.currency || comp.currency)}` : 'n/a'}，` +
+      `判定 ${_st.verdict.code}${_st.truncatedBy ? `（截尾 ${_st.truncatedBy}）` : ''}`);
+
+    // ▶ S3 自动排除（规格 §二 最高硬要求）：判定明确错位（above/below、非演算降级、非部分重叠）
+    // 且非用户手输品牌、未被用户赦免 → 进已剔除清单附原因（可申诉拉回；拉回后 userPardoned 生效不再重剔，
+    // 该标记同时赦免 S2 杂货铺排除——用户拉回 = 对一切自动排除的人工赦免）。
+    if (comp.priceVerdict && (comp.priceVerdict.code === 'above' || comp.priceVerdict.code === 'below') && !comp.priceVerdict.pendingHuman
+        && comp.manual !== true && !comp.userPardoned) {
+      if (!Array.isArray(state.excluded)) state.excluded = [];
+      if (!state.excluded.includes(comp.id)) state.excluded.push(comp.id);
+      state.excludedReasons = state.excludedReasons || {};
+      state.excludedReasons[comp.id] = 'priceMismatch';
+      logAttempt(comp, 's3-price-gate', comp.url || '', 'shopify', false, `S3 价格带准入：${comp.priceVerdict.note} → 自动进已剔除清单（原因 priceMismatch，可拉回赦免）`);
+    }
+
     // ▶ B-5b（2026-09-12 任务书）规模信号接线：products.json 实抓成功 = 最强 Shopify 正证据 +
-    // 真实在售款数（未截断）。sizing.estimateScale 三输入之一（productCount）此前全仓零写入 → HHI 恒 0。
+    // 真实在售款数（分页后趋近全量）。sizing.estimateScale 三输入之一（productCount）此前全仓零写入 → HHI 恒 0。
     comp.isShopify = true;              // 替代链接特征推断（shopifyDTC），实抓判定为准
-    comp.productCount = shopify.total;  // 真实在售款数（未截断），非 items.length
+    comp.productCount = shopify.total;  // 实抓款数（≤1000，truncated 标注超限）
+    comp.shopifyTruncated = !!shopify.truncated;
+    // ▶ S2 类目占比数据基础（规格 2.3/5.1）：product_type 结构化计数 + 未分类数（杂货铺判定/匹配分的前置）
+    const _tc = {};
+    shopify.items.forEach(x => { const t = String(x.type || '').trim(); if (t) _tc[t] = (_tc[t] || 0) + 1; });
+    comp.typeDist = {
+      total: shopify.items.length,
+      unclassified: shopify.items.length - Object.values(_tc).reduce((a, b) => a + b, 0),
+      items: Object.entries(_tc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([type, n]) => ({ type, n }))
+    };
+    // ▶ S2 结构化匹配分（规格 5.1/§1.1：结构化数据算匹配分，不靠 LLM 猜）：
+    // typeRatio×0.6 + titleHit×0.4；未分类>40% 标演算；杂货铺（类目≥3 且目标类目<40%）→ 自动排除。
+    comp.s2Match = S2Match.computeS2Match(shopify.items, state.track);
+    if (comp.s2Match) logAttempt(comp, 's2-match', shopify.url, 'shopify', true, comp.s2Match.note);
+    if (comp.s2Match && comp.s2Match.groceryStore === true && comp.manual !== true && !comp.userPardoned) {
+      if (!Array.isArray(state.excluded)) state.excluded = [];
+      if (!state.excluded.includes(comp.id)) state.excluded.push(comp.id);
+      state.excludedReasons = state.excludedReasons || {};
+      // S3/S2 双闸同触：合并原因不覆盖（保留「价格也错位」的审计线索；前端暂不消费此字段）
+      const _prevReason = state.excludedReasons[comp.id];
+      state.excludedReasons[comp.id] = (_prevReason && _prevReason !== 'wrongSegment')
+        ? _prevReason + '+wrongSegment' : 'wrongSegment';
+      logAttempt(comp, 's2-grocery-gate', comp.url || '', 'shopify', false, `S2 杂货铺判定：类目 ${comp.s2Match.distinctTypes} 个、目标类目占比 ${(comp.s2Match.typeRatio * 100).toFixed(0)}% < 40% → 自动进已剔除清单（原因 wrongSegment，可拉回赦免）`);
+    }
     shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据',
       comp.pricePoints.length ? `共${shopify.total}款，${fmtMoney(comp.pricePoints[0], comp.currency)}-${fmtMoney(comp.pricePoints[comp.pricePoints.length - 1], comp.currency)}`
-        : (comp.currencyMismatch ? `共${shopify.total}款（店铺币种 ${shopCur}，价格未入带）` : `共${shopify.total}款`),
+        : (comp.currencyMismatch ? `共${shopify.total}款（店铺币种 ${shopCur}，价格未入带）` : `共${shopify.total}款${comp.freebies.length ? `（免费品 ${comp.freebies.length}）` : ''}`),
       anchorDomain);
   }
   logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.total} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
+  // /collections.json 店铺集合（S2 跨类目佐证）：与定向探测/LLM 重叠抓取，不增加串行延迟
+  const collectionsP = shopify.ok ? fetchShopifyCollections(comp.url).catch(() => null) : null;
 
   // ---- M0-02：Evidence 基础层接线（additive，不改 legacy 契约）----
   // 快照已落盘时，从快照 raw 原始字节确定性提取产品公开价格 Observation Evidence
@@ -444,7 +523,11 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
         if (officialEv) comp.fieldSources['channels.offlineRetail'] = [{ id: officialEv.id, url: officialEv.url, tier: 1, kind: 'neg-check', title: '定向检索+官网双重核查' }];
         return { present: false, confidence: 'medium', basis: 'verified', note: '检索零命中且官网无门店信息 → 确认缺席', since: null };
       }
-      return { present: false, confidence: 'low', basis: 'unverified', note: '未探测到线下布局（搜索失败或官网不可抓）', since: null };
+      // 两种"未完成"分开说（审计可辨）：搜索真实执行过但官网不可抓 vs 搜索本身失败/配额哨兵
+      const searchedOffline = Array.isArray(probeRaw.offlineRetail);
+      return { present: false, confidence: 'low', basis: 'unverified', note: searchedOffline
+        ? '搜索已执行但官网不可抓，双重核查未完成，未能确认线下布局'
+        : '未探测到线下布局（搜索失败或配额哨兵，或官网不可抓）', since: null };
     }
     const pat = CHANNEL_LINK[chKey];
     const hits = (kept[chKey] || []).filter(x => pat && pat.test(x.url || '') && isOwnShop(x));
@@ -466,8 +549,11 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
       if (officialEv) comp.fieldSources['channels.' + chKey] = [{ id: officialEv.id, url: officialEv.url, tier: 1, kind: 'neg-check', title: '定向检索+官网双重核查' }];
       return { present: false, confidence: 'medium', basis: 'verified', note: '定向检索零命中且官网无该渠道入口 → 确认缺席', since: null };
     }
-    // 探测失败或官网不可抓 → 只能标"未探测"
-    return { present: false, confidence: 'low', basis: 'unverified', note: '定向探测未完成（搜索失败或官网不可抓），不等于确认不做', since: null };
+    // 探测失败/配额哨兵或官网不可抓 → 只能标"未探测"（两种未完成原因分开说，审计可辨）
+    const searched = Array.isArray(probeRaw[chKey]); // 搜索真实执行过（失败/哨兵时为 null）
+    return { present: false, confidence: 'low', basis: 'unverified', note: searched
+      ? `搜索已执行但官网不可抓，双重核查未完成（原始${(probeRaw[chKey] || []).length ? '有' : '零'}命中），不等于确认不做`
+      : '定向探测未完成（搜索失败或配额哨兵），不等于确认不做', since: null };
   };
   const codedChannels = {};
   Object.keys(CHANNEL_LINK).forEach(chKey => { codedChannels[chKey] = judgeChannel(chKey); });
@@ -478,6 +564,27 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   }
   // 线下零售：非 URL 渠道，单独裁决
   codedChannels.offlineRetail = judgeChannel('offlineRetail');
+
+  // 收割集合清单（S2 佐证：集合数/跨类目信号）
+  if (collectionsP) {
+    try { const _col = await collectionsP; comp.shopifyCollections = (_col && _col.ok) ? _col.collections : null; } catch (e) { comp.shopifyCollections = null; }
+  }
+
+  // ▶ 广告投放情报（T0·Meta 广告库，抓取需求 §2.5 / 算法规格 §5.4）：官方 ads_archive，
+  // token 未配置（NO_META_TOKEN）= 源未接入，静默保持未探测；检索失败记审计不阻断。
+  // 命中时桥接 S-D 广告主推信号（§3.0.1）：在投创意的链接标题 = "广告在推的 SKU 名"。
+  try {
+    const MetaAds = require('../services/providers/meta-ads.js');
+    const ads = await MetaAds.searchBrandAds(comp.name, config);
+    if (ads.ok) {
+      comp.adLibrary = ads;
+      const titles = (ads.creatives || []).map(c => c.linkTitle).filter(Boolean);
+      if (titles.length) comp.adCreatives = titles.slice(0, 4).map(n => ({ name: n }));
+      logAttempt(comp, 'meta-ads', comp.url || '', 'meta', true, `广告库：在投 ${ads.activeCount}/${ads.totalInWindow} 条，最长 ${ads.longestDays} 天，平台 ${ads.platforms.length} 个，活跃度 ${ads.activityLevel}`);
+    } else if (ads.error !== 'NO_META_TOKEN') {
+      logAttempt(comp, 'meta-ads', comp.url || '', 'meta', false, '广告库检索失败：' + String(ads.error || '').slice(0, 120));
+    }
+  } catch (e) { /* 广告库失败不阻断深研主链路 */ }
 
   // ---- LLM 只负责"从证据里抽值"，置信度由证据类型推导 ----
   const evText = evidences.length
@@ -576,11 +683,14 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   if (comp.priceVerified && comp.priceBand && shopifyEv) {
     comp.priceBand.basis = 'verified'; comp.priceBand.confidence = 'high';
     comp.priceBand.range = `${fmtMoney(Math.min(...comp.pricePoints), comp.currency)}-${fmtMoney(Math.max(...comp.pricePoints), comp.currency)}（实抓）`;
-    // ▶ B-5c（2026-09-12 任务书）：verified 路径补数值 mid（(min+max)/2，单位 = comp.currency，
-    // pricePoints 已前置过滤 $0 且同币种）。sizing.estimateScale 第三输入（priceBandMid）。
+    // ▶ B-5c（2026-09-12 任务书）：verified 路径补数值 mid（客单价点值）。
+    // 算法规格 §三：客单价 = 截尾后样本中位数（均值/minmax 均值都会被 $1 挂件与 $500 礼盒拉歪）；
+    // priceStats 不可得时退化为 min-max 均值（诚实降级，仍有值）。
     // LLM inferred 路径不写 mid（诚实纪律：无实抓不算数）。
     if (comp.pricePoints.length) {
-      comp.priceBand.mid = (Math.min(...comp.pricePoints) + Math.max(...comp.pricePoints)) / 2;
+      comp.priceBand.mid = (comp.priceStats && comp.priceStats.median != null)
+        ? comp.priceStats.median
+        : (Math.min(...comp.pricePoints) + Math.max(...comp.pricePoints)) / 2;
     }
     comp.fieldSources.priceBand = [{ id: shopifyEv.id, url: shopifyEv.url, tier: 1, kind: 'shopify', title: shopifyEv.title }];
   } else if (!comp.priceVerified) {
@@ -868,6 +978,7 @@ async function lookupBrand(name, url, config, bodyIntent) {
     matchScore: 90, evidenceCount: url ? 1 : 0, confidence: 'low', rankScore: 90,
     status: 'researching',
     channels: {}, priceBand: null, pricePoints: [], freebies: [], audiences: [], regions: [],
+    priceStats: null, priceVerdict: null, soldOutCount: 0, typeDist: null,
     products: [], reviews: null, positioning: '', customization: null, estSize: null, techStack: null,
     recentMoves: [], contentForms: [], collabTypes: [], fulfillment: [],
     sellingPoints: [], tactics: [], painPoints: [], fieldSources: {},

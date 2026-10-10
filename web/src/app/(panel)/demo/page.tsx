@@ -119,7 +119,7 @@ export default function DemoPage() {
       const r = await apiPost<Insight>('/api/demo/ai-interpretation?id=' + evt.event_id);
       setInsight(s => ({ ...s, [evt.event_id]: r }));
     } catch {
-      setAiErr(s => ({ ...s, [evt.event_id]: '暂时无法生成竞争影响分析。已确认的竞争事实和数据依据不受影响。' }));
+      setAiErr(s => ({ ...s, [evt.event_id]: '暂时无法生成竞争影响分析。已观察的竞争事实和数据依据不受影响。' }));
     } finally { setAiLoading(''); }
   }
 
@@ -152,7 +152,7 @@ export default function DemoPage() {
   const briefAi = latest ? insight[latest.event_id] : undefined; // 复用现有 ai-interpretation 结果；无 AI 不影响简报
   const briefText = latest ? [
     '【今日竞争情报】（Demo / Sample Data）',
-    '发现 ' + (summary ? summary.total : events.length) + ' 项已确认的竞争变化（价格下调 ' + (summary ? summary.decrease : 0) + ' · 价格上调 ' + (summary ? summary.increase : 0) + '）。',
+    '发现 ' + (summary ? summary.total : events.length) + ' 项已观察的竞争变化（价格下调 ' + (summary ? summary.decrease : 0) + ' · 价格上调 ' + (summary ? summary.increase : 0) + '）。',
     '最重要：' + latestBrand + ' · ' + latestTitle + ' 价格从 ' + latestFrom
       + ' 调整至 ' + latestTo + '，' + latestChange
       + (latest.currency ? '（币种 ' + latest.currency + '）' : '（币种信息暂不可用）') + '。',
@@ -225,7 +225,7 @@ export default function DemoPage() {
       {latest ? (
         <div className="demo-card brief">
           <div className="demo-brief-line">
-            发现 <b>{summary ? summary.total : events.length}</b> 项已确认的竞争变化（价格下调 <b>{summary ? summary.decrease : 0}</b> · 价格上调 <b>{summary ? summary.increase : 0}</b>）。
+            发现 <b>{summary ? summary.total : events.length}</b> 项已观察的竞争变化（价格下调 <b>{summary ? summary.decrease : 0}</b> · 价格上调 <b>{summary ? summary.increase : 0}</b>）。
           </div>
           <div className="demo-brief-line" style={{ fontSize: 15 }}>
             <b>{latestBrand} · {latestTitle}</b>
@@ -242,8 +242,8 @@ export default function DemoPage() {
           {briefAi && (
             <div className="demo-ai">
               <b>竞争影响分析</b><br />{briefAi.insight}
-              <div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div>
-              <div className="demo-ai-meta">分析模型 {briefAi.model}{briefAi.cached ? ' · 缓存结果' : ''}</div>
+              <div className="demo-ai-note">基于已观察事件生成，不用于替代业务决策。</div>
+              <div className="demo-ai-meta">模型 {briefAi.model} · 端点 {briefAi.endpoint_kind}{briefAi.cached ? ' · 缓存' : ''}</div>
             </div>
           )}
           <div className="demo-brief-advice">{advice}</div>
@@ -255,7 +255,7 @@ export default function DemoPage() {
         </div>
       ) : (
         <div className="demo-card">
-          <div className="demo-empty">暂无已确认的竞争变化。系统将在后续监测中持续更新竞争动态。</div>
+          <div className="demo-empty">暂无已观察的竞争变化。系统将在后续监测中持续更新竞争动态。</div>
         </div>
       )}
 
@@ -269,10 +269,10 @@ export default function DemoPage() {
         </div>
         {summary && (
           <div className="demo-kv" style={{ marginBottom: 8 }}>
-            近期共 <b>{summary.total}</b> 项已确认变化 · 价格变动 · 下调 <b>{summary.decrease}</b> · 价格变动 · 上调 <b>{summary.increase}</b>
+            近期共 <b>{summary.total}</b> 项已观察变化 · 价格变动 · 下调 <b>{summary.decrease}</b> · 价格变动 · 上调 <b>{summary.increase}</b>
           </div>
         )}
-        {!events.length && <div className="demo-empty">暂无已确认的竞争变化。系统将在后续监测中持续更新竞争动态。</div>}
+        {!events.length && <div className="demo-empty">暂无已观察的竞争变化。系统将在后续监测中持续更新竞争动态。</div>}
         {events.map(ev => {
           const brand = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).brand_name) || '竞争品牌';
           const title = (ev.entity_ref && (ev.entity_ref as Record<string, unknown>).title) || '商品';
@@ -297,7 +297,7 @@ export default function DemoPage() {
                 {/* P1：区间事件展示完整区间与边界话术；direction=null 中性无箭头 */}
                 <span className="demo-pct" style={changeChipStyle(ev.direction)}>{change}</span>
               </div>
-              <div className="demo-kv">检出时间：{fmtTime(ev.occurred_at)} · 观察窗口 {fmtTime(ev.observed_at_old)} → {fmtTime(ev.observed_at_new)} · 数据状态：已确认变化</div>
+              <div className="demo-kv">检出时间：{fmtTime(ev.occurred_at)} · 观察窗口 {fmtTime(ev.observed_at_old)} → {fmtTime(ev.observed_at_new)} · 数据状态：已观察变化</div>
               <div style={{ marginTop: 8 }}>
                 <button className="demo-btn primary" onClick={() => openDetail(ev)}>查看详情</button>
                 <button className="demo-btn" onClick={() => openEvidence(ev.new_evidence_ids[0])}>查看数据依据</button>
@@ -306,8 +306,8 @@ export default function DemoPage() {
               {insight[ev.event_id] && (
                 <div className="demo-ai">
                   <b>竞争影响分析</b> · {insight[ev.event_id].insight}
-                  <div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div>
-                  <div className="demo-ai-meta">分析模型 {insight[ev.event_id].model}{insight[ev.event_id].cached ? ' · 缓存结果' : ''}</div>
+                  <div className="demo-ai-note">基于已观察事件生成，不用于替代业务决策。</div>
+                  <div className="demo-ai-meta">模型 {insight[ev.event_id].model} · 端点 {insight[ev.event_id].endpoint_kind} · {insight[ev.event_id].endpoint_base_url}{insight[ev.event_id].cached ? ' · 缓存' : ''}</div>
                 </div>
               )}
               {aiErr[ev.event_id] && <div className="demo-err">{aiErr[ev.event_id]}</div>}
@@ -355,11 +355,11 @@ export default function DemoPage() {
             </div>
             <div className="demo-kv">变化幅度：{detail.event.display ? detail.event.display.change_label : '区间边界变化（无单一方向）'}</div>
             <div className="demo-kv">时间：观察窗口 {fmtTime(detail.event.observed_at_old)} → {fmtTime(detail.event.observed_at_new)} · 检出 {fmtTime(detail.event.occurred_at)}</div>
-            <div className="demo-kv">状态：<b>已确认变化</b></div>
+            <div className="demo-kv">状态：<b>已观察变化</b></div>
 
             <div className="demo-sec-title">竞争影响分析</div>
             {insight[detail.event.event_id]
-              ? <div className="demo-ai">{insight[detail.event.event_id].insight}<div className="demo-ai-note">基于已确认事件生成，不用于替代业务决策。</div><div className="demo-ai-meta">分析模型 {insight[detail.event.event_id].model}</div></div>
+              ? <div className="demo-ai">{insight[detail.event.event_id].insight}<div className="demo-ai-note">基于已观察事件生成，不用于替代业务决策。</div><div className="demo-ai-meta">模型 {insight[detail.event.event_id].model} · 端点 {insight[detail.event.event_id].endpoint_kind}</div></div>
               : <div><button className="demo-btn primary" disabled={!!aiLoading} onClick={() => askAi(detail.event)}>{aiLoading === detail.event.event_id ? '正在生成竞争影响分析…' : '生成竞争影响分析'}</button>{aiErr[detail.event.event_id] && <div className="demo-err">{aiErr[detail.event.event_id]}</div>}</div>}
 
             <div className="demo-sec-title">数据依据（{detail.evidences.length} 条）</div>
@@ -380,6 +380,9 @@ export default function DemoPage() {
               <div className="demo-tech-body">
                 <div>Event ID：{String(detail.event.event_id)}</div>
                 <div>Diff ID：{detail.diff ? String((detail.diff as { diff_id?: string }).diff_id) : '—'}（status={detail.diff ? String((detail.diff as { status?: string }).status) : '—'}）</div>
+                <div>Diff 值：old_value={JSON.stringify(detail.diff?.old_value)} → new_value={JSON.stringify(detail.diff?.new_value)}</div>
+                <div>Fact 类型：{String(detail.facts.old?.fact_type || '—')} → {String(detail.facts.new?.fact_type || '—')}</div>
+                <div>Fact 值：{JSON.stringify(detail.facts.old?.value)} → {JSON.stringify(detail.facts.new?.value)}</div>
                 <div>Fact ID：{detail.facts.old ? String((detail.facts.old as { fact_id?: string }).fact_id) : '—'} → {detail.facts.new ? String((detail.facts.new as { fact_id?: string }).fact_id) : '—'}</div>
                 <div>Evidence ID：{detail.evidences.map(ev => String(ev.evidence_id)).join(' · ') || '—'}</div>
                 <div>Snapshot ID：{detail.snapshots.map(s => String(s.snapshot_id)).join(' · ') || '—'}</div>
@@ -398,6 +401,7 @@ export default function DemoPage() {
         <div className="demo-modal-mask" onClick={() => setEvModal(null)}>
           <div className="demo-modal" onClick={e => e.stopPropagation()}>
             <div className="demo-h1" style={{ fontSize: 17 }}>数据依据与来源</div>
+            {!!evModal.evidence.note && <span className="demo-badge">{String(evModal.evidence.note)}</span>}
             <div className="demo-kv">观察值：<b>{fmtValue(evModal.evidence.extracted_value)}</b></div>
             <div className="demo-kv">数据状态：<b>{statusZh(evModal.evidence.evidence_status)}</b></div>
             <div className="demo-kv">观察时间：{fmtTime(String(evModal.evidence.observed_at || ''))}</div>

@@ -338,6 +338,7 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
     status: 'skeleton', // skeleton -> researching -> done | error
     manual: false,
     channels: {}, priceBand: null, pricePoints: [], freebies: [], audiences: [], regions: [],
+    priceStats: null, priceVerdict: null, soldOutCount: 0, typeDist: null, // 深研填充（价格三件套/S3 判定/断货/类目占比）
     products: [], reviews: null, positioning: '', customization: null, estSize: null, techStack: null,
     recentMoves: [], contentForms: [], collabTypes: [], fulfillment: [],
     sellingPoints: [], tactics: [], painPoints: [], fieldSources: {},
@@ -387,6 +388,30 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
       why: c.why, status: 'skeleton', evidenceCount: c.evidenceCount, confidence: c.confidence } });
   }
   mirrorProjectToDb(pid, requestScope.getStore() || state.tenantId, state.track); // T3-1：镜像进 db 项目清单
+  // ▶ 市场热度（T0·Google Trends，抓取需求 §2.6 / 算法规格 §5.6）：赛道词+头部品牌词一次对比，
+  // 4 周窗口斜率（±10% 死区）→ 涨/跌/平；品牌/赛道声量比 → 声量评级；全部 C 级佐证。
+  // 不阻塞发现收尾（fire-and-forget，落盘由回调完成）；失败 → status:'unprobed'，不用旧缓存冒充新数据。
+  try {
+    const Trends = require('../services/providers/trends.js');
+    const MT = require('../lib/market-trends.js');
+    const TRENDS_GEO = { us: 'US', uk: 'GB', eu: 'DE', jp: 'JP', cn: 'CN', sea: '' };
+    const geo = TRENDS_GEO[(state.intent.regions && state.intent.regions[0]) || ''] || '';
+    const terms = [trackWork].concat(competitors.slice(0, 4).map(c => c.name)).slice(0, 5);
+    Trends.interestOverTime(terms, config, { geo })
+      .then(raw => {
+        state.marketTrends = raw.ok
+          ? MT.summarize(raw, { track: trackWork })
+          : { status: 'unprobed', reason: String(raw.error || 'trends-unavailable').slice(0, 120), track: trackWork };
+        try { Logger.info('discover-trends', { projectId: pid, status: state.marketTrends.status || 'ok', verdict: state.marketTrends.verdict || null }); } catch (e2) {}
+        saveState(state);
+      })
+      .catch(e => {
+        state.marketTrends = { status: 'unprobed', reason: String(e && e.message || e).slice(0, 120), track: trackWork };
+        try { saveState(state); } catch (e2) {}
+      });
+  } catch (e) {
+    state.marketTrends = { status: 'unprobed', reason: String(e && e.message || e).slice(0, 120), track: trackWork };
+  }
   state.discoverDone = true; saveState(state); // 标记发现完成（供前端 SSE 断开时的轮询兜底判定收尾）
   if (emit) emitT('discover_complete', { projectId: pid, total: state.competitors.length });
   // 后台逐家深研（不阻塞返回）

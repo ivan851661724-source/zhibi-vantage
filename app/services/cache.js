@@ -9,7 +9,10 @@
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 
-const CACHE_DB = path.join(__dirname, '..', 'data', 'cache.sqlite');
+// ZB_DATA_DIR 与 core/paths.js 同口径（隔离测试/多实例）——此前写死 __dirname/../data，
+// 测试注入 ZB_DATA_DIR 时缓存仍落真实 data/，测试互相污染（fetch-gate.test 实证）。
+const DATA_DIR = process.env.ZB_DATA_DIR ? path.resolve(process.env.ZB_DATA_DIR) : path.join(__dirname, '..', 'data');
+const CACHE_DB = path.join(DATA_DIR, 'cache.sqlite');
 const TTL = { 'serp-discover': 86400, 'serp-probe': 604800, 'fetch-page': 259200 };
 
 let db;

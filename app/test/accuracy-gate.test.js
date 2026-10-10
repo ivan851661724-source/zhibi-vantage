@@ -72,6 +72,18 @@ t('applyAccuracyGate：达标且样本足 → 不降级；低于红线 → accur
   assert.equal(out[1].confidence, 'low');
 });
 
+t('recordAccuracySample：correct=null 保留为待评估，不强转 false 进分母', () => {
+  // 回归：此前 `rec.correct === true || rec.correct === 'true'` 把 null 强转 false——
+  // 待标注样本被记成"已评估=错"，污染准确率分母
+  const r = M.recordAccuracySample({ dimension: 'reviews', fieldKey: 'reviews', correct: null, judge: 'manual-reset' });
+  assert.ok(r.ok);
+  assert.strictEqual(r.rec.correct, null);
+  const sum = M.recomputeAccuracySummary(30);
+  const dim = sum.byDimension['reviews'];
+  assert.equal(dim.n, 0, '待评估样本不得进分母');
+  assert.equal(dim.pending, 1, '应记为 pending');
+});
+
 t('recomputeAccuracySummary：真实已评估样本照常计入，pending 只单列', () => {
   M.recordAccuracySample({ dimension: 'price', fieldKey: 'priceBand', correct: true, judge: 'human', channel: 'shopify-scrape' });
   M.recordAccuracySample({ dimension: 'price', fieldKey: 'priceBand', correct: false, judge: 'human', channel: 'llm-band' });

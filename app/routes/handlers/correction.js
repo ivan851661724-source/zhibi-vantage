@@ -280,6 +280,8 @@ async function exclude(ctx, req, res, url, p) {
     s.excluded = s.excluded.filter(x => x !== id);
     delete s.excludedReasons[id];
     s.suppressed = s.suppressed.filter(x => !(x.name === nm && x.track === s.track));
+    // 用户拉回 = 人工赦免：S3 价格带 / S2 杂货铺等自动排除不得在下轮重研时再次踢出（尊重用户裁决）
+    comp.userPardoned = true;
   }
   s.whiteSpace = ctx.computeWhiteSpace(s);
   ctx.saveState(s);

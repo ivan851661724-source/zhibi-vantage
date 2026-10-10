@@ -144,7 +144,14 @@ function trackKeywords(track) {
 function trackRelevance(name, kws) {
   const s = String(name || '').toLowerCase();
   if (!s || !kws.length) return 0;
-  return kws.filter(k => s.includes(k)).length;
+  let score = 0;
+  for (const k of kws) {
+    if (/[\u4e00-\u9fff]/.test(k)) { if (s.includes(k)) score++; continue; } // 中文词无词边界，子串匹配
+    // ASCII 词按词边界匹配：子串会把 maker 误命中 makeup（makeup remover 反超真咖啡机）
+    const re = new RegExp('(^|[^a-z0-9])' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z0-9])');
+    if (re.test(s)) score++;
+  }
+  return score;
 }
 
 // 主推产品推理（单对手）

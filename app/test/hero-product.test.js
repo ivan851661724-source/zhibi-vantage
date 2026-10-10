@@ -41,6 +41,20 @@ t('无赛道词：不排序，保持原序（行为不变）', () => {
   assert.deepEqual(r.heroProducts.map(h => h.name), ['OXO Good Grips Salad Spinner', 'OXO Cold Brew Coffee Maker', 'OXO Steel Spoon Rest']);
 });
 
+t('词边界：maker 不误命中 makeup（子串陷阱回归）', () => {
+  const comp = baseComp();
+  comp.productMatrix.heroSku = ['Makeup Remover Cloth', 'Cold Brew Coffee Maker'];
+  const r = HP.heroProductInfer(comp, 'coffee maker');
+  assert.equal(r.heroProducts[0].name, 'Cold Brew Coffee Maker');
+});
+
+t('词边界：连字符/独立词命中（cold-brew 形态的 SKU 名）', () => {
+  const comp = baseComp();
+  comp.productMatrix.heroSku = ['Salad Spinner', 'Cold-Brew Filter'];
+  const r = HP.heroProductInfer(comp, 'cold brew');
+  assert.equal(r.heroProducts[0].name, 'Cold-Brew Filter');
+});
+
 t('CJK 赛道词同样锚定（中文字面量参与匹配）', () => {
   const comp = { id: 'c3', name: '某牌', productMatrix: { heroSku: ['便携榨汁杯', '智能宠物饮水机Pro'] } };
   const r = HP.heroProductInfer(comp, '智能宠物饮水机');

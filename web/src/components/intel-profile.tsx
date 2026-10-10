@@ -194,12 +194,68 @@ function FieldBlock({ title, children }: { title: string; children: ReactNode })
   );
 }
 
+// ---- S3 判定标签（算法规格 §三：判定结论+可申诉依据，不渲染内部特征） ----
+const PRICE_VERDICT_LABEL: Record<string, string> = {
+  in_band: '价格带同构',
+  above: '高端错位',
+  below: '低端错位',
+  partial: '价格带待确认',
+  pending: '多产品线待确认',
+  insufficient: '价格证据不足',
+  undetermined: '币种不一致待确认',
+};
+
+// 客单价三件套（Shopify 实抓才有）：中位数 + 主力带 + 「N/M 款计入」样本说明 + 可展开剔除明细。
+// 前端只做展示不做计算（规格 §六）：所有数字直读 priceStats，缺失即整块不渲染。
+function PriceStatsBlock({ c }: { c: Competitor }) {
+  const st = c.priceStats as {
+    median?: number | null; band?: { min?: number; max?: number } | null; currency?: string | null;
+    basis?: string; truncatedBy?: string | null;
+    sample?: { total?: number; onSale?: number; used?: number; dropped?: number; soldOut?: number; free?: number; dropList?: { title?: string; price?: number; reason?: string }[] };
+    verdict?: { code?: string; note?: string };
+  } | undefined;
+  if (!st || st.median == null) return null;
+  const sym = curSym((st.currency as string) || (c.currency as string) || '');
+  const s = st.sample || {};
+  const vLabel = st.verdict && st.verdict.code ? PRICE_VERDICT_LABEL[st.verdict.code] : '';
+  const drops = s.dropList || [];
+  return (
+    <FieldBlock title="客单价（主力带）">
+      <span className="tag">
+        中位数 {sym}{st.median} · 主力带 {st.band && st.band.min != null ? `${sym}${st.band.min}–${sym}${st.band.max}` : '—'}
+      </span>
+      {s.used != null && s.onSale != null ? (
+        <span className="muted"> {s.used}/{s.onSale} 款计入</span>
+      ) : null}
+      {s.dropped || s.soldOut || s.free ? (
+        <span className="muted">（剔除 {s.dropped || 0} · 断货 {s.soldOut || 0} · 免费 {s.free || 0}）</span>
+      ) : null}
+      {st.basis === 'inferred' ? <span className="tag inferred">演算</span> : null}
+      {vLabel ? (
+        <span className={'tag' + (st.verdict && (st.verdict.code === 'in_band') ? '' : ' inferred')} title={st.verdict && st.verdict.note ? st.verdict.note : undefined}>
+          {vLabel}
+        </span>
+      ) : null}
+      {drops.length ? (
+        <details>
+          <summary className="muted">剔除明细（{drops.length}）</summary>
+          {drops.map((d, i) => (
+            <div className="muted" key={i}>{sym}{d.price != null ? d.price : '—'} {d.title || ''} — {d.reason || ''}</div>
+          ))}
+        </details>
+      ) : null}
+    </FieldBlock>
+  );
+}
+
 // ---- L1_ITEMS 数据块（有数据才产出；移植 L3135-3267） ----
 function PricingItems({ c }: { c: Competitor }) {
   const nodes: ReactNode[] = [];
+  const statsBlock = <PriceStatsBlock key="pstats" c={c} />;
   const pf = c.priceField as FieldLike | undefined;
   if (pf && pf.display) {
     nodes.push(<FieldBlock key="pf" title="定价（值级核验）"><PriceFieldHTML c={c} /></FieldBlock>);
+    nodes.push(statsBlock);
   } else {
     const band = c.priceBand as { band?: string; range?: string; basis?: string } | undefined;
     const points = (c.pricePoints as number[]) || [];
@@ -223,6 +279,7 @@ function PricingItems({ c }: { c: Competitor }) {
           <span className="tag inferred">旧版·重研后启用值级核验</span>
         </FieldBlock>,
       );
+      nodes.push(statsBlock);
     }
   }
   return <>{nodes}</>;

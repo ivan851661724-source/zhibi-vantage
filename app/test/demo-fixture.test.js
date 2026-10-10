@@ -107,8 +107,8 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     delete require.cache[require.resolve('../routes/handlers/demo.js')];
     const H = require('../routes/handlers/demo.js');
     const LLM = require('../services/llm-gateway.js');
-    let captured = null;
-    LLM.call = async (msgs, opts) => { captured = opts; return '测试解读：价格下降，建议关注。'; };
+    let captured = null, capturedMessages = null;
+    LLM.call = async (msgs, opts) => { captured = opts; capturedMessages = msgs; return '测试解读：价格下降，建议关注。'; };
     const als = require('../core/als.js');
     const Config = require('../core/config.js');
     const sent6 = [];
@@ -120,6 +120,8 @@ t('3. AI interpretation without LLM key -> honest 503 (no fabricated insight)', 
     assert.equal(sent6[sent6.length - 1].code, 200, 'handler should succeed: ' + JSON.stringify(sent6[sent6.length - 1].obj));
     const body6 = sent6[sent6.length - 1].obj;
     assert.ok(captured, 'gateway must be invoked');
+    assert.equal(JSON.parse(capturedMessages[1].content).data_label, 'Demo / Sample Data', 'AI must receive the persisted event demo label');
+    assert.equal(JSON.parse(capturedMessages[1].content).currency, null, 'unknown currency must be explicit in the AI input');
     assert.equal(captured.apiKey, 'fake-env-bailian-key-for-test');       // env key（config key 为空）
     assert.equal(captured.model, 'qwen-test-model');                      // env 百炼模型
     assert.ok(String(body6.endpoint_base_url).startsWith('https://token-plan.cn-beijing.maas.aliyuncs.com/'),

@@ -129,6 +129,8 @@ function aiFactPayloadOf(event) {
     observed_at_old: event.observed_at_old,
     observed_at_new: event.observed_at_new,
     data_source: event.source + '/' + event.provider,
+    currency: event.currency == null ? null : event.currency,
+    data_label: (event.entity_ref && event.entity_ref.fixture_tag) || event.note || null,
     data_note: '以下数字均为系统真值链（SourceSnapshot→Evidence→Fact→Diff→Event）产出，是本回复唯一可用数据。价格可能为单一价格（old_price/new_price）或价格区间（old_price_range/new_price_range）；区间变化时请按区间表述，不要把区间简化成单一价格。',
   };
 }
@@ -238,10 +240,16 @@ async function evidenceDetail(ctx, req, res, url, p) {
   if (!evRaw) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '证据不存在。' });
   // Phase 1 可观测性：evidence_opened 行为事件（只记脱敏标识与时间，不记证据内容）
   try { require('../../observability/telemetry.js').recordEvent({ eventType: 'evidence_opened', tenantId, objectType: 'evidence', objectId: id }); } catch (e) { /* 观测失败不影响主链路 */ }
-  // P2：剥离 raw_payload_ref（服务器内部文件路径），溯源字段全保留
+  // P2：剥离 raw_payload_ref（服务器内部文件路径），溯源字段全保留；
+  // source_url 不落库，按引用快照实时解析（Snapshot.getById），快照缺失时如实给 null。
   const ev = Object.assign({}, evRaw, {
     provenance: evRaw.provenance && evRaw.provenance.snapshots
-      ? { snapshots: evRaw.provenance.snapshots.map(publicSnapshot) }
+      ? {
+          snapshots: evRaw.provenance.snapshots.map(publicSnapshot).map(s => {
+            const meta = s && s.snapshot_id ? Snapshot.getById(tenantId, s.snapshot_id) : null;
+            return Object.assign({}, s, { source_url: meta && meta.source_url || null });
+          }),
+        }
       : evRaw.provenance,
   });
   ctx.sendJSON(res, 200, { evidence: ev, snapshots: ev.provenance && ev.provenance.snapshots || [] });
@@ -320,11 +328,9 @@ async function aiInterpretation(ctx, req, res, url, p) {
   // 汇报实际端点（§七 必录）：baseUrl 为空时网关用默认端点，这里如实还原，绝不上报空 URL。
   const endpointUsed = LLM.normalizeBaseUrl(baseUrl) || LLM.DEFAULT_BASE_URL;
 
-  // P1 下游整改：AI 输入携带完整价格区间 + changed_boundary（projection 派生）；
-  // 单一价兼容字段保留；direction=null 时 delta/pct 为 null（绝不用 0 替代）。
   const factPayload = aiFactPayloadOf(event);
   const messages = [
-    { role: 'system', content: '你是跨境电商竞品分析师。严格纪律：只能使用用户消息中给出的结构化数据；禁止编造或推算任何未给出的数字、时间、来源、销量、GMV、AOV；禁止提及数据之外的事件。用不超过 120 字的简体中文输出业务解读：这个价格变化意味着什么、建议卖家关注什么。' },
+    { role: 'system', content: '你是跨境电商竞品分析师。严格纪律：只能使用用户消息中给出的结构化数据；禁止编造或推算任何未给出的数字、时间、来源、销量、GMV、AOV；禁止提及数据之外的事件。currency 为 null 时只写价格数字，禁止添加任何货币符号或币种名称；百分比若展示须保留两位小数。若 data_label 标记 Demo / Sample Data，须说明这是演示数据，不是真实线上实时事件。price_change_observed 只代表已观察变化，不代表复查确认；策略意图仅能表述为可能性。用不超过 120 字的简体中文输出业务解读：这个价格变化意味着什么、建议卖家关注什么。' },
     { role: 'user', content: JSON.stringify(factPayload) },
   ];
   let text = '';

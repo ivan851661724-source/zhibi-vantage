@@ -25,6 +25,9 @@ function normTid(tid) {
 const MAX_CLIENTS_PER_TENANT = 5;
 // 每项目回放事件上限（防内存无界；新连客户端回放最近发现事件，消除 discover_error 错过竞态）
 const DISCOVER_REPLAY_MAX = 50;
+// 每租户回放项目数上限（防长期运行无界增长：项目数 × 50 条缓冲只增不减）。
+// 回放只读 lastProjectByTenant 指向的最新项目，按插入序淘汰旧项目缓冲是安全的。
+const MAX_REPLAY_PROJECTS = 8;
 
 // 携带业务数据、必须按租户隔离的事件类型
 const SCOPED_TYPES = new Set(['discover_stage', 'brand_found', 'brand_removed', 'discover_complete', 'discover_error']);
@@ -62,6 +65,12 @@ function emitSSE(type, payload) {
       buf.push({ type, payload: data });
       if (buf.length > DISCOVER_REPLAY_MAX) buf.shift();
       lastProjectByTenant.set(tid, pid);
+      // 淘汰超限的旧项目缓冲（插入序最旧者）；当前活跃项目 pid 永不在淘汰中
+      while (perTenant.size > MAX_REPLAY_PROJECTS) {
+        const oldest = perTenant.keys().next().value;
+        if (oldest === pid) break;
+        perTenant.delete(oldest);
+      }
     } else if (!tid) {
       // fail-closed：解析不出租户的业务事件不投递、不入回放（杜绝跨租户兜底）
       try { console.warn('[sse] drop scoped event without tenantId:', type); } catch (e) {}
@@ -115,4 +124,4 @@ function stats() {
   return { connections: total, tenants: clients.size };
 }
 
-module.exports = { broadcastChange, emitSSE, connect, stats, MAX_CLIENTS_PER_TENANT };
+module.exports = { broadcastChange, emitSSE, connect, stats, MAX_CLIENTS_PER_TENANT, MAX_REPLAY_PROJECTS };
