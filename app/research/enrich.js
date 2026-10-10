@@ -95,13 +95,18 @@ async function runQueue(state, config) {
       }
       q.researching.add(job.id);
       const _queueWaitMs = Date.now() - (q.enqueuedAt || Date.now()); // Phase 1：入队 → 开始深研
+      // 审核整改 §一：runId 归属——discover 后台深研沿用 state.runId（同一次完整调研）；
+      // 用户点卡重新执行（payload.runId 独立生成）则按独立 run 记账（begin/end 全程同一 runId）
+      const _jobOwnRun = typeof payload.runId === 'string' && payload.runId && payload.runId !== state.runId;
+      const _jobRunId = _jobOwnRun ? payload.runId : (state.runId || null);
+      if (_jobOwnRun) Telemetry.beginRun({ runId: _jobRunId, tenantId: state.tenantId, projectId: state.projectId });
       // 心跳续租（修复：此前 heartbeat 零调用，超过 60s 的任务会被 reclaimExpired 翻回
       // pending 被再次认领，与原执行并发重复跑、双倍 LLM/搜索扣费）
       const hb = setInterval(() => { try { Tasks.heartbeat(job.id, job.claimToken, Date.now()); } catch (e) { /* 非致命 */ } }, 20000);
       try {
-        // Phase 1 可观测性：运行上下文包裹（深层 search/LLM 调用归因到本项目）
-        await Telemetry.withRun({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId },
-          () => deepResearchOne(comp, state, config));
+        // Phase 1 可观测性：运行上下文包裹（深层 search/LLM 调用归因到本次运行）
+        await Telemetry.withRun({ runId: _jobRunId, tenantId: state.tenantId, projectId: state.projectId },
+          () => deepResearchOne(comp, state, config, _jobRunId));
         try { Tasks.finish(job.id, job.claimToken, 'done'); } catch (e) { /* 非致命 */ }
       } catch (e) {
         comp.status = 'error';
@@ -114,19 +119,21 @@ async function runQueue(state, config) {
         state.progress.done = state.competitors.filter(c => c.status === 'done').length;
         saveState(state);
         // Phase 1 可观测性：排队等待时长（每竞争品牌一行）+ 首批结果里程碑
-        Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+        Telemetry.recordStage({ runId: _jobRunId, tenantId: state.tenantId, projectId: state.projectId,
           stage: 'competitor_queue_wait', durationMs: _queueWaitMs, status: comp.status === 'done' ? 'ok' : 'error' });
         if (comp.status === 'done' && state.progress.done === 1) {
-          Telemetry.milestone(state.projectId, 'milestone_first_batch', { tenantId: state.tenantId });
+          Telemetry.milestone(state.runId, 'milestone_first_batch', { tenantId: state.tenantId });
         }
+        // 审核整改 §一/§二：独立重研 run 的终点（成功→ok；失败→error，绝不产生 all_done）
+        if (_jobOwnRun) Telemetry.endRun(_jobRunId, comp.status === 'done' ? 'ok' : 'error', comp.status === 'done' ? undefined : 'RESEARCH_FAILED');
       }
       await sleep(150);
     }
   } finally {
     q.running = false;
     q.queue = []; // 内存队列已被 tasks 表接管消费，消费完置空
-    // Phase 1 可观测性：全部深研完成 → total + milestone_all_done（调研终点）
-    Telemetry.endRun(state.projectId, 'ok');
+    // Phase 1 可观测性：全部深研完成 → discover run 终点（milestone_all_done 仅成功运行产生）
+    if (state.runId) Telemetry.endRun(state.runId, 'ok');
     // 在研集空 → 回收 Map 条目，避免无限增长
     if (q.researching.size === 0) researchQueues.delete(state.projectId);
   }
@@ -144,7 +151,10 @@ const CHANNEL_LINK = {
   shopifyDTC: /myshopify\.com/i
 };
 // 深研 v2：证据链驱动 —— L2意图查询 + L3抓取正文/结构化价格 + L4锚点消歧 + L5置信度代码推导
-async function deepResearchOne(comp, state, config) {
+async function deepResearchOne(comp, state, config, runIdOverride) {
+  // 审核整改 §一：阶段度量归因 runId——用户点卡重新执行（enrichOne 独立 run）时用
+  // 覆盖参数；否则沿用 state.runId（discover 创建的 run）。legacy state 无 runId → null。
+  const _telemetryRunId = runIdOverride || state.runId || null;
   const dsKey = llmApiKey(config);
   comp.status = 'researching';
   saveState(state);
@@ -184,7 +194,7 @@ async function deepResearchOne(comp, state, config) {
   if (comp.url) {
     const _tFetch = Date.now();
     [officialPage, shopify] = await Promise.all([fetchPage(comp.url), fetchShopifyProducts(comp.url)]);
-    Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+    Telemetry.recordStage({ runId: _telemetryRunId, tenantId: state.tenantId, projectId: state.projectId,
       stage: 'site_shopify_fetch', durationMs: Date.now() - _tFetch,
       status: officialPage.ok || shopify.ok ? 'ok' : 'error', provider: 'official+shopify' });
   }
@@ -337,7 +347,7 @@ async function deepResearchOne(comp, state, config) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, probeKeys.length) }, () => probeWorker()));
-  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+  Telemetry.recordStage({ runId: _telemetryRunId, tenantId: state.tenantId, projectId: state.projectId,
     stage: 'channel_probe', durationMs: Date.now() - _tProbe,
     status: probeFails.length ? 'partial' : 'ok', provider: (config.search && config.search.provider) || 'search' });
   // 记录每个定向探测的执行结果（hit 四态：true 命中 / false 真实零命中 / null 探测失败或 error 哨兵）
@@ -754,7 +764,7 @@ async function deepResearchOne(comp, state, config) {
   // ---- #304 字段撕裂交叉校验（discover 归类推测 vs enrich 官网实抓事实）----
   try { crossValidateTearing(comp, state.track); } catch (e) { /* 不阻断主链路 */ }
   try { enforceBasisEvidence(comp); } catch (e) { /* 不阻断主链路 */ }
-  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+  Telemetry.recordStage({ runId: _telemetryRunId, tenantId: state.tenantId, projectId: state.projectId,
     stage: 'field_merge_citation_check', durationMs: Date.now() - _tMerge, status: 'ok' });
 
   // ---- R2：真实口碑采集（Reddit 公开端点 + 独立站评论页 + 已配 key 的平台）----
@@ -782,7 +792,7 @@ async function deepResearchOne(comp, state, config) {
       voiceStore.saveCursor(state.tenantId, state.projectId, _cursorAll);
     }
   } catch (e) { comp.voiceItems = []; } // 采声失败不阻断主链路（忠实：缺数据好过编数据；游标不推进）
-  Telemetry.recordStage({ runId: state.projectId, tenantId: state.tenantId, projectId: state.projectId,
+  Telemetry.recordStage({ runId: _telemetryRunId, tenantId: state.tenantId, projectId: state.projectId,
     stage: 'voice_collection', durationMs: Date.now() - _tVoice, status: 'ok', provider: 'voice-collector' });
 
   comp.status = 'done';
@@ -797,10 +807,14 @@ async function lookupBrand(name, url, config, bodyIntent) {
     s.tenantId = resolveTenantId(); // 绑定租户（P0-2.1）
     setCurrentId(s.projectId, s.tenantId);
     mirrorProjectToDb(s.projectId, requestScope.getStore() || s.tenantId, s.track); // T3-1：镜像进 db 项目清单
-    Telemetry.beginRun({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId }); // 指定品牌检索也是一次完整调研
   } else if (!s.tenantId) {
     s.tenantId = resolveTenantId(); // 既有档案补打租户标（升级后首次访问）
   }
+  // 审核整改 §一：指定品牌调研也是独立 run——每次调用生成新 runId，全程（deepResearchOne/
+  // derived_analysis）归因同一个 run，结束时 endRun（成功 ok / 失败 error，不产生 all_done 误标）
+  const _lookupRunId = Telemetry.newRunId();
+  s.runId = _lookupRunId; // 深层阶段行（deepResearchOne 读 state.runId）归因到本次调研
+  Telemetry.beginRun({ runId: _lookupRunId, tenantId: s.tenantId, projectId: s.projectId });
   // 合并用户定位（含 profile）；与已有 intent 合并，归一化保证口径一致
   s.intent = Object.assign({}, normalizeIntent(s.intent), normalizeIntent(bodyIntent || {}));
   // 平台集接管：显式勾选优先，否则由地域推导
@@ -817,8 +831,9 @@ async function lookupBrand(name, url, config, bodyIntent) {
     }
     const _tDer0 = Date.now();
     s.whiteSpace = computeWhiteSpace(s);
-    Telemetry.recordStage({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId,
+    Telemetry.recordStage({ runId: _lookupRunId, tenantId: s.tenantId, projectId: s.projectId,
       stage: 'derived_analysis', durationMs: Date.now() - _tDer0, status: 'ok' });
+    Telemetry.endRun(_lookupRunId, 'ok'); // 早退路径也终结本次指定品牌调研 run
     return s;
   }
   const comp = {
@@ -840,13 +855,16 @@ async function lookupBrand(name, url, config, bodyIntent) {
   }
   s.progress = { total: s.competitors.length, done: s.competitors.filter(c => c.status === 'done').length };
   saveState(s);
-  try { await deepResearchOne(comp, s, config); }
+  try { await deepResearchOne(comp, s, config, _lookupRunId); }
   catch (e) { comp.status = 'error'; comp.evidence = '检索失败：' + String(e.message || e); }
   finally { saveState(s); }
   const _tDer1 = Date.now();
   s.whiteSpace = computeWhiteSpace(s);
-  Telemetry.recordStage({ runId: s.projectId, tenantId: s.tenantId, projectId: s.projectId,
+  Telemetry.recordStage({ runId: _lookupRunId, tenantId: s.tenantId, projectId: s.projectId,
     stage: 'derived_analysis', durationMs: Date.now() - _tDer1, status: 'ok' });
+  // 审核整改 §二：失败重研按 error 终结（total.status=error + 受控 code，无 all_done）
+  Telemetry.endRun(_lookupRunId, comp.status === 'error' ? 'error' : 'ok',
+    comp.status === 'error' ? 'LOOKUP_FAILED' : undefined);
   return s;
 }
 // 点卡优先调研（P0-1 修复：操作本项目队列，不污染其他项目）
@@ -858,8 +876,10 @@ function enrichOne(id, state, config) {
   q.queue = q.queue.filter(j => j.id !== id);
   q.queue.unshift({ id, priority: 3 });
   // 模块 0-4：同步落表（priority 3 优先被认领）
+  // 审核整改 §一：重新执行是独立 run——每次点卡生成不可碰撞的新 runId，随 payload 进任务表
   try {
-    Tasks.enqueue({ tenantId: state.tenantId, projectId: state.projectId, type: 'deep-research', payload: { competitorId: id }, priority: 3 });
+    Tasks.enqueue({ tenantId: state.tenantId, projectId: state.projectId, type: 'deep-research',
+      payload: { competitorId: id, runId: Telemetry.newRunId() }, priority: 3 });
   } catch (e) { /* 非致命 */ }
   ensureQueue(state, config);
   return true;

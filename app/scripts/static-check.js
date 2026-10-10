@@ -54,9 +54,17 @@ const KNOWN_NS = new Set([
 ]);
 
 const problems = [];
+// 降级通知（审核整改 §四）：spawn 级失败切进程内补偿时必须显式可见——
+// 进程内路径与子进程并非完全等价（共享事件循环与 require 缓存、无法验证模块级隔离），
+// 正式生产门禁 = 子进程路径；进程内仅作受控环境补偿，且降级事实计入 notices 供门禁审阅。
+const notices = [];
 function report(kind, file, line, msg) {
   const rel = path.relative(APP_ROOT, file).replace(/\\/g, '/');
   problems.push(`[${kind}] ${rel}:${line} ${msg}`);
+}
+function notice(msg) {
+  notices.push(msg);
+  try { console.warn('[static-check][fallback] ' + msg); } catch (e) { /* 无控制台环境 */ }
 }
 
 // ---- 列出 app/ 全部 js（排除 test/） ----
@@ -149,6 +157,7 @@ function checkSyntax(files, tmpRoot) {
     if (r.status !== 0) report('SYNTAX', f, 0, String(r.stderr || '').trim().split('\n')[0]);
   }
   if (spawnBlocked) {
+    notice(`语法检查：spawn 被拦截（EBUSY 等），${files.length} 个文件降级为进程内 vm 编译（等价 --check，非完全等价：无法验证子进程内行为）`);
     for (const f of files) {
       try {
         // 进程内等价 node --check：vm.Script 只编译不执行（require 未定义也无妨）
@@ -189,6 +198,9 @@ function requireAll(files, tmpRoot) {
   }
   if (spawnBlocked) {
     // 进程内等价：先隔离数据目录再加载（子模块按 ZB_DATA_DIR 缓存路径）
+    // 与子进程的差异：共享本进程 require 缓存与事件循环、无法证明模块级隔离完全等价——
+    // 故仅作受控环境补偿；生产门禁以子进程路径为准（见文件头说明）
+    notice(`require-all 冒烟：spawn 被拦截，${files.length} 个文件降级为进程内 require（非完全等价：共享 require 缓存，无法验证模块级隔离）`);
     process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || tmpRoot;
     for (const f of files) {
       try { require(f); }
@@ -277,6 +289,7 @@ function runStubDiscoverSmoke(tmpRoot) {
     return Promise.resolve();
   }
   // spawn 级失败（EBUSY 等，已重试）→ 进程内等价冒烟：打桩 + 清相关缓存 + 重载 discover
+  notice('stub discover 冒烟：spawn 被拦截，降级为进程内打桩重载（非完全等价：与本门禁共享进程状态）');
   return smokeInProcess(tmp);
 }
 async function smokeInProcess(tmp) {
@@ -355,7 +368,7 @@ async function runAll(opts) {
   return problems;
 }
 
-module.exports = { runAll, listAppJs, stripCommentsAndStrings, declaredNames, scanNamespace, problems };
+module.exports = { runAll, listAppJs, stripCommentsAndStrings, declaredNames, scanNamespace, problems, notices };
 
 // CLI 直跑（被测试壳 require 时不自动退出）
 if (require.main === module) {

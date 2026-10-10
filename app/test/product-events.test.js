@@ -59,7 +59,13 @@ await t('A1 未登录 → 403，不落任何事件', async () => {
   assert.strictEqual(n, 0, '未落任何事件');
 });
 
-await t('A2 白名单事件接收；请求体正文/备注与明文对象 id 不落库', async () => {
+await t('A2 白名单事件接收；projectId 归属校验通过；正文/备注与明文对象 id 不落库', async () => {
+  // 审核整改 §三：projectId 需归属校验 → 先为该租户预置真实项目
+  require('../services/db.js').saveProject({
+    id: 'proj-1', tenantId: 'tenant:pe-user', track: '赛道A',
+    competitors: [], brief: null, whiteSpace: null,
+    createdAt: new Date().toISOString(), discoveredAt: new Date().toISOString(),
+  });
   const res = makeRes();
   const handled = await ObsH.productEvent(
     makeCtx({ kind: 'tenant', payload: { tid: 'tenant:pe-user' } }, {
@@ -86,6 +92,37 @@ await t('A3 非白名单事件 → 400 UNSUPPORTED_EVENT', async () => {
     { method: 'POST' }, res, URL_P, '/api/events/product');
   assert.strictEqual(res.status, 400);
   assert.strictEqual(res.json.error, 'UNSUPPORTED_EVENT');
+});
+
+await t('A4 跨租户伪造 projectId → 404 拒绝且不写库（审核整改 §三）', async () => {
+  // 预置另一个租户的项目；attacker 冒用其 projectId
+  require('../services/db.js').saveProject({
+    id: 'proj-victim', tenantId: 'tenant:victim', track: '别人赛道',
+    competitors: [], brief: null, whiteSpace: null,
+    createdAt: new Date().toISOString(), discoveredAt: new Date().toISOString(),
+  });
+  const db = new (require('node:sqlite').DatabaseSync)(process.env.OBS_DB_PATH);
+  const before = db.prepare('SELECT COUNT(*) AS n FROM product_events').get().n;
+  db.close();
+  const res = makeRes();
+  const handled = await ObsH.productEvent(
+    makeCtx({ kind: 'tenant', payload: { tid: 'tenant:attacker' } }, {
+      eventType: 'intelligence_viewed', projectId: 'proj-victim',
+    }),
+    { method: 'POST' }, res, URL_P, '/api/events/product');
+  assert.strictEqual(handled, true);
+  assert.strictEqual(res.status, 404, '伪造 projectId 被拒绝');
+  assert.strictEqual(res.json.error, 'PROJECT_NOT_FOUND', '受控错误码（不泄露存在性）');
+  const db2 = new (require('node:sqlite').DatabaseSync)(process.env.OBS_DB_PATH);
+  const after = db2.prepare('SELECT COUNT(*) AS n FROM product_events').get().n;
+  db2.close();
+  assert.strictEqual(after, before, '拒绝时不写库');
+  // 不存在的 projectId 同样 404
+  const res2 = makeRes();
+  await ObsH.productEvent(makeCtx({ kind: 'tenant', payload: { tid: 'tenant:pe-user' } },
+    { eventType: 'intelligence_viewed', projectId: 'proj-nonexistent' }),
+    { method: 'POST' }, res2, URL_P, '/api/events/product');
+  assert.strictEqual(res2.status, 404, '不存在的项目同样拒绝');
 });
 
 await t('B1 管理统计接口：无 token → 401', async () => {

@@ -220,15 +220,16 @@ async function brief(ctx, req, res, url, p) {
       const _tRep = Date.now(); // Phase 1 可观测性：报告生成段计时
       const briefRes = await ctx.buildReport(s, config);
       const Telemetry = require('../../observability/telemetry.js');
-      Telemetry.recordStage({ runId: s.projectId, tenantId: tid, projectId: s.projectId,
+      Telemetry.recordStage({ runId: s.runId, tenantId: tid, projectId: s.projectId,
         stage: 'report_generation', durationMs: Date.now() - _tRep, status: 'ok', provider: 'llm' });
-      Telemetry.milestone(s.projectId, 'milestone_first_report', { tenantId: tid });
+      Telemetry.milestone(s.runId, 'milestone_first_report', { tenantId: tid });
       done({ brief: briefRes, briefStatus: 'done' });
     } catch (e) {
       try {
         const Telemetry = require('../../observability/telemetry.js');
-        Telemetry.recordStage({ runId: s.projectId, tenantId: tid, projectId: s.projectId,
-          stage: 'report_generation', status: 'error', errorCode: String((e && e.message) || e).slice(0, 64), provider: 'llm' });
+        // 审核整改 §三：errorCode 只收受控短 token，不塞自由文本报错（防正文入库）
+        Telemetry.recordStage({ runId: s.runId, tenantId: tid, projectId: s.projectId,
+          stage: 'report_generation', status: 'error', errorCode: 'REPORT_FAILED', provider: 'llm' });
       } catch (e2) { /* 观测失败不影响主链路 */ }
       done({ briefStatus: 'failed', briefError: String((e && e.message) || e) });
     } finally {

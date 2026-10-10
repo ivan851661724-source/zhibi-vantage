@@ -139,11 +139,13 @@ async function harvestCandidates(track, intent, fanout, dsKey, labels) {
 }
 
 // 步骤1 主流程：知识枚举 + 两轮迭代搜索 + 合并验证，返回骨架卡（不等待深研）
-async function runDiscover(track, intent, config, emit, projectId) {
+async function runDiscover(track, intent, config, emit, projectId, runId) {
   const sKey = activeSearchKey(config);
   const dsKey = llmApiKey(config);
   if (!sKey || !dsKey) throw new Error('NO_KEYS');
   const pid = projectId || newProjectId(track);
+  // 审核整改 §一：runId 每次执行独立生成（不可碰撞）；projectId 仅作关联键
+  const _runId = runId || Telemetry.newRunId();
   const _t0 = Date.now();
   // ▶ 加固（0812 体验报告）：发现启动即落空状态——即使后续外部调用全失败（密钥失效等），
   // 项目也已落库、state.track 立即可见、/api/projects 立即可列出、轮询兜底恒有数据，杜绝「永久空白」。
@@ -157,6 +159,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
     excluded: [], excludedReasons: {}, suppressed: [], addedCompetitors: [],
     ruleDecisions: {}, fieldCorrections: [], signals: {}, whiteSpace: null, brief: null,
     discoverDone: false,
+    runId: _runId, // 审核整改 §一：runId 随 state 持久化，深研队列/报告/指定品牌后续段沿用同一 run
   };
   _initState.intent = _initState.intent || {};
   _initState.intent.platforms = resolvePlatforms({
@@ -169,8 +172,9 @@ async function runDiscover(track, intent, config, emit, projectId) {
   setCurrentId(pid, _initState.tenantId);
   saveState(_initState);                                  // ← 关键：首个外部 await 之前落盘
   // Phase 1 可观测性：调研起点（request_received + runs 起始时间戳），运行上下文供深层
-  // searchProvider/LLM 调用零签名归因到本项目
-  const _runCtx = { runId: pid, tenantId: _initState.tenantId, projectId: pid };
+  // searchProvider/LLM 调用零签名归因。审核整改 §一：runId 与 projectId 严格分离——
+  // runId 由 discoverLaunch 生成并透传（错误路径也要用同一个 runId 终结），每次执行独立。
+  const _runCtx = { runId: _runId, tenantId: _initState.tenantId, projectId: pid };
   Telemetry.beginRun(_runCtx);
   // 关键：项目立即进 db 清单。tenantId 必须用 RAW（requestScope）对齐 db.listProjects 的过滤键——
   // resolveTenantId 返回 sanitizeNs 后的（tenant:xxx → tenant_xxx），而 db 存 RAW（tenant:xxx），
@@ -191,10 +195,22 @@ async function runDiscover(track, intent, config, emit, projectId) {
         if (tr) { trackWork = tr; translatedFrom = track; }
       })
     : Promise.resolve();
+  // 审核整改 §五：candidate_enumeration 使用自身起止时间——翻译与枚举并行，
+  // 枚举计时不得把并行等待翻译的时间计入（旧实现误用 _tR1 基准）
+  const _tEnum = Date.now();
   const enumP = llmEnumerate(track, intent, dsKey).then(v => { _stage('llmEnumerate-done'); return v; });
-  await translateP;
+  let translateFailed = false;
+  try {
+    await translateP;
+  } catch (e) {
+    translateFailed = true;
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'translate', durationMs: Date.now() - _tR1, status: 'error', errorCode: 'TRANSLATE_FAILED' }));
+    // 翻译失败不阻断（枚举用原文赛道）：吞掉异常继续（translateP 内部已吞，此处防御）
+  }
   _stage('translate');
-  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'translate', durationMs: Date.now() - _tR1, status: 'ok' }));
+  if (!translateFailed) {
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'translate', durationMs: Date.now() - _tR1, status: 'ok' }));
+  }
   // 承接上一轮的学习信号（用户反馈）：按名字×赛道记的 suppressed / 用户补的对手，跨次 discover 保留
   const prevState = loadState() || {};
   const carrySuppressed = Array.isArray(prevState.suppressed) ? prevState.suppressed : [];
@@ -207,8 +223,14 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const _tFan = Date.now();
   const fanoutP = Telemetry.withRun(_runCtx, () => fanoutSearch(queries, config, gl)).then(v => { _stage('fanout-done'); return v; });
   fanoutP.catch(() => {}); // enumP 先失败时避免 fanout 成为未处理的 rejection
-  const llmCands = await enumP;
-  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'candidate_enumeration', durationMs: Date.now() - _tR1, status: 'ok' }));
+  let llmCands;
+  try {
+    llmCands = await enumP;
+  } catch (e) {
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'candidate_enumeration', durationMs: Date.now() - _tEnum, status: 'error', errorCode: 'ENUM_FAILED' }));
+    throw e;
+  }
+  Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'candidate_enumeration', durationMs: Date.now() - _tEnum, status: 'ok' }));
   const fanout = await fanoutP;
   Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'search_round_1', durationMs: Date.now() - _tFan, status: 'ok' }));
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'enumerating', label: '已枚举候选品牌，正在全网搜索…', pct: 15, found: llmCands.length });
@@ -217,7 +239,13 @@ async function runDiscover(track, intent, config, emit, projectId) {
   if (!fanout.length && !llmCands.length) throw new Error('SEARCH_FAILED');
 
   const _tH = Date.now();
-  const h1 = await harvestCandidates(trackWork, intent, fanout, dsKey, queries);
+  let h1;
+  try {
+    h1 = await harvestCandidates(trackWork, intent, fanout, dsKey, queries);
+  } catch (e) {
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'harvest', durationMs: Date.now() - _tH, status: 'error', errorCode: 'HARVEST_FAILED' }));
+    throw e;
+  }
   _stage('harvest（total ' + ((Date.now() - _tH) / 1000).toFixed(1) + 's）');
   Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'harvest', durationMs: Date.now() - _tH, status: 'ok' }));
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'harvesting', label: '已抓取到一批线索，正在校验…', pct: 45, found: h1.candidates.length });
@@ -246,7 +274,7 @@ async function runDiscover(track, intent, config, emit, projectId) {
   for (const c of candidates.slice(0, 24)) {
     const _id = slug(c.name, _leadIds.length);
     _leadIds.push(_id);
-    if (_leadIds.length === 1) Telemetry.milestone(pid, 'milestone_first_brand'); // 里程碑：创建 → 首个品牌卡
+    if (_leadIds.length === 1) Telemetry.milestone(_runId, 'milestone_first_brand'); // 里程碑：运行创建 → 首个品牌卡
     if (emit) emitT('brand_found', { projectId: pid, tier: 'lead', card: {
       id: _id, name: c.name || ('线索' + (_leadIds.length)), url: c.url || '', tier: c.tier || 'unknown',
       matchScore: 0, why: c.why || '全网/维度命中线索', status: 'lead', evidenceCount: c.evidenceCount || 0, confidence: 'low' } });
@@ -258,7 +286,13 @@ async function runDiscover(track, intent, config, emit, projectId) {
   const afterCross = candidates.slice();
   // 相关性二次裁判：捕获"设备/打印机/OEM代工/原材料供应商/平台"等周边企业（harvest 自报分漏判的无关项）
   const _tRj = Date.now();
-  const judgments = await rejudgeRelevance(trackWork, candidates, allFanout, dsKey);
+  let judgments;
+  try {
+    judgments = await rejudgeRelevance(trackWork, candidates, allFanout, dsKey);
+  } catch (e) {
+    Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'relevance_check', durationMs: Date.now() - _tRj, status: 'error', errorCode: 'REJUDGE_FAILED' }));
+    throw e;
+  }
   _stage('rejudge');
   Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'relevance_check', durationMs: Date.now() - _tRj, status: 'ok' }));
   candidates = applyRelevanceJudgments(candidates, judgments);
@@ -364,13 +398,15 @@ async function runDiscover(track, intent, config, emit, projectId) {
 // 管线在 setImmediate 里异步跑，结束（成功/失败）时释放并发闸。
 function discoverLaunch(track, intent, config, gate) {
   const projectId = newProjectId(track);
+  // 审核整改 §一：runId 在启动点生成并透传——成功路径与失败 catch 用同一个 runId 终结
+  const runId = Telemetry.newRunId();
   setImmediate(() => {
-    runDiscover(track, intent, config, emitSSE, projectId)
+    runDiscover(track, intent, config, emitSSE, projectId, runId)
       .catch(e => {
         const code = e.message === 'NO_KEYS' ? 'NO_KEYS'
                    : (e.message === 'SEARCH_QUOTA' || e.message === 'ENRICH_QUOTA') ? 'quota'
                    : 'DISCOVER_FAILED';
-        Telemetry.endRun(projectId, 'error', code); // Phase 1 可观测性：调研失败终点
+        Telemetry.endRun(runId, 'error', code); // 失败终态：total.status=error + 受控 code，绝不产生 milestone_all_done
         try { Logger.error('discover-failed', { projectId, code, message: String(e.message || e), stack: String(e.stack || '').slice(0, 600) }); } catch {}
         emitSSE('discover_error', { projectId, code, message: String(e.message || e) });
       })
