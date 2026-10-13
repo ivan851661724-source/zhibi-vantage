@@ -41,7 +41,7 @@ services:
       start_period: 20s
       retries: 3
 
-  # ---------- Next.js 前端（Phase 4，docs/03-迁移实施方案.md） ----------
+  # ---------- Next.js 前端（现行架构：docs/architecture/00_整体架构规范.md） ----------
   # 反代 /api/* 到 zhibi-vantage（rewrites 已在构建期固化 BACKEND_URL）。
   zhibi-web:
     build:

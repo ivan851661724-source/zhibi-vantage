@@ -174,7 +174,7 @@ export default function DemoPage() {
   return (
     <div className="demo-console">
       <style jsx global>{`
-        /* Design tokens：与 docs/design.md / globals.css :root 对齐，不引入新色值 */
+        /* Design tokens：与 docs/architecture/03_界面设计规范.md / globals.css :root 对齐，不引入新色值 */
         .demo-console { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
         .demo-badge { display: inline-block; font-size: 11.5px; border: 1px solid #d97b00; color: #b26500; border-radius: 6px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
         .demo-h1 { font-size: 30px; font-weight: 800; color: #0D0D0D; letter-spacing: -0.8px; margin: 6px 0 2px; }

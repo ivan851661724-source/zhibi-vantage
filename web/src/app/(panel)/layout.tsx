@@ -1,5 +1,5 @@
 'use client';
-// 面板组布局（docs/01-前端架构规范.md §4）
+// 面板组布局（docs/architecture/01_前端架构规范.md §4）
 // 复刻 index.html：side-nav（logo + DAILY OPS/INTELLIGENCE/SYSTEM 三组导航 + 用户区）+ topbar。
 // 徽章：navRivals = competitors.length（对齐 app.js updateWbBadges L1665-1666）；
 //       navPending = 未决策材料数（三动作 localStorage 记录属 Phase 2 工作台，暂以材料总数展示）。

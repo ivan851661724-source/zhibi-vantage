@@ -1,5 +1,22 @@
 # Vantage Product Specification Set · v0.3
 
+本目录保存现行引用的领域规格与已批准条款，不表示所有模块均已冻结或实现完成。全仓阅读顺序见[文档中心](../README.md)，当前运行结构见[整体架构规范](../architecture/00_整体架构规范.md)。
+
+## 规格阅读顺序与状态
+
+| 顺序 | 文档 | 状态与作用 |
+|---|---|---|
+| 00 | [工程基线](00_Engineering_Baseline_v1.2.md) | 现行上位基线，控制领域语义和边界 |
+| 01 | [产品需求 v1.3.3](01_Product_PRD_v1.3.3.md) | 现行引用的产品冻结候选版，仍有未关闭问题 |
+| 02 | [数据与算法](02_Data_Algorithm_Spec_v0.3.md) | 算法规格评审稿，专项权重、阈值和质量仍需验证 |
+| 03 | [后端与接口](03_Backend_API_Contract_v0.3.md) | 领域与接口目标规格；当前兼容接口另见架构目录 |
+| 04 | [前端交互](04_Frontend_Interaction_Spec_v0.3.md) | 产品交互目标，与现行前端结构分别维护 |
+| 05 | [数据来源与采集](05_Data_Source_Collection_Spec_v0.3.md) | v0.3.1评审稿，其中SC-01条款已批准 |
+| 06 | [质量与验收](06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md) | 质量评审稿，不替代实际独立数据验收 |
+| 07 | [监控与运维](07_Monitoring_Operations_Runbook_v0.3.md) | 能力级运行要求与事故处置 |
+
+已批准变更见[SC-01](changes/SC-01_collector_version_vs_parser_version.md)，版本变更见[变更记录](CHANGELOG_v0.3.md)。待产品决定及本次质量核查统一见[产品评审稿](../01_Product_PRD_v1.4.0_review.md)，该稿尚未替代本目录的01版本。
+
 本轮是一次横切治理升级，目标不是增加更多功能，而是让 Vantage 在“持续监控 + 持续建库”的前提下仍然可信、可扩展、可控成本。
 
 ## 版本基准

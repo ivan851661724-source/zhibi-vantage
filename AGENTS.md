@@ -21,6 +21,16 @@ The product is not a dashboard-first analytics tool.
 
 ## Specification Source of Truth
 
+Start with `docs/README.md` for the reading order and each document's status.
+
+Current runtime architecture:
+
+- docs/architecture/00_整体架构规范.md
+- docs/architecture/01_前端架构规范.md
+- docs/architecture/02_现行API契约.md
+- docs/architecture/03_界面设计规范.md
+- docs/operations/01_部署与运行.md
+
 Current frozen baseline:
 
 - docs/spec/00_Engineering_Baseline_v1.2.md
@@ -47,6 +57,49 @@ Existing Implementation
 If implementation conflicts with specification, do not silently reinterpret the specification.
 
 Create a Spec Change Proposal.
+
+The combined product review is `docs/01_Product_PRD_v1.4.0_review.md`.
+It contains product requirements, unresolved decisions, P0 issues, acceptance
+scenarios and a review-evidence appendix. It has not replaced the v1.3.3
+baseline. Do not silently treat its recommendations or unresolved thresholds
+as approved business rules. Approved spec changes apply only to their stated
+scope, including SC-01 under `docs/spec/changes/`.
+
+Runtime architecture and current API documents describe implemented structure
+and compatibility. They do not override the business authority order above.
+Verify actual behavior from code and tests; report conflicts rather than
+approving existing defects through documentation.
+
+## Documentation Governance
+
+- Keep all project specifications under `docs/`; do not recreate a root `spec/`
+  directory or add a parallel `agent.md` with competing instructions.
+- Use `docs/architecture/` for current runtime architecture and interfaces,
+  `docs/spec/` for domain specifications and approved changes,
+  `docs/operations/` for runbooks, and `docs/history/` for retrospective records.
+- Keep `docs/README.md` as the main ordered index. Filename order is a reading
+  aid, not evidence of approval or implementation completion.
+- Maintain one primary document per subject. Merge review notes into the
+  product review appendix instead of keeping duplicate sources of truth.
+- Write product requirements in plain Chinese with user scenarios, observable
+  behavior, exceptions and acceptance. Keep code identifiers and implementation
+  investigation in technical documents or a clearly marked appendix.
+- Preserve the product review's unnumbered headings. Use stable decision,
+  issue and acceptance identifiers for traceability instead of chapter numbers.
+- When moving or deleting documents, update all affected links, indexes and
+  documentation references in code comments. Validate local links and ensure
+  referenced files exist before reporting completion.
+- Historical documents are not current operating instructions. Do not reuse
+  their old deployment examples, migration steps, test results or line numbers
+  without checking the current implementation.
+- Delete only explicitly requested obsolete documents or redundant documents
+  after a verified merge. Preserve useful history in `docs/history/`; never
+  delete runtime data, evidence or migration rollback material as doc cleanup.
+- Changes to document structure do not authorize production changes, database
+  migration, provider replacement, new business states or changed promises.
+- Document-only work requires reference, status and consistency checks. Run
+  code tests, typecheck or build as appropriate if executable behavior changes;
+  never present historical checks as newly executed verification.
 
 ---
 
@@ -140,11 +193,12 @@ Direct-source and cached paths should be preferred over repeated paid research.
 Before modifying code:
 
 1. Read this file.
-2. Read 00 and 01.
-3. Read the task-specific upstream specs.
-4. Inspect the actual implementation.
-5. Identify acceptance criteria.
-6. Produce an implementation plan and expected changed files.
+2. Read docs/README.md and the applicable current architecture documents.
+3. Read 00 and 01 under docs/spec/ and the task-specific upstream specs.
+4. Check the combined product review for relevant unresolved decisions; do not treat it as approved policy.
+5. Inspect the actual implementation.
+6. Identify acceptance criteria.
+7. Produce an implementation plan and expected changed files.
 
 Do not assume README descriptions are more authoritative than actual code.
 

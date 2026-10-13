@@ -1,4 +1,4 @@
-// 知彼 Vantage · state 类型（对齐后端 /api/state 返回结构，docs/02-API契约.md）
+// 知彼 Vantage · state 类型（对齐后端 /api/state 返回结构，docs/architecture/02_现行API契约.md）
 // Phase 1 宽松建模：未知字段用 unknown 兜底，面板迁移时逐字段收紧。
 'use client';
 

@@ -1,6 +1,6 @@
 'use strict';
 // 知彼 Vantage · 价格解析（单一实现的前端份）
-// 纪律（docs/01-前端架构规范.md §6）：本函数与 app/lib/pricefield.js 的 parsePriceRange
+// 纪律（docs/architecture/01_前端架构规范.md §6）：本函数与 app/lib/pricefield.js 的 parsePriceRange
 // 必须逐字符一致，由 `pnpm check:price`（scripts/check-price-parity.mjs）在 CI 强制校验。
 // 任一侧修改价格解析，必须双侧同步，否则 check 失败。
 // 故保持 plain JS 原样拷贝（不加类型标注、不改格式），供 check 脚本逐字符比对。

@@ -1,4 +1,4 @@
-# 知彼 Vantage · Next.js 前端镜像（Phase 4，docs/03-迁移实施方案.md §Phase 4）
+# 知彼 Vantage · Next.js 前端镜像（现行规范：docs/operations/01_部署与运行.md）
 # multi-stage + output:'standalone'：运行态仅拷贝 standalone 产物，不含 node_modules 源与构建缓存。
 # ⚠️ rewrites 在构建期固化进 routes-manifest.json —— BACKEND_URL 必须在 builder 阶段注入
 #    （容器网络内后端固定为 http://zhibi-vantage:3300；本机 dev 不经此镜像，不受影响）。

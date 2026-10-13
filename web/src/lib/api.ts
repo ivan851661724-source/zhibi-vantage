@@ -1,4 +1,4 @@
-// 知彼 Vantage · API 契约层（docs/02-API契约.md 的实现）
+// 知彼 Vantage · API 契约层（docs/architecture/02_现行API契约.md 的实现）
 // 纪律：前端所有数据入口必须经本文件，禁止组件内裸写 fetch。
 // 行为对齐：app.js 的 api()/apiAdmin()（token 注入 / JSON 解析 / 错误上抛携带 status）。
 'use client';
@@ -76,7 +76,7 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
       body = null;
     }
     // 401 仅在鉴权失败时清 token 跳登录。注意后端业务错误也可能用 401
-    // （如 discover 的 NO_KEYS——密钥未配置，docs/02-API契约.md），不能误杀会话。
+    // （如 discover 的 NO_KEYS——密钥未配置，docs/architecture/02_现行API契约.md），不能误杀会话。
     const code = body && body.error;
     if (res.status === 401 && (code === 'AUTH_REQUIRED' || code === 'ADMIN_AUTH_REQUIRED' || !code)) {
       clearToken();

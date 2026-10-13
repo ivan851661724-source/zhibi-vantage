@@ -1,4 +1,4 @@
-// 价格解析单一实现校验（docs/01-前端架构规范.md §6）
+// 价格解析单一实现校验（docs/architecture/01_前端架构规范.md §6）
 // 比对 web/src/lib/price.js 与 app/lib/pricefield.js 中 parsePriceRange 的函数源码（逐字符）。
 // 任一侧漂移 → 退出码 1，CI 失败。
 import { createRequire } from 'node:module';
@@ -24,7 +24,7 @@ if (backendSrc !== webSrc) {
   console.error(backendSrc);
   console.error('--- 前端 web/src/lib/price.js ---');
   console.error(webSrc);
-  console.error('纪律：价格解析必须双侧同步修改（docs/01-前端架构规范.md §6）。');
+  console.error('纪律：价格解析必须双侧同步修改（docs/architecture/01_前端架构规范.md §6）。');
   process.exit(1);
 }
 

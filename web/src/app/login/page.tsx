@@ -1,5 +1,5 @@
 // 登录页（Phase 0 功能版；Phase 1 对齐设计稿 #authScreen 视觉）
-// 契约：docs/02-API契约.md §2.1 —— 注册字段为 { email, password, name }（name=品牌/工作区名）。
+// 契约：docs/architecture/02_现行API契约.md §2.1 —— 注册字段为 { email, password, name }（name=品牌/工作区名）。
 // F-04 演示模式闸门：URL 带 ?demo=1 → 查 GET /api/public-config（ZB_DEMO_ALLOWED=1 才放行）
 //   · 放行：写 demo-token + sessionStorage 标记 → 进面板（mock state）
 //   · 拦截：显示「演示模式未启用」屏（复刻旧版 #demoBlocked）

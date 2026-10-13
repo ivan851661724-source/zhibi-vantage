@@ -1,5 +1,5 @@
 'use client';
-// 知彼 Vantage · 全局 state Provider（docs/01-前端架构规范.md §5）
+// 知彼 Vantage · 全局 state Provider（docs/architecture/01_前端架构规范.md §5）
 // 数据流复刻 app/public/app.js：
 //   state 单一服务端真相（/api/state）+ SSE 推送 → 签名比对（stateSig，L616-630）→ 不同才替换
 //   React 版：Provider 持有 state，面板组件经 useZhibiState() 订阅。

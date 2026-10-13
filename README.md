@@ -189,10 +189,15 @@ pnpm dev                # http://localhost:3000
 
 | 文档 | 作用 |
 |---|---|
-| [docs/01-前端架构规范.md](./docs/01-前端架构规范.md) | Next.js 前端技术选型、目录结构、编码约定 |
-| [docs/02-API契约.md](./docs/02-API契约.md) | 前后端接口契约（端点、鉴权、SSE、错误模型） |
-| [docs/03-迁移实施方案.md](./docs/03-迁移实施方案.md) | 原生 JS → Next.js 分阶段迁移与上线切换计划 |
-| [README-阿里云部署.md](./README-阿里云部署.md) | 阿里云 ECS 部署实操说明 |
+| [文档中心](docs/README.md) | 统一阅读顺序、目录职责及生效状态 |
+| [整体架构规范](docs/architecture/00_整体架构规范.md) | 当前运行结构、模块边界和变更约束 |
+| [基础规格索引](docs/spec/README_v0.3.md) | 工程、产品、算法、接口、采集、质量和运维规格 |
+| [前端架构规范](docs/architecture/01_前端架构规范.md) | Next.js 前端结构、编码和验收 |
+| [现行API契约](docs/architecture/02_现行API契约.md) | 当前兼容接口、鉴权、事件和错误模型 |
+| [界面设计规范](docs/architecture/03_界面设计规范.md) | 视觉与组件约束 |
+| [产品需求与评审核查](docs/01_Product_PRD_v1.4.0_review.md) | 合并的评审稿、P0问题、决策和核查依据 |
+| [部署与运行](docs/operations/01_部署与运行.md) | 当前部署及运行操作 |
+| [前端迁移历史记录](docs/history/2026-08-31_前端迁移记录.md) | 历史追溯，不能作为当前操作指令 |
 
 ---
 

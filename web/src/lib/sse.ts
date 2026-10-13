@@ -1,4 +1,4 @@
-// 知彼 Vantage · SSE 封装（docs/02-API契约.md §3）
+// 知彼 Vantage · SSE 封装（docs/architecture/02_现行API契约.md §3）
 // 行为复刻自 app/public/app.js 的 startPolling()（L651-678）：
 //   · EventSource('/api/stream?token=…')，浏览器按服务端 retry:3000 自动重连
 //     （EventSource 无法自定义请求头，令牌走查询串——后端仅 /api/stream 接受该通道）

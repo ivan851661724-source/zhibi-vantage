@@ -1,5 +1,5 @@
 // 知彼 Vantage · Next.js 前端配置
-// 串联方式（docs/01-前端架构规范.md §3）：前端不实现业务 API，仅反向代理到零依赖后端。
+// 串联方式（docs/architecture/01_前端架构规范.md §3）：前端不实现业务 API，仅反向代理到零依赖后端。
 // 开发：BACKEND_URL 默认 http://127.0.0.1:3300；容器内为 http://zhibi-vantage:3300。
 import type { NextConfig } from 'next';
 
@@ -29,7 +29,7 @@ const SECURITY_HEADERS = [
 ];
 
 const nextConfig: NextConfig = {
-  output: 'standalone', // 容器化（docs/03 §4）：运行态仅拷贝 standalone 产物
+  output: 'standalone', // 部署规范见 docs/operations/01_部署与运行.md，运行态使用 standalone 产物
   async headers() {
     return [{ source: '/:path*', headers: SECURITY_HEADERS }];
   },
