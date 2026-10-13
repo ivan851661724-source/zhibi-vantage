@@ -1,6 +1,6 @@
 # Vantage · 05 Data Source & Collection Spec
 
-**版本：v0.3.1（SC-01 修订，2026-10-07；基线 v0.3 + 本修订，见 CHANGELOG 与 spec/changes/SC-01）**  
+**版本：v0.3.1（SC-01 修订，2026-10-07；基线 v0.3 + 本修订，见 CHANGELOG 与 docs/spec/changes/SC-01）**  
 **状态：评审稿**  
 **上位依赖：00 v1.2 / 01 v1.3.3 / 02 v0.3 / 03 v0.3**  
 **所有权：Provider、采集能力、字段、频率、失败、fallback、成本与上线状态**

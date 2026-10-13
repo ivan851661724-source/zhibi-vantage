@@ -23,14 +23,14 @@ The product is not a dashboard-first analytics tool.
 
 Current frozen baseline:
 
-- spec/00_Engineering_Baseline_v1.2.md
-- spec/01_Product_PRD_v1.3.3.md
-- spec/02_Data_Algorithm_Spec_v0.3.md
-- spec/03_Backend_API_Contract_v0.3.md
-- spec/04_Frontend_Interaction_Spec_v0.3.md
-- spec/05_Data_Source_Collection_Spec_v0.3.md
-- spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md
-- spec/07_Monitoring_Operations_Runbook_v0.3.md
+- docs/spec/00_Engineering_Baseline_v1.2.md
+- docs/spec/01_Product_PRD_v1.3.3.md
+- docs/spec/02_Data_Algorithm_Spec_v0.3.md
+- docs/spec/03_Backend_API_Contract_v0.3.md
+- docs/spec/04_Frontend_Interaction_Spec_v0.3.md
+- docs/spec/05_Data_Source_Collection_Spec_v0.3.md
+- docs/spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md
+- docs/spec/07_Monitoring_Operations_Runbook_v0.3.md
 
 Authority order:
 
