@@ -76,7 +76,7 @@ async function sector(ctx, req, res, url, p) {
   }
   const profiles = subset.map(c => ctx.Agg.brandProfileFromComp(c));
   // B-7b：传市场币种 → detected 币种不一致者被剔出集中度分母（currencyExcluded 计数）
-  const sectorRes = ctx.Agg.buildSector({ name: body.sectorName || 'sector', brands: profiles, marketCurrency: marketCurrency(st.intent && st.intent.regions) });
+  const sectorRes = ctx.Agg.buildSector({ name: body.sectorName || 'sector', brands: profiles, marketCurrency: marketCurrency(st && st.intent && st.intent.regions) });
   const whitespace = ctx.SW.computeSectorWhitespace({ competitors: subset });
   const trend = ctx.TR.buildTrendInferences(subset.length ? subset : comps);
   return ctx.sendJSON(res, 200, {
