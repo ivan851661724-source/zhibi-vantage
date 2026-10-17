@@ -22,7 +22,10 @@ for (const f of files) {
   const full = path.join(testDir, f);
   process.stdout.write('\n=== ' + f + ' ===\n');
   try {
-    const out = execFileSync(NODE, [full], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
+    // 超时 300s：static-check / observability-remediation 内含子进程全量检查
+    // （R7 注入回归会再跑一遍 static-check.test），沙箱 spawn 拦截重试下可达 90s+，
+    // 60s 会把慢而正确的套件误杀为失败——放宽的是时限，不是任何断言。
+    const out = execFileSync(NODE, [full], { encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
     process.stdout.write(out);
   } catch (e) {
     failed++;

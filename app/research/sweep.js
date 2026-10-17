@@ -21,6 +21,7 @@ const Metrics = require('../services/metrics.js');
 const Scheduler = require('../services/scheduler.js');
 const { runDigest } = require('./digest.js');
 const db = require('../services/db.js');
+const WatchMonitor = require('../services/watch-monitor.js');
 const fs = require('fs');
 
 
@@ -251,7 +252,10 @@ function startScheduler() {
   }
   const s = Scheduler.scheduleNext(runSweep, Logger);
   const d = Scheduler.scheduleDaily(runDigest, Logger); // R4.2：每日邮件摘要（未配置邮件通道则静默跳过）
-  try { Logger.info('scheduler 已启动', { nextAt: s.nextAt.toISOString(), hours: s.hours, digestNextAt: d.nextAt.toISOString() }); } catch (e) {}
+  // 正式监控调度（03 §12 唯一口径：Workspace 时区 06:00/14:00/22:00，认领派发 + 当日补跑；
+  // 只巡检用户明确「加入监控」的 WatchTarget，不使用项目近30天活跃作监控资格）
+  const w = WatchMonitor.startTick(Logger);
+  try { Logger.info('scheduler 已启动', { nextAt: s.nextAt.toISOString(), hours: s.hours, digestNextAt: d.nextAt.toISOString(), watchTick: w ? w.tickMinutes : null }); } catch (e) {}
   return s;
 }
 

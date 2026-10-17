@@ -2,7 +2,8 @@
 // price-stats 单测（算法规格 20261003 §三 落地）：
 //   · 文档 3.2 A 品牌演算例：60→50 有效→P5/P95 剔 6→中位数 $28 / 主力带 $19–42 / 44 款计入
 //   · 文档 3.0 泡泡玛特多峰例：三座价格山 → 无销量权重识别不出主力线 → 不裁决（pending）
-//   · 先验截尾（<20 样本）标演算、判定降级待人工确认；样本 <3 不裁决；币种 fail-closed
+//   · 目标价不参与异常清洗（基线 §19 冻结，2026-10-17 起 ×0.15/×3 先验截尾已移除）；
+//     样本 <3 不裁决；币种 fail-closed
 const assert = require('node:assert');
 const PS = require('../lib/price-stats.js');
 
@@ -80,14 +81,13 @@ t('部分重叠（中点在区间外但主力带骑跨）→ partial 待人工�
   assert.equal(s.verdict.pendingHuman, true);
 });
 
-t('先验截尾（样本<20 + 目标价）：×0.15/×3 剔除，标演算、判定降级 pendingHuman', () => {
+t('小样本不清洗（基线 §19 / 规格 §6.3 冻结）：×0.15/×3 目标价剔除已移除，样本全保留', () => {
   const s = PS.computePriceStats([5, 20, 30, 45, 180].map(p => item(p)), { currency: 'USD', target: { min: 50, max: 50, currency: 'USD' } });
-  assert.equal(s.truncatedBy, 'prior');
-  assert.equal(s.basis, 'inferred', '先验规则截尾 → 演算');
-  assert.equal(s.sample.used, 3);
+  assert.equal(s.truncatedBy, null, '目标价驱动的先验截尾已删除');
+  assert.equal(s.basis, 'verified', '统计基面不再降级');
+  assert.equal(s.sample.used, 5, '极端值 180 与 5 保留（目标价不是清洗规则）');
   assert.equal(s.median, 30);
-  assert.equal(s.verdict.pendingHuman, true, '演算判定不得自动裁决');
-  assert.ok(s.sample.dropList.some(d => d.price === 180) && s.sample.dropList.some(d => d.price === 5));
+  assert.equal(s.sample.dropList.length, 0);
 });
 
 t('样本 <3 款：不裁决（insufficient），不凑数', () => {
@@ -124,6 +124,12 @@ t('无目标价时不做先验截尾（没有锚就不猜）', () => {
   const s = PS.computePriceStats([5, 20, 30, 45, 180].map(p => item(p)), { currency: 'USD', target: null });
   assert.equal(s.truncatedBy, null);
   assert.equal(s.sample.used, 5);
+});
+
+t('头部注释同步：小样本不再有「演算/待人工确认」降级路径', () => {
+  const s = PS.computePriceStats([5, 20, 30, 45, 180].map(p => item(p)), { currency: 'USD', target: { min: 50, max: 50, currency: 'USD' } });
+  assert.equal(s.basis, 'verified');
+  assert.ok(!['inferred'].includes(s.basis), '无先验清洗即无演算标注');
 });
 
 console.log('\n=== price-stats.test: ' + passed + ' passed, ' + failed + ' failed ===');

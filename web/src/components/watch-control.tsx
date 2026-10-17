@@ -1,0 +1,120 @@
+'use client';
+// 正式监控入口（01 PRD §16 加入监控 / 04 前端规格 §4 Competitor Card「是否正式监控」）
+// 最小入口：卡片内嵌按钮 + 状态行，不新增一级页面、不做视觉重构。
+// 三态：未监控 → 加入监控；已监控 → 暂停/恢复 + 信号与最近成功检查；
+// Coverage 不完整 → 显式提示（00 §21：不把失败当无变化）。
+import { useCallback, useEffect, useState } from 'react';
+import { apiDelete, apiGet, apiPatch, apiPost } from '@/lib/api';
+
+interface WatchTarget {
+  watchTargetId: string;
+  competitorId: string;
+  monitoringStatus: string;
+  enabledSignals: string[];
+  freshnessStatus: string;
+  lastSuccessAt?: string | null;
+  lastWindow?: { slot: string; coverage: string; partialScan: boolean; failureReasons?: Record<string, number> } | null;
+}
+
+const SIGNAL_ZH: Record<string, string> = { price: '价格', launch: '上新', stock: '断货' };
+
+export function WatchControl({ competitorId }: { competitorId: string }) {
+  const [target, setTarget] = useState<WatchTarget | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await apiGet<{ targets: WatchTarget[] }>('/api/watch-targets');
+      setTarget((r.targets || []).find((t) => t.competitorId === competitorId) || null);
+    } catch {
+      /* 未登录/网络异常：按钮退化为未监控态 */
+    }
+  }, [competitorId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const join = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiPost('/api/watch-targets', { competitorId });
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '加入监控失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const togglePause = async () => {
+    if (!target) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiPatch('/api/watch-targets/' + encodeURIComponent(target.watchTargetId), {
+        action: target.monitoringStatus === 'paused' ? 'resume' : 'pause',
+      });
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '操作失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!target) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiDelete('/api/watch-targets/' + encodeURIComponent(target.watchTargetId));
+      setTarget(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '移除失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!target) {
+    return (
+      <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
+        <button className="watch-btn watch-join" type="button" disabled={busy} onClick={join}>
+          加入监控
+        </button>
+        {err ? <span className="watch-err">{err}</span> : null}
+      </div>
+    );
+  }
+
+  const paused = target.monitoringStatus === 'paused';
+  const covBad = target.lastWindow && (target.lastWindow.coverage !== 'full' || target.lastWindow.partialScan);
+  return (
+    <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
+      <div className="watch-line">
+        <span className={'watch-badge ' + (paused ? 'is-paused' : 'is-active')}>
+          {paused ? '已暂停' : '已监控'}
+        </span>
+        <span className="watch-meta">
+          信号：{(target.enabledSignals || []).map((s) => SIGNAL_ZH[s] || s).join('、')}
+          {target.lastSuccessAt ? ` ｜ 最近成功检查 ${String(target.lastSuccessAt).slice(0, 16).replace('T', ' ')}` : ' ｜ 尚无成功检查'}
+        </span>
+      </div>
+      {covBad ? (
+        <div className="watch-gap">最近巡检覆盖不完整（{target.lastWindow?.slot}），该窗口结论不可作为「无变化」依据</div>
+      ) : null}
+      <div className="watch-actions">
+        <button className="watch-btn" type="button" disabled={busy} onClick={togglePause}>
+          {paused ? '恢复监控' : '暂停监控'}
+        </button>
+        <button className="watch-btn watch-remove" type="button" disabled={busy} onClick={remove}>
+          移出监控
+        </button>
+        {err ? <span className="watch-err">{err}</span> : null}
+      </div>
+    </div>
+  );
+}

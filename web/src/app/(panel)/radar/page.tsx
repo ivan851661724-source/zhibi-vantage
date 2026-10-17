@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { FieldCorrectModal } from '@/components/field-correct';
+import { WatchControl } from '@/components/watch-control';
 import { chgClass, fmtChannels, fmtHero, fmtPrice, lbl } from '@/lib/labels';
 
 interface GroupSignal {
@@ -109,6 +110,7 @@ function RivalCard({ c, onCorrect }: { c: Record<string, unknown>; onCorrect: (i
       ) : (
         <div className="r-act">近阶段无显著动作</div>
       )}
+      <WatchControl competitorId={c.id as string} />
       <button
         className="fb-correct"
         type="button"

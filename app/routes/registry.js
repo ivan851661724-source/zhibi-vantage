@@ -23,12 +23,26 @@ function register(method, path, auth, handler) {
   routes.push({ method: method === 'ALL' ? 'ALL' : method.toUpperCase(), path, auth: auth || 'public', handler });
 }
 
-// 按 method+path 精确匹配（可扩展为模式匹配：先精确，后续可加 :param）
+// 按 method+path 匹配：先精确，后 :param 段（watch-targets 等资源 id 路由；
+// 精确命中优先，param 段不匹配编码后的 '/'）。
 function match(method, pathname) {
   const m = String(method || '').toUpperCase();
   for (const r of routes) {
     if (r.method !== 'ALL' && r.method !== m) continue;
     if (r.path === pathname) return r;
+  }
+  const segs = pathname.split('/');
+  for (const r of routes) {
+    if (r.method !== 'ALL' && r.method !== m) continue;
+    if (!r.path.includes(':')) continue;
+    const rs = r.path.split('/');
+    if (rs.length !== segs.length) continue;
+    let ok = true;
+    for (let i = 0; i < rs.length; i++) {
+      if (rs[i].startsWith(':')) { if (!segs[i]) { ok = false; break; } continue; }
+      if (rs[i] !== segs[i]) { ok = false; break; }
+    }
+    if (ok) return r;
   }
   return null;
 }

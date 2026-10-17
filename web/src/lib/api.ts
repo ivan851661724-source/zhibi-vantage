@@ -151,3 +151,11 @@ export function markAlertsRead(ids: string[]): Promise<{ marked: number }> {
   return apiPost<{ marked: number }>('/api/alerts/read', { ids });
 }
 
+
+export function apiPatch<T>(url: string, body?: unknown): Promise<T> {
+  return request<T>(url, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) });
+}
+
+export function apiDelete<T>(url: string): Promise<T> {
+  return request<T>(url, { method: 'DELETE' });
+}

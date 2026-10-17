@@ -2747,3 +2747,19 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
   .ov-radar,.ov-brand{height:auto}
   .ov-track .track-input{width:100%;max-width:none}
 }
+
+/* ---- 正式监控入口（watch-control）---- */
+.watch-ctl{margin-top:10px;border-top:1px dashed var(--line,#e5e5e0);padding-top:8px}
+.watch-btn{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--line,#d8d8d2);background:#fff;cursor:pointer;color:var(--ink2,#444)}
+.watch-btn:hover{color:var(--brand-hi,#0f7a58);border-color:var(--brand-hi,#0f7a58)}
+.watch-btn:disabled{opacity:.5;cursor:default}
+.watch-join{color:var(--brand-hi,#0f7a58);border-color:var(--brand-hi,#0f7a58)}
+.watch-remove{color:#a33;border-color:#e0c8c8}
+.watch-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;flex-shrink:0}
+.watch-badge.is-active{background:#e7f5ef;color:var(--brand-hi,#0f7a58)}
+.watch-badge.is-paused{background:#f2f2ee;color:#8a8a82}
+.watch-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.watch-meta{font-size:11px;color:var(--ink3,#8a8a82)}
+.watch-gap{font-size:11px;color:#a35a00;background:#fdf4e6;border-radius:6px;padding:4px 8px;margin-top:6px}
+.watch-actions{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
+.watch-err{font-size:11px;color:#a33}

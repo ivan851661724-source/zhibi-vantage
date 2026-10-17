@@ -20,6 +20,7 @@ const TelemetryH = require('./handlers/telemetry.js');
 const AuthH = require('./handlers/auth.js'); // P0 恢复：login/register
 const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
+const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 
 function registerAll() {
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
@@ -99,6 +100,13 @@ function registerAll() {
   registry.register('POST', '/api/alerts/settings', 'tenant', TelemetryH.alertsSettings);
   registry.register('GET', '/api/alerts', 'tenant', TelemetryH.alerts);
   registry.register('POST', '/api/alerts/read', 'tenant', TelemetryH.alertsRead);
+  // —— 正式监控基础（01 §16 加入监控 / 03 §7 REST / §14 Coverage） ——
+  registry.register('POST', '/api/watch-targets', 'tenant', WatchH.createTarget);
+  registry.register('GET', '/api/watch-targets', 'tenant', WatchH.listTargets);
+  registry.register('PATCH', '/api/watch-targets/:id', 'tenant', WatchH.patchTarget);
+  registry.register('DELETE', '/api/watch-targets/:id', 'tenant', WatchH.deleteTarget);
+  registry.register('GET', '/api/digests/daily', 'tenant', WatchH.dailyDigest);
+  registry.register('GET', '/api/watch-targets/coverage', 'tenant', WatchH.coverageDay);
   // R5.2 候补名单（public，匿名可提交）+ R7.2 真实数据示例（闸门在 handler 内）
   registry.register('POST', '/api/waitlist', 'public', SystemH.waitlist);
   registry.register('GET', '/api/sample', 'public', SystemH.sample);

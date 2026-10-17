@@ -4,8 +4,10 @@
 // 客单价三件套：中位数 + 主力带(P25–P75) + 样本明细（参与/剔除/剔除清单）
 // 铁律（规格 §三/§四）：
 //   · 均值禁止用于客单价（$1 挂件 + $500 礼盒拉歪均值，中位数几乎不动）
-//   · 双截尾 P5/P95，剔除明细逐条带原因（可申诉）；样本 <20 退化为先验规则
-//     （目标价×0.15 / ×3 直接剔除），标「演算」，判定降级为待人工确认（不自动裁决）
+//   · 双截尾 P5/P95，剔除明细逐条带原因（可申诉）
+//   · 目标价不参与异常值清洗（基线 §19 / 算法规格 §6.3 冻结）：小样本不再使用
+//     目标价×0.15 / ×3 先验剔除——用户参考价只参与后续价格关系判定，绝不改变
+//     竞品原始价格统计、样本数量、异常剔除结果或价格带
 //   · 已下架/全变体不可售不计入（不卖的东西不构成客单价）；免费品单列不计入
 //   · 样本 <3 款：不裁决（价格带证据不足），不凑数（规格 3.1 第 5 步）
 //   · 多峰分布（三座价格山）截尾救不了主体——按规格 3.0.2 第 1 步做线间断检测，
@@ -62,18 +64,10 @@ function computePriceStats(items, opts) {
     }
     pool = pool.slice(k, pool.length - k);
     truncatedBy = 'p5p95';
-  } else if (pool.length >= 3 && tMid != null && !currencyMismatch) {
-    // 样本 <20：P5/P95 退化为主角先验规则（低于目标价×0.15 / 高于×3），标「演算」
-    const lo = tMid * 0.15, hi = tMid * 3;
-    const kept = [];
-    for (const it of pool) {
-      if (it.repPrice < lo) { dropList.push({ title: String(it.title || '').slice(0, 80), price: it.repPrice, reason: '先验规则：低于目标价×0.15（演算）' }); continue; }
-      if (it.repPrice > hi) { dropList.push({ title: String(it.title || '').slice(0, 80), price: it.repPrice, reason: '先验规则：高于目标价×3（演算）' }); continue; }
-      kept.push(it);
-    }
-    if (kept.length !== pool.length) truncatedBy = 'prior';
-    pool = kept;
   }
+  // 样本 <20：不做目标价驱动的异常剔除（基线 §19：目标价是比较对象，不是清洗规则）。
+  // 描述性统计直接用全部在售样本（算法规格 §6.3：sample 3–19 谨慎使用极端值处理，
+  // v0 一律不处理；「演算 / 待人工确认」降级随先验清洗一起移除）。
 
   const used = pool.map(x => x.repPrice);
   const enough = used.length >= 3;
@@ -105,24 +99,21 @@ function computePriceStats(items, opts) {
     const mid = (band.min + band.max) / 2;
     const lo = tMid * 0.7, hi = tMid * 1.3;
     if (mid >= lo && mid <= hi) {
-      verdict = { code: 'in_band', note: `主力带中点 ${mid} ∈ [${lo}, ${hi}]（目标价 ${tMid}×0.7~1.3）→ 价格带同构`, pendingHuman: truncatedBy === 'prior' };
+      verdict = { code: 'in_band', note: `主力带中点 ${mid} ∈ [${lo}, ${hi}]（目标价 ${tMid}×0.7~1.3）→ 价格带同构`, pendingHuman: false };
     } else if (band.min > hi) {
-      verdict = { code: 'above', note: `主力带 [${band.min}, ${band.max}] 整体高于区间上界 ${hi} → 高端市场错位`, pendingHuman: truncatedBy === 'prior' };
+      verdict = { code: 'above', note: `主力带 [${band.min}, ${band.max}] 整体高于区间上界 ${hi} → 高端市场错位`, pendingHuman: false };
     } else if (band.max < lo) {
-      verdict = { code: 'below', note: `主力带 [${band.min}, ${band.max}] 整体低于区间下界 ${lo} → 低端市场错位`, pendingHuman: truncatedBy === 'prior' };
+      verdict = { code: 'below', note: `主力带 [${band.min}, ${band.max}] 整体低于区间下界 ${lo} → 低端市场错位`, pendingHuman: false };
     } else {
       verdict = { code: 'partial', note: `主力带 [${band.min}, ${band.max}] 与目标区间 [${lo}, ${hi}] 部分重叠 → 待人工确认，不自动裁决`, pendingHuman: true };
     }
   }
-  // 先验截尾（演算）产出的判定一律降级为待人工确认（规格 3.0.4：降级判定不得冒充实抓结论）
-  if (truncatedBy === 'prior') verdict.pendingHuman = true;
-
   return {
     median,
     band,
     currency,
-    basis: truncatedBy === 'prior' ? 'inferred' : 'verified', // 演算标注跟着判定走
-    truncatedBy,                                              // null | 'p5p95' | 'prior'
+    basis: 'verified', // 无目标价驱动的清洗，统计基面一律 verified（截尾仅 P5/P95 均匀截尾）
+    truncatedBy,                                              // null | 'p5p95'
     multiPeak,
     targetUsed: target ? { min: target.min, max: target.max, currency: target.currency } : null,
     sample: {
