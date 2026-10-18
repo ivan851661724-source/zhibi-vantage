@@ -7,8 +7,9 @@
 // ============================================================
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
+const { DATA } = require('../core/paths.js');
 
-const COST_DB = path.join(__dirname, '..', 'data', 'cost.sqlite');
+const COST_DB = path.join(DATA, 'cost.sqlite');
 // 写死常量便于换价（¥/1M tokens）
 const PRICE = { inMiss: 1.0, inHit: 0.02, out: 2.0 };
 

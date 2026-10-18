@@ -9,34 +9,57 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAlerts, markAlertsRead } from '@/lib/api';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { alertsPush, alertsMarkAllRead, alertsMergeServer, fmtAlertWhen, useAlerts, type ZbAlert } from '@/lib/alerts';
+import { alertsPush, alertsMarkAllRead, startAlertsRefresh, fmtAlertWhen, useAlerts, type ZbAlert } from '@/lib/alerts';
 import { isDemoMode } from '@/lib/demo';
+import { captureSession, isSessionCurrent, SESSION_CHANGED_EVENT } from '@/lib/storage-scope';
 
 export function AlertsCenter() {
   const { state, subscribe } = useZhibiState();
   const { alerts, unread, refresh } = useAlerts();
   const [open, setOpen] = useState(false);
+  const [error, setError] = useState('');
+  const [sessionRevision, setSessionRevision] = useState(0);
+  const pollingRef = useRef<ReturnType<typeof startAlertsRefresh> | null>(null);
   // 服务端提醒 id 集（全部已读时回传后端；本地 complete/error 推送不在服务端，无需回传）
   const serverIdsRef = useRef<string[]>([]);
 
-  // 挂载：拉服务端站内信合并（演示模式跳过——demo-token 调后端会 401 误杀演示态）
+  // Account changes invalidate pending reads before starting the next account's inbox.
+  useEffect(() => {
+    const changed = () => {
+      pollingRef.current?.close();
+      serverIdsRef.current = [];
+      setSessionRevision(value => value + 1);
+      setError('');
+    };
+    const storage = (event: StorageEvent) => {
+      if (!event.key || event.key === 'zhibi_token' || event.key === 'ci_token') changed();
+    };
+    window.addEventListener('storage', storage);
+    window.addEventListener(SESSION_CHANGED_EVENT, changed);
+    return () => {
+      window.removeEventListener('storage', storage);
+      window.removeEventListener(SESSION_CHANGED_EVENT, changed);
+    };
+  }, []);
+
   useEffect(() => {
     if (isDemoMode()) return;
-    let alive = true;
-    getAlerts(50)
-      .then((res) => {
-        if (!alive || !Array.isArray(res.alerts)) return;
-        const { serverIds } = alertsMergeServer(res.alerts);
+    const polling = startAlertsRefresh({
+      read: () => getAlerts(50),
+      onUpdate: serverIds => {
         serverIdsRef.current = serverIds;
         refresh();
-      })
-      .catch(() => {
-        /* 后端未产 alert / 网络失败：纯前端 inbox 兜底（对齐旧版弱依赖语义） */
-      });
+      },
+      onError: failure => setError(failure ? '提醒暂时无法更新，已显示的提醒可能不是最新。' : ''),
+    });
+    pollingRef.current = polling;
     return () => {
-      alive = false;
+      polling.close();
+      if (pollingRef.current === polling) pollingRef.current = null;
     };
-  }, [refresh]);
+  }, [refresh, sessionRevision]);
+
+  useEffect(() => { if (open) void pollingRef.current?.request(); }, [open]);
 
   // SSE 接线：调研完成/失败 → 本地推送（复刻 app.js L775/L798）
   // track 经 ref 读取：订阅依赖里不放 state——否则每次 state 推送都会退订/重订 SSE（订阅抖动）
@@ -44,20 +67,20 @@ export function AlertsCenter() {
   useEffect(() => {
     trackRef.current = (state && state.track) || '赛道';
   }, [state]);
-  useEffect(
-    () =>
-      subscribe((evt) => {
+  useEffect(() => {
+    const session = captureSession();
+    return subscribe((evt) => {
+        if (!isSessionCurrent(session)) return;
         if (evt.type === 'discover_complete') {
-          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${trackRef.current}」竞争品牌材料已整理完成，请前往工作台处理。` });
+          alertsPush({ type: 'complete', title: '调研已就绪', body: `「${trackRef.current}」竞争品牌材料已整理完成，请前往工作台处理。` }, session);
           refresh();
         } else if (evt.type === 'discover_error') {
           const msg = (evt.message as string | undefined) || '请稍后重试';
-          alertsPush({ type: 'error', title: '研究未完成', body: msg });
+          alertsPush({ type: 'error', title: '研究未完成', body: msg }, session);
           refresh();
         }
-      }),
-    [subscribe, refresh],
-  );
+      });
+  }, [subscribe, refresh, sessionRevision]);
 
   // Escape 关闭
   useEffect(() => {
@@ -74,7 +97,12 @@ export function AlertsCenter() {
     refresh();
     // 服务端同步已读（仅真实服务端 id；空数组后端会 400）
     const ids = serverIdsRef.current;
-    if (ids.length) markAlertsRead(ids).catch(() => {});
+    if (ids.length) {
+      const session = captureSession();
+      markAlertsRead(ids).then(() => {
+        if (isSessionCurrent(session)) void pollingRef.current?.request();
+      }).catch(() => { if (isSessionCurrent(session)) setError('已读状态尚未同步，请稍后重试。'); });
+    }
   }, [refresh]);
 
   return (
@@ -101,6 +129,7 @@ export function AlertsCenter() {
               <button className="alert-x" type="button" aria-label="关闭" onClick={() => setOpen(false)}>✕</button>
             </div>
             <div className="alert-list">
+              {error && <p className="hint" role="alert">{error} <button className="link-btn" type="button" onClick={() => void pollingRef.current?.request()}>重试</button></p>}
               {alerts.length === 0 ? (
                 <p className="alert-empty muted">暂无异动。竞争品牌发生价格、上新、渠道或口碑变化时，会出现在这里。</p>
               ) : (

@@ -18,13 +18,42 @@ async function version(ctx, req, res, url, p) {
 // ---------- /api/state（GET：全量派生状态） ----------
 async function state(ctx, req, res, url, p) {
   if (p !== '/api/state' || req.method !== 'GET') return false;
-  const s = ctx.loadState();
+  const privateView = url.searchParams.get('private_view') === '1';
+  let identity = null;
+  if (privateView) {
+    identity = ctx.resolveIdentity(req, ctx.config0);
+    if (!identity || identity.error || identity.ghost || !identity.tenantId || !identity.userId) {
+      ctx.sendJSON(res, 403, { error: 'PRIVATE_VIEW_UNAVAILABLE', message: '当前身份不支持私有视图，请重新登录。' }); return true;
+    }
+  }
+  const loaded = ctx.loadState();
+  // Existing field builders may mutate returned objects (e.g. soft quarantine).
+  // Private projection must never share mutable references with the public state.
+  const s = privateView && loaded ? JSON.parse(JSON.stringify(loaded)) : loaded;
   if (s) {
     if (!Array.isArray(s.excluded)) s.excluded = [];
     s.whiteSpace = ctx.computeWhiteSpace(s);
     s.progress = { total: s.competitors.length, done: s.competitors.filter(c => c.status === 'done').length };
     s.marketCurrency = ctx.marketCurrency(s.intent && s.intent.regions);
     ctx.decorateState(s);
+    if (privateView) {
+      for (const comp of s.competitors) {
+        const own = ctx.correctionOverlay.getCorrections(identity.tenantId, identity.userId, comp.id);
+        if (!own.length) continue;
+        if (own.some(c => /^price/.test(c.field || ''))) comp.priceField = ctx.getPriceField(comp, own);
+        if (own.some(c => c.field === 'launchCadence')) comp.launchCadence = ctx.getLaunchCadence(comp, own);
+        if (own.some(c => /^reviews\./.test(c.field || ''))) comp.reviewField = ctx.getReviewField(comp, own);
+        for (const prefix of ['channels', 'categories']) {
+          const keys = new Set(own.filter(c => (c.field || '').startsWith(prefix + '.')).map(c => c.field.slice(prefix.length + 1)));
+          const target = prefix === 'channels' ? 'channelFields' : 'categoryFields';
+          for (const key of keys) {
+            if (!key || ['__proto__', 'constructor', 'prototype'].includes(key)) continue;
+            comp[target] = comp[target] || {};
+            comp[target][key] = prefix === 'channels' ? ctx.getChannelField(comp, own, key) : ctx.getCategoryField(comp, own, key);
+          }
+        }
+      }
+    }
   }
   ctx.sendJSON(res, 200, s || { track: null });
   return true;

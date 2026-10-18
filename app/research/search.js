@@ -10,12 +10,29 @@ const ProviderHealth = require('../services/providers/health.js');
 const SourceFusion = require('../lib/source-fusion.js');
 const metering = require('../services/metering.js');
 const cost = require('../services/cost.js');
+// M4 任务 C：ExternalCallLedger（03 §20）与成本口径——只增不改既有计费/缓存语义
+const CallLedger = require('../services/call-ledger.js');
+const CostProfile = require('../services/cost-profile.js');
 const { bochaSearch, braveSearch, getSerperPool, normalizeSerperKeys, serperSearchWithFailover, tavilySearch, wigoloSearch } = require('../services/providers/search.js');
 const { curTenantId } = require('../core/als.js'); // B-1（2026-09-12 任务书）：拆分时遗漏导入，正文 L64 调用会 ReferenceError
 
 // 搜索单次成本（¥/次，成本埋点口径）：按 Serper $0.30/1k 折算 ≈ ¥0.0022/次；
 // 各源同量级，混源时不逐一区分（成本归因精确到调用层即可，换价改此常量或 ZB_SEARCH_COST_YUAN）。
 const SEARCH_COST_YUAN = Number(process.env.ZB_SEARCH_COST_YUAN) || 0.002;
+
+// ---- M4-C ExternalCallLedger（03 §20 / 07 §17 paid calls 100% 入账）----
+// 旁路观测：账本校验/存储失败只留 warn，绝不影响搜索主链（宁可缺行不阻断业务）。
+function _ledgerRecord(entry) {
+  try {
+    CallLedger.recordCall(entry);
+  } catch (e) {
+    try { Logger.warn('call_ledger_write_failed', { error: String((e && e.message) || e).slice(0, 120) }); } catch (e2) {}
+  }
+}
+// 触发归因映射：本层无显式 trigger 上下文，按既有 kind 语义映射到 03 §20 trigger 词表
+// （serp-discover=发现扇出→'discovery'；其余 probe 属调研链路人工触发→'manual'）。
+// 非新业务枚举，只是归因映射；monitoring 线不走本层（其 trigger 由 job.trigger 直录）。
+function _triggerOf(kind) { return kind === 'serp-discover' ? 'discovery' : 'manual'; }
 
 // 搜索适配层：根据 config.search.provider 选择搜索源，统一返回 {results:[{title,url,content}]}
 // T1-1：每次外部搜索都经 metering 闸门并计费。searchProvider 委托给各 provider（tavily/serper/brave/bocha），
@@ -76,6 +93,9 @@ async function searchProvider(query, config, gl, kind) {
     const hit = Cache.get(ckind, cacheKey);
     if (hit) {
       // Phase 1 可观测性：缓存命中单列（不计入外部调用次数）
+      // M4-C ledger 口径选择：缓存命中**不记**账本行——03 §20 限定账本覆盖"外部可计费/
+      // 有配额成本的调用"，命中既无外部调用也无配额消耗（与下方 metering 免配额口径一致），
+      // 记行反而虚增调用次数；cache_hit 列保留给"真实外呼但内容来自缓存"的形态。
       try {
         const T = require('../observability/telemetry.js');
         T.recordSourceCall({ source: 'cache', kind: ckind, status: 'cache', resultCount: (hit.results || []).length, durationMs: 0 });
@@ -117,7 +137,8 @@ async function searchProvider(query, config, gl, kind) {
   }
   let lastErr = null;
   const _s0 = Date.now();
-  for (const name of chain) {
+  for (let _ci = 0; _ci < chain.length; _ci++) { // M4-C：_ci=降级链位置（fallback_depth 0 基）
+    const name = chain[_ci];
     const _pT0 = Date.now();
     try {
       const result = await providerCall(name, query, config, gl);
@@ -131,6 +152,17 @@ async function searchProvider(query, config, gl, kind) {
       // 成本埋点（抓取需求 §2.1 欠账）：搜索成功记一条 kind=search，供日预算/归因报表；
       // wigolo 自托管无边际成本 → 记 0（调用次数照常计，供配额与可观测性）
       if (tid) cost.record({ tenantId: tid, kind: 'search', fieldKey: ckind, calls: 1, costYuan: name === 'wigolo' ? 0 : SEARCH_COST_YUAN });
+      // M4-C 账本：真实 provider 调用成功行。wigolo 自托管按 profile 记 0，付费源按工程估算
+      // 口径（cp-eng-v0）记 0.002/次；降级链位置以 fallback_depth（0 基）/attempt_no（1 基）记录。
+      _ledgerRecord({
+        tenantId: tid || undefined, capability: 'web_search', provider: name, operation: ckind,
+        trigger: _triggerOf(ckind), costProfileVersion: CostProfile.VERSION,
+        requestUnits: 1,
+        estimatedCost: CostProfile.estimate({ provider: name, operation: 'search', requestUnits: 1 }).estimatedCost,
+        cacheHit: false, canonicalReuseHit: false, fallbackDepth: _ci, attemptNo: _ci + 1,
+        startedAt: _pT0, completedAt: Date.now(),
+        outcome: 'success', errorCode: null,
+      });
       return result;
     } catch (e) {
       lastErr = e;
@@ -138,6 +170,16 @@ async function searchProvider(query, config, gl, kind) {
       _srcCall(name, 'error', 0, _pT0, e && e.message);
       try { Logger.info('search-call', { provider: name, kind: ckind, status: 'fail', durationMs: Date.now() - _s0, err: String(e.message || '').slice(0, 80), q: String(query).slice(0, 60) }); } catch (e2) {}
       // 无 key（配置缺失）与真实失败都继续尝试下一候选
+      // M4-C 账本：失败/回退 attempt 必有行且成本不伪造——失败时用量/受理未知，
+      // estimated_cost=null（绝不填 0），error_code 留真（NO_*_KEY / *_5xx / 网络错误等）。
+      _ledgerRecord({
+        tenantId: tid || undefined, capability: 'web_search', provider: name, operation: ckind,
+        trigger: _triggerOf(ckind), costProfileVersion: CostProfile.VERSION,
+        requestUnits: null, estimatedCost: null,
+        cacheHit: false, canonicalReuseHit: false, fallbackDepth: _ci, attemptNo: _ci + 1,
+        startedAt: _pT0, completedAt: Date.now(),
+        outcome: 'failed', errorCode: String((e && e.message) || e).slice(0, 64) || null,
+      });
     }
   }
   // 全失败：按原计费口径（5xx 计、网络失败/无 key 不计）并抛最后错误
@@ -169,13 +211,33 @@ async function multiSourceSearch(query, config, gl, kind) {
   if (!alt) return primary; // 单源，无法融合
 
   let altResults = null;
+  const _fT0 = Date.now();
   try {
     altResults = await providerCall(alt, query, config, gl);
     ProviderHealth.recordOk(alt);
     const tidF = curTenantId();
     if (tidF) cost.record({ tenantId: tidF, kind: 'search', fieldKey: 'fusion', calls: 1, costYuan: SEARCH_COST_YUAN });
+    // M4-C 账本：融合备用源同样是真实付费调用，同样入账（独立并行源，非降级链 → depth 0）
+    _ledgerRecord({
+      tenantId: tidF || undefined, capability: 'web_search', provider: alt, operation: kind || 'serp-probe',
+      trigger: _triggerOf(kind), costProfileVersion: CostProfile.VERSION,
+      requestUnits: 1,
+      estimatedCost: CostProfile.estimate({ provider: alt, operation: 'search', requestUnits: 1 }).estimatedCost,
+      cacheHit: false, canonicalReuseHit: false, fallbackDepth: 0, attemptNo: 1,
+      startedAt: _fT0, completedAt: Date.now(),
+      outcome: 'success', errorCode: null,
+    });
   } catch (e) {
     ProviderHealth.recordFail(alt, e);
+    // M4-C 账本：备用源失败行（成本未知 → null）
+    _ledgerRecord({
+      tenantId: curTenantId() || undefined, capability: 'web_search', provider: alt, operation: kind || 'serp-probe',
+      trigger: _triggerOf(kind), costProfileVersion: CostProfile.VERSION,
+      requestUnits: null, estimatedCost: null,
+      cacheHit: false, canonicalReuseHit: false, fallbackDepth: 0, attemptNo: 1,
+      startedAt: _fT0, completedAt: Date.now(),
+      outcome: 'failed', errorCode: String((e && e.message) || e).slice(0, 64) || null,
+    });
     return primary; // 备用源失败：不影响主结果，主源结论照常返回
   }
 

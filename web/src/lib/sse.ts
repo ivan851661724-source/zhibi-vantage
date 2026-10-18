@@ -25,13 +25,15 @@ export function connectStream(opts: {
 }): SseHandle {
   const { onEvent, onChange } = opts;
 
-  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+  if (typeof window === 'undefined') return { close: () => {} };
+  if (typeof EventSource === 'undefined') {
     // SSR / 极旧浏览器兜底：15s 轮询（对齐旧版 fall through to interval）
     const timer = window.setInterval(onChange, 15000);
     return { close: () => window.clearInterval(timer) };
   }
 
   let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
   const clearFallback = () => {
     if (fallbackTimer) {
       clearInterval(fallbackTimer);
@@ -47,9 +49,14 @@ export function connectStream(opts: {
   }
   const es = new EventSource('/api/stream?token=' + encodeURIComponent(token));
 
-  es.onopen = () => clearFallback();
+  es.onopen = () => {
+    if (closed) return;
+    clearFallback();
+    onChange(); // A replay buffer is not authoritative: rebuild from REST after every reconnect.
+  };
 
   es.onmessage = (ev: MessageEvent<string>) => {
+    if (closed) return;
     let evt: SseEvent | null = null;
     try {
       evt = ev.data ? (JSON.parse(ev.data) as SseEvent) : null;
@@ -59,18 +66,19 @@ export function connectStream(opts: {
     // typed 事件按类型分发；change → 触发拉取（对齐旧版 onmessage 逻辑）
     if (evt && evt.type && evt.type !== 'change') {
       onEvent(evt);
-      return;
     }
     onChange();
   };
 
   es.onerror = () => {
+    if (closed) return;
     // 断线兜底：15s 轮询保证状态仍可见（EventSource 自动重连期间）
     if (!fallbackTimer) fallbackTimer = setInterval(onChange, 15000);
   };
 
   return {
     close: () => {
+      closed = true;
       clearFallback();
       es.close();
     },

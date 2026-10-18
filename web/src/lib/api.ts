@@ -4,6 +4,7 @@
 'use client';
 
 import { exitDemo } from '@/lib/demo';
+import { notifySessionChanged } from '@/lib/storage-scope';
 
 const TOKEN_KEY = 'zhibi_token';
 const LEGACY_TOKEN_KEY = 'ci_token'; // 兼容旧前端（行为等价，防老用户被登出）
@@ -24,6 +25,7 @@ export function setToken(token: string): void {
   } catch {
     /* localStorage 不可用时静默（隐私模式等） */
   }
+  notifySessionChanged();
 }
 
 export function clearToken(): void {
@@ -35,6 +37,7 @@ export function clearToken(): void {
   }
   // 退出登录同时退出演示模式（?demo=1 的 sessionStorage 标记），防止下次进面板仍命中 mock 态
   exitDemo();
+  notifySessionChanged();
 }
 
 /** 后端错误模型（docs/02 §1.3）：{ error: 机器码, message: 人类可读 } */
@@ -67,6 +70,10 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
   if (token) headers.Authorization = 'Bearer ' + token;
 
   const res = await fetch(url, { ...opts, headers });
+  const assertSession = () => {
+    if (getToken() !== token) throw new Error('登录账号已变化，请重新操作');
+  };
+  assertSession();
 
   if (!res.ok) {
     let body: ApiErrorBody | null = null;
@@ -75,6 +82,7 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
     } catch {
       body = null;
     }
+    assertSession();
     // 401 仅在鉴权失败时清 token 跳登录。注意后端业务错误也可能用 401
     // （如 discover 的 NO_KEYS——密钥未配置，docs/architecture/02_现行API契约.md），不能误杀会话。
     const code = body && body.error;
@@ -93,6 +101,7 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
     return {} as T;
   }
   const text = await res.text();
+  assertSession();
   if (!text) return {} as T;
   try {
     return JSON.parse(text) as T;
@@ -107,6 +116,10 @@ export function apiGet<T>(url: string): Promise<T> {
 
 export function apiPost<T>(url: string, body?: unknown): Promise<T> {
   return request<T>(url, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
+}
+
+export function apiPut<T>(url: string, body: unknown): Promise<T> {
+  return request<T>(url, { method: 'PUT', body: JSON.stringify(body) });
 }
 
 // ---------- 账号（public，docs/02 §2.1） ----------

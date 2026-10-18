@@ -16,6 +16,7 @@ const Diff = require('../../research/price-diff.js');
 const FactStore = require('../../research/fact-store.js');
 const EvidenceStore = require('../../research/evidence-store.js');
 const Snapshot = require('../../research/source-snapshot.js');
+const { publicObject } = require('./intelligence-projection.js');
 
 // P0-1：外部传入 id 的统一格式校验——非法（../ 穿越/URL 编码穿越/Windows ..\ /
 // 盘符/绝对路径/任何路径分隔符）→ 400 INVALID_ID；合法但不存在由存储层返回
@@ -28,10 +29,7 @@ function invalidIdResponse(ctx, res) {
 // 保留 Snapshot ID / content_hash / collector_version / source_status / observed_at
 // 等溯源信息。存储层 raw_payload_ref 原样保留（内部 raw 读回不受影响）。
 function publicSnapshot(s) {
-  if (!s || typeof s !== 'object') return s;
-  const c = Object.assign({}, s);
-  delete c.raw_payload_ref;
-  return c;
+  return publicObject(s);
 }
 
 // ---------- 价格区间展示派生（2026-10-08 P1 下游整改） ----------
@@ -174,7 +172,7 @@ async function recentChanges(ctx, req, res, url, p) {
 
 // ---------- GET /api/demo/event-detail?id=evt_xxx ----------
 // 事件详情：Event → Diff → Fact(×2) → Evidence(×N) → Snapshot 全链装配。
-// 任一环节缺失按诚实降级（该段返回 null + reason），绝不伪造补齐。
+// 任一环节缺失或范围矛盾按既有形状降级（null / 数组省略），绝不伪造补齐。
 async function eventDetail(ctx, req, res, url, p) {
   if (p !== '/api/demo/event-detail' || req.method !== 'GET') return false;
   const tenantId = als.getTenantCtx();
@@ -183,47 +181,75 @@ async function eventDetail(ctx, req, res, url, p) {
   if (!id) return ctx.sendJSON(res, 400, { error: 'MISSING_ID', message: '缺少事件 id。' });
   if (!isSafeId(id)) return invalidIdResponse(ctx, res);
   const event = DomainEvent.getEventById(tenantId, id);
-  if (!event) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '事件不存在。' });
-  const diff = Diff.getDiffById(tenantId, event.diff_id);
-  const oldFact = FactStore.getFactById(tenantId, event.old_fact_id);
-  const newFact = FactStore.getFactById(tenantId, event.new_fact_id);
-  // P2：Fact 的 provenance.snapshots 继承 Evidence 快照引用（内含 raw_payload_ref 内部
-  // 路径），出 API 前统一净化——溯源 id/hash/version 全保留，服务器文件路径不出网。
-  const pubFact = (f) => !f || !f.provenance || !Array.isArray(f.provenance.snapshots)
-    ? f
-    : Object.assign({}, f, { provenance: { evidence: f.provenance.evidence, snapshots: f.provenance.snapshots.map(publicSnapshot) } });
-  const evidences = [];
-  for (const eid of [].concat(event.old_evidence_ids || [], event.new_evidence_ids || [])) {
-    const ev = EvidenceStore.getEvidenceById(tenantId, eid);
-    if (ev && !evidences.some(x => x.evidence_id === ev.evidence_id)) {
-      // P2：Evidence 的 provenance.snapshots[] 内含 raw_payload_ref.path（内部路径），过滤后出 API
-      evidences.push(Object.assign({}, ev, {
-        provenance: ev.provenance && ev.provenance.snapshots
-          ? { snapshots: ev.provenance.snapshots.map(publicSnapshot) }
-          : ev.provenance,
-      }));
-    }
+  // 文件目录的 sanitizeNs 不是身份检查；别名碰撞及被替换文件均须在投影边界拒绝。
+  if (!event || event.event_id !== id || event.tenant?.tenant_id !== tenantId) {
+    return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '事件不存在。' });
   }
-  const snapshots = [];
-  for (const sid of [].concat(event.old_snapshot_ids || [], event.new_snapshot_ids || [])) {
-    const sm = Snapshot.getById(tenantId, sid);
-    if (sm && !snapshots.some(x => x.snapshot_id === sm.snapshot_id)) {
-      snapshots.push(publicSnapshot({
+  const project = event.tenant.project_ref ?? null;
+  const scoped = (value, key, ref) => isSafeId(ref) && value && value[key] === ref
+    && value.tenant?.tenant_id === tenantId && (value.tenant.project_ref ?? null) === project ? value : null;
+  const ids = value => Array.isArray(value) && value.every(isSafeId) ? value : [];
+  const sameIds = (a, b) => Array.isArray(a) && Array.isArray(b)
+    && a.every(isSafeId) && b.every(isSafeId)
+    && new Set(a).size === new Set(b).size && a.every(x => b.includes(x));
+  let diff = scoped(Diff.getDiffById(tenantId, event.diff_id), 'diff_id', event.diff_id);
+  if (diff && !['old', 'new'].every(side => diff[side + '_fact_id'] === event[side + '_fact_id']
+    && sameIds(diff[side + '_evidence_ids'], event[side + '_evidence_ids'])
+    && sameIds(diff[side + '_snapshot_ids'], event[side + '_snapshot_ids']))) diff = null;
+  const facts = {};
+  for (const side of ['old', 'new']) {
+    const ref = event[side + '_fact_id'];
+    const f = scoped(FactStore.getFactById(tenantId, ref), 'fact_id', ref);
+    facts[side] = f && sameIds(f.evidence_ids, event[side + '_evidence_ids'])
+      && sameIds(f.source_snapshot_ids, event[side + '_snapshot_ids']) ? f : null;
+  }
+  const evidenceMap = new Map(), snapshotMap = new Map();
+  for (const eid of new Set([...ids(event.old_evidence_ids), ...ids(event.new_evidence_ids)])) {
+    const ev = scoped(EvidenceStore.getEvidenceById(tenantId, eid), 'evidence_id', eid);
+    // 一个 Evidence 可引用目录及币种等多张快照，但都必须属于相应 Event 观察侧。
+    if (ev && Array.isArray(ev.source_snapshot_ids) && ev.source_snapshot_ids.length
+      && ev.source_snapshot_ids.every(isSafeId)
+      && ['old', 'new'].every(side => !ids(event[side + '_evidence_ids']).includes(eid)
+        || ev.source_snapshot_ids.every(sid => ids(event[side + '_snapshot_ids']).includes(sid)))) evidenceMap.set(eid, ev);
+  }
+  for (const sid of new Set([...ids(event.old_snapshot_ids), ...ids(event.new_snapshot_ids)])) {
+    const sm = scoped(Snapshot.getById(tenantId, sid), 'snapshot_id', sid);
+    if (sm) {
+      snapshotMap.set(sid, publicSnapshot({
         snapshot_id: sm.snapshot_id, capability: sm.capability, provider: sm.provider,
         source_url: sm.source_url, source_status: sm.source_status, observed_at: sm.observed_at,
         partial_scan: sm.partial_scan == null ? null : Boolean(sm.partial_scan),
         content_hash: sm.content_hash, collector_version: sm.collector_version,
-        raw_payload_ref: sm.raw_payload_ref || null,
       }));
     }
   }
-  ctx.sendJSON(res, 200, {
-    event: Object.assign({}, event, { display: priceChangeView(event) }),
-    diff,
-    facts: { old: pubFact(oldFact), new: pubFact(newFact) },
-    evidences,
-    snapshots,
-  });
+  // provenance 是历史内嵌副本，不能绕过以上读取边界。仅重建已知关联的安全元数据，
+  // 不透传内嵌的任意对象，也不读取 raw 或声称本端点做了实时回放健康检查。
+  const projectProvenance = (record, provenance) => {
+    if (!record) return null;
+    const result = { ...record };
+    if (Object.prototype.hasOwnProperty.call(record, 'provenance')) result.provenance = provenance;
+    return result;
+  };
+  const snapshotRefs = record => ids(record.source_snapshot_ids).map(sid => snapshotMap.get(sid)).filter(Boolean);
+  const pubFact = f => {
+    if (!f) return null;
+    const ev = evidenceMap.get(f.provenance?.evidence?.evidence_id);
+    return projectProvenance(f, {
+      evidence: ev && ids(f.evidence_ids).includes(ev.evidence_id) ? {
+        evidence_id: ev.evidence_id, evidence_status: ev.evidence_status,
+        parser_version: ev.parser_version, extractor_version: ev.extractor_version,
+      } : null,
+      snapshots: snapshotRefs(f),
+    });
+  };
+  ctx.sendJSON(res, 200, publicObject({
+    event: { ...projectProvenance(event, { diff: diff ? { diff_id: diff.diff_id, status: diff.status, reason: diff.reason || null } : null }), display: priceChangeView(event) },
+    diff: projectProvenance(diff, {}),
+    facts: { old: pubFact(facts.old), new: pubFact(facts.new) },
+    evidences: [...evidenceMap.values()].map(ev => projectProvenance(ev, { snapshots: snapshotRefs(ev) })),
+    snapshots: [...snapshotMap.values()],
+  }));
   return true;
 }
 
@@ -231,29 +257,7 @@ async function eventDetail(ctx, req, res, url, p) {
 // 证据详情（「查看证据」Modal 数据源）：Evidence + 快照 provenance。
 async function evidenceDetail(ctx, req, res, url, p) {
   if (p !== '/api/demo/evidence-detail' || req.method !== 'GET') return false;
-  const tenantId = als.getTenantCtx();
-  if (!tenantId) return ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' });
-  const id = url && url.searchParams && url.searchParams.get('id');
-  if (!id) return ctx.sendJSON(res, 400, { error: 'MISSING_ID', message: '缺少证据 id。' });
-  if (!isSafeId(id)) return invalidIdResponse(ctx, res);
-  const evRaw = EvidenceStore.getEvidenceById(tenantId, id);
-  if (!evRaw) return ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '证据不存在。' });
-  // Phase 1 可观测性：evidence_opened 行为事件（只记脱敏标识与时间，不记证据内容）
-  try { require('../../observability/telemetry.js').recordEvent({ eventType: 'evidence_opened', tenantId, objectType: 'evidence', objectId: id }); } catch (e) { /* 观测失败不影响主链路 */ }
-  // P2：剥离 raw_payload_ref（服务器内部文件路径），溯源字段全保留；
-  // source_url 不落库，按引用快照实时解析（Snapshot.getById），快照缺失时如实给 null。
-  const ev = Object.assign({}, evRaw, {
-    provenance: evRaw.provenance && evRaw.provenance.snapshots
-      ? {
-          snapshots: evRaw.provenance.snapshots.map(publicSnapshot).map(s => {
-            const meta = s && s.snapshot_id ? Snapshot.getById(tenantId, s.snapshot_id) : null;
-            return Object.assign({}, s, { source_url: meta && meta.source_url || null });
-          }),
-        }
-      : evRaw.provenance,
-  });
-  ctx.sendJSON(res, 200, { evidence: ev, snapshots: ev.provenance && ev.provenance.snapshots || [] });
-  return true;
+  return require('./intelligence.js').evidenceDetail(ctx, req, res, url, p);
 }
 
 // ---------- POST /api/demo/seed ----------

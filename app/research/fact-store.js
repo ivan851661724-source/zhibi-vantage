@@ -48,7 +48,7 @@ const SCHEMA_VERSION = 1;
 const FACT_TYPE = 'public_product_price';
 const CLAIM_FIELD = 'product.price';
 const CLAIM_SCOPE = 'public_price_observation';
-const DERIVATION_VERSION = 'fact-extract-1'; // 本层实际派生版本（02 原则 7）
+const DERIVATION_VERSION = 'fact-extract-2'; // 增量继承 availability / 双快照币种；旧文件不改写
 
 function sha256hex(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 

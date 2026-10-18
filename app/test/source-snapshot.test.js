@@ -22,9 +22,7 @@ delete process.env.ZB_SNAPSHOT_MAX_BYTES;
 // net.js 合规门（fetch-gate）同域节流在 require 时读环境变量：测试内同 host 串行用例多，
 // 不调小则每例多等 3s。必须在 require 业务模块之前设置。
 process.env.ZB_FETCH_INTERVAL_MS = '1';
-// cache.js 硬编码 app/data/cache.sqlite（既有行为，不属本票改动范围）；测试期清残留防串场
-fs.mkdirSync(path.join(__dirname, '..', 'data'), { recursive: true });
-for (const suffix of ['', '-wal', '-shm']) fs.rmSync(path.join(__dirname, '..', 'data', 'cache.sqlite' + suffix), { force: true });
+// cache.js 已尊重 ZB_DATA_DIR；所有缓存与快照只进入 TMP，不触真实 app/data。
 
 const Snapshot = require('../research/source-snapshot.js');
 const net = require('../research/net.js');

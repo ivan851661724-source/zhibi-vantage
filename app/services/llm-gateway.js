@@ -16,6 +16,9 @@
 const crypto = require('crypto');
 const metering = require('./metering.js');
 const cost = require('./cost.js');
+// M4 任务 C：ExternalCallLedger（03 §20）与成本口径（05 §16/§19）——只增不改既有语义
+const CallLedger = require('./call-ledger.js');
+const CostProfile = require('./cost-profile.js');
 
 const TIMEOUT_MS = 45000;          // 45s（评审纪律：任何外部调用必须有界）
 const MAX_ATTEMPTS = 3;            // 首次 + 重试 2 次
@@ -50,6 +53,21 @@ function breakerOf(key) {
 function circuitOpen(b) { return b.openedAt > 0 && Date.now() - b.openedAt < BREAK_MS; }
 function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
 
+// M4 任务 C（03 §20）：每次外部 LLM 尝试入账 ExternalCallLedger。旁路观测——账本校验/
+// 存储失败只留 warn 日志，绝不影响主调用（07 §17 paid calls 100% 入账是目标，但账本
+// 故障时宁可缺行也不阻断业务；失败留 warn 供运维发现）。tenant 未知（匿名调用）时
+// 记账被拒（账本 tenant 非空），同样走此 warn 路径。
+function _ledgerRecord(entry) {
+  try {
+    CallLedger.recordCall(entry);
+  } catch (e) {
+    try {
+      const logger = require('./logger.js');
+      logger && logger.warn('call_ledger_write_failed', { error: String((e && e.message) || e).slice(0, 120) });
+    } catch (e2) { /* 日志不可用时静默（观测不阻断） */ }
+  }
+}
+
 // deadline 计时器从发请求一直活着到调用方读完正文：fetch 返回 Response 只代表响应头到达，
 // 正文可能仍在传输（llm-body 埋点即为此排查而设）。返回 { response, release }，
 // release 必须在正文读取结束后调用；计时器触发 → ctrl.abort() → 未完成的正文读取以
@@ -77,7 +95,8 @@ function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, th
 /**
  * llm.call(messages, opts) → Promise<object|string>
  * opts: { apiKey, model, json, temperature, tenantId, projectId, competitorId, fieldKey, baseUrl,
- *         timeoutMs, maxAttempts }
+ *         timeoutMs, maxAttempts, trigger }
+ *   trigger：ExternalCallLedger 归因（M4-C，可选；缺省记 'unknown'，不伪造触发来源）
  *   json:true → 解析对象；失败字段级降级返回 {}（不 throw）
  *   timeoutMs：覆盖默认 45s（大输出调用如 discover 枚举/harvest 传 90000，避免接近阈值触发重试翻倍）
  *   maxAttempts：覆盖默认 3（大输出调用传 2，重试 1 次即可）
@@ -171,6 +190,19 @@ async function call(messages, opts) {
           });
         }
         br.failures = 0; br.openedAt = 0;                   // 成功 → 复位该 key 的熔断计数
+        // M4-C 账本：成功 attempt 入账。request_units=usage tokens 总和、estimated 只来自
+        // cost profile（cp-eng-v0，与 cost.js 同源）；usage 缺失 → 两者为 null 不为 0。
+        _ledgerRecord({
+          tenantId: tid || undefined, projectId: o.projectId || null,
+          capability: 'llm_enrich', provider: 'llm', operation: 'chat_completions',
+          trigger: o.trigger || 'unknown', costProfileVersion: CostProfile.VERSION,
+          requestUnits: j.usage ? (j.usage.prompt_tokens || 0) + (j.usage.completion_tokens || 0) : null,
+          estimatedCost: j.usage ? CostProfile.estimate({ provider: 'llm', operation: 'chat_completions', requestUnits: j.usage }).estimatedCost : null,
+          cacheHit: !!(j.usage && (j.usage.prompt_cache_hit_tokens || 0) > 0),
+          canonicalReuseHit: false, fallbackDepth: 0, attemptNo: attempt + 1,
+          startedAt: _attemptStart, completedAt: Date.now(),
+          outcome: 'success', errorCode: null,
+        });
         _flushObs(0);                                        // 结局=成功：落盘本次全部尝试行（degraded=0）
         if (!o.json) return content;
         try { return JSON.parse(content); }
@@ -193,6 +225,18 @@ async function call(messages, opts) {
           errorCode: String((e && e.message) || e).slice(0, 64),
         });
       }
+      // M4-C 账本：失败/超时 attempt 同样入账（03 §20；07 §17）。usage 未知 →
+      // request_units/estimated_cost 为 null（绝不伪造 0）；outcome 留真（timeout/failed）。
+      _ledgerRecord({
+        tenantId: tid || undefined, projectId: o.projectId || null,
+        capability: 'llm_enrich', provider: 'llm', operation: 'chat_completions',
+        trigger: o.trigger || 'unknown', costProfileVersion: CostProfile.VERSION,
+        requestUnits: null, estimatedCost: null,
+        cacheHit: false, canonicalReuseHit: false, fallbackDepth: 0, attemptNo: attempt + 1,
+        startedAt: _attemptStart, completedAt: Date.now(),
+        outcome: e && e.name === 'AbortError' ? 'timeout' : 'failed',
+        errorCode: String((e && e.message) || e).slice(0, 64) || null,
+      });
       if (e && (e.message === 'ENRICH_QUOTA' || e.message === 'NO_LLM_KEY')) { _flushObs(0); throw e; } // 配额/无 key 不重试
       const m = e && /^DEEPSEEK_(\d{3})$/.exec(e.message);
       if (m && m[1] !== '429' && m[1] !== '408' && m[1][0] === '4') {

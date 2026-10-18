@@ -7,6 +7,12 @@ const path = require('path');
 
 const NODE = process.execPath;
 const testDir = path.join(__dirname, '..', 'test');
+// static-check runs two bounded 300s checks. R7 invokes that whole shell;
+// each parent needs room for its children plus setup/cleanup, not a 60s cutoff.
+const SUITE_TIMEOUT_MS = {
+  'static-check.test.js': 660000,
+  'observability-remediation.test.js': 780000,
+};
 // 容错：test 目录缺失（如部署包裁剪）时提示并按通过退出，而非 ENOENT 崩溃
 let files = [];
 try {
@@ -21,18 +27,16 @@ const failedFiles = [];
 for (const f of files) {
   const full = path.join(testDir, f);
   process.stdout.write('\n=== ' + f + ' ===\n');
+  const timeout = SUITE_TIMEOUT_MS[f] || 60000;
   try {
-    // 超时 300s：static-check / observability-remediation 内含子进程全量检查
-    // （R7 注入回归会再跑一遍 static-check.test），沙箱 spawn 拦截重试下可达 90s+，
-    // 60s 会把慢而正确的套件误杀为失败——放宽的是时限，不是任何断言。
-    const out = execFileSync(NODE, [full], { encoding: 'utf8', timeout: 300000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = execFileSync(NODE, [full], { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
     process.stdout.write(out);
   } catch (e) {
     failed++;
     failedFiles.push(f);
     if (e.stdout) process.stdout.write(e.stdout);
     if (e.stderr) process.stderr.write(e.stderr);
-    if (e.killed) process.stderr.write('(超时 60s 被杀)\n');
+    if (e.killed || e.code === 'ETIMEDOUT') process.stderr.write('(超时 ' + timeout / 1000 + 's 被杀)\n');
   }
 }
 

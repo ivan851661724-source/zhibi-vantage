@@ -55,6 +55,8 @@ for (const f of files) {
 
 // 已知误报白名单（函数名/变量名族，非密钥）——新增误报在此登记 sha256 前 12 位，勿放宽正则
 const WHITELIST_HASH_PREFIXES = [
+  'da26b0e61a84', // monitoring-queue.js: crypto.randomUUID（租约token生成函数名，非令牌值）
+  'b439f0ea6636', // storage-scope.ts: window.localStorage.getItem（代码标识符，非令牌值）
   'eb6127cff99d', // api-admin.js adminLogin（函数名）
   '5fcf23c18df8', // auth.test.js / product-events.test.js issueAdminToken（测试函数名）
   '28c7287fbe39', // demo-fixture.test.js 固定模拟凭据（LLM.call 已 stub，非真实密钥）

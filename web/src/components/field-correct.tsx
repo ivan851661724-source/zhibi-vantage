@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiPost } from '@/lib/api';
 import { toast } from '@/lib/toast';
 import { LABELS, lbl } from '@/lib/labels';
-import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useZhibiState, useStateOperation } from '@/hooks/use-zhibi-state';
 import type { Competitor, ZhibiState } from '@/types/state';
 
 // ---- 纠错类型选项（对齐后端 handlers/correction.js 的 *_TYPES 白名单） ----
@@ -74,31 +74,6 @@ interface FcResponse {
   reviewField?: unknown;
 }
 
-// 私有覆盖：把返回的「该用户私有值」叠加到本地卡片（复刻 applyPrivateOverride L3045-3055）
-function applyPrivateOverride(base: ZhibiState, s: FcResponse): ZhibiState {
-  const fc = s.correction;
-  const f = fc.field;
-  const competitors = (base.competitors || []).map((c) => {
-    if (c.id !== fc.competitorId) return c;
-    const next: Competitor = { ...c };
-    if (f.indexOf('channels.') === 0) {
-      next.channelFields = { ...(next.channelFields || {}) };
-      (next.channelFields as Record<string, unknown>)[f.split('.')[1]] = s.channelField;
-    } else if (f.indexOf('categories.') === 0) {
-      next.categoryFields = { ...(next.categoryFields as Record<string, unknown>) };
-      (next.categoryFields as Record<string, unknown>)[f.split('.')[1]] = s.categoryField;
-    } else if (f.indexOf('price') === 0) {
-      next.priceField = s.priceField as Competitor['priceField'];
-    } else if (f === 'launchCadence') {
-      next.launchCadence = s.launchCadence;
-    } else if (f.indexOf('reviews.') === 0) {
-      next.reviewField = s.reviewField as Competitor['reviewField'];
-    }
-    return next;
-  });
-  return { ...base, competitors };
-}
-
 interface FieldCorrectModalProps {
   competitorId: string;
   initialField?: string;
@@ -107,6 +82,7 @@ interface FieldCorrectModalProps {
 
 export function FieldCorrectModal({ competitorId, initialField, onClose }: FieldCorrectModalProps) {
   const { state, patch } = useZhibiState();
+  const beginOperation = useStateOperation();
   const comp = useMemo(
     () => ((state && state.competitors) || []).find((x) => x.id === competitorId),
     [state, competitorId],
@@ -147,6 +123,8 @@ export function FieldCorrectModal({ competitorId, initialField, onClose }: Field
 
   async function submit() {
     if (!comp) return;
+    const operation = beginOperation();
+    if (!operation.isCurrent()) return;
     const body: Record<string, unknown> = { id: competitorId, field, type, text: text.trim(), source: source.trim() };
     if (isScalar) {
       if (type === 'wrong-value') {
@@ -191,9 +169,10 @@ export function FieldCorrectModal({ competitorId, initialField, onClose }: Field
     setSending(true);
     try {
       const s = await apiPost<FcResponse>('/api/field-correct', body);
-      if (s.state) patch(applyPrivateOverride(s.state, s));
+      if (!operation.isCurrent()) return;
+      if (s.state && !patch(s.state, operation)) return;
       onClose();
-      // 待复核：不直接改写可信结论，仅记录（私有覆盖仅该用户可见）
+      // Fresh private_view REST applies existing backend correction/quarantine rules to current data.
       if (s.status === 'pending') {
         toast(
           s.private
@@ -224,9 +203,9 @@ export function FieldCorrectModal({ competitorId, initialField, onClose }: Field
       if (s.private) toast('你的私有覆盖已记录 · ' + msg + '（仅你可见，不影响系统结论）');
       else toast(msg);
     } catch (e) {
-      setStatus('提交失败：' + (e instanceof Error ? e.message : String(e)));
+      if (operation.isCurrent()) setStatus('提交失败：' + (e instanceof Error ? e.message : String(e)));
     } finally {
-      setSending(false);
+      if (operation.isCurrent()) setSending(false);
     }
   }
 

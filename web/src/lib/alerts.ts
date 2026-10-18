@@ -3,8 +3,10 @@
 // 双来源合并：
 //   · 本地推送：SSE discover_complete / discover_error 事件 → push（localStorage 持久）
 //   · 服务端：GET /api/alerts（雷达 sweep 检测到竞品动作落盘的站内信）→ mergeServer 按 id 去重合并
-// 键名 zb_alerts_v1 与旧前端一致：同浏览器下已有提醒无缝继承。
+// 无归属旧键保留但不读取；每个已识别账号独立缓存。
 import { useCallback, useEffect, useState } from 'react';
+import { captureSession, isSessionCurrent, SESSION_CHANGED_EVENT, type BrowserSession } from '@/lib/storage-scope';
+import { createStateRefresh } from '@/lib/state-refresh';
 
 const ALERT_KEY = 'zb_alerts_v1';
 const MAX_ALERTS = 100;
@@ -20,17 +22,20 @@ export interface ZbAlert {
   read: boolean;
 }
 
-function load(): ZbAlert[] {
+function load(session = captureSession()): ZbAlert[] {
   try {
-    return JSON.parse(localStorage.getItem(ALERT_KEY) || '[]') as ZbAlert[];
+    if (!session.scope || !isSessionCurrent(session)) return [];
+    const list: unknown = JSON.parse(localStorage.getItem(ALERT_KEY + ':' + session.scope) || '[]');
+    return Array.isArray(list) ? list as ZbAlert[] : [];
   } catch {
     return [];
   }
 }
 
-function persist(list: ZbAlert[]): void {
+function persist(list: ZbAlert[], session = captureSession()): void {
   try {
-    localStorage.setItem(ALERT_KEY, JSON.stringify(list));
+    if (!session.scope || !isSessionCurrent(session)) return;
+    localStorage.setItem(ALERT_KEY + ':' + session.scope, JSON.stringify(list));
   } catch {
     /* 隐私模式等静默 */
   }
@@ -46,6 +51,10 @@ function normalizeServerAlert(x: Record<string, unknown>): ZbAlert {
     const moves = Array.isArray(x.moves) ? (x.moves as unknown[]).map(String).filter(Boolean) : [];
     title = name + ' 出现新的竞争动态';
     body = moves.length ? moves.join('；') : '雷达检测到该竞争品牌的新动态，请前往工作台查看。';
+  } else if (['price-change', 'price-discovered', 'product-launch', 'stockout'].includes(type)) {
+    const labels: Record<string, string> = { 'price-change': '价格变化', 'price-discovered': '首次观察到价格', 'product-launch': '商品动态', stockout: '库存变化' };
+    title = String(x.competitorName || '竞争品牌') + ' · ' + labels[type];
+    body = typeof x.text === 'string' ? x.text : body;
   }
   return {
     id: String(x.id || ''),
@@ -62,8 +71,9 @@ export function alertsLoad(): ZbAlert[] {
   return load();
 }
 
-export function alertsPush(a: { type: string; title: string; body?: string }): void {
-  const list = load();
+export function alertsPush(a: { type: string; title: string; body?: string }, session = captureSession()): void {
+  if (!isSessionCurrent(session)) return;
+  const list = load(session);
   list.unshift({
     id: 'al_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     ts: Date.now(),
@@ -71,27 +81,30 @@ export function alertsPush(a: { type: string; title: string; body?: string }): v
     ...a,
   });
   if (list.length > MAX_ALERTS) list.length = MAX_ALERTS;
-  persist(list);
+  persist(list, session);
 }
 
-/** 合并服务端提醒（按 id 去重，已读态以本地为准——旧版同语义）。返回本次合并的服务端 id 集 */
-export function alertsMergeServer(raw: unknown[]): { merged: number; serverIds: string[] } {
+/** 按 id 合并服务端提醒；已有条目的正文及已读态随服务端权威结果更新。返回服务端 id 集。 */
+export function alertsMergeServer(raw: unknown[], session: BrowserSession = captureSession()): { merged: number; serverIds: string[] } {
+  if (!isSessionCurrent(session) || !session.scope) return { merged: 0, serverIds: [] };
   if (!Array.isArray(raw) || !raw.length) return { merged: 0, serverIds: [] };
-  const list = load();
-  const ids = new Set(list.map((x) => x.id));
+  const list = load(session);
   let merged = 0;
   const serverIds: string[] = [];
   for (const item of raw.slice().reverse()) {
     const a = normalizeServerAlert((item || {}) as Record<string, unknown>);
     if (!a.id) continue;
     serverIds.push(a.id);
-    if (ids.has(a.id)) continue;
+    const index = list.findIndex(x => x.id === a.id);
+    if (index >= 0) {
+      list[index] = a;
+      continue;
+    }
     list.unshift(a);
-    ids.add(a.id);
     merged++;
   }
   if (list.length > MAX_ALERTS) list.length = MAX_ALERTS;
-  persist(list);
+  persist(list, session);
   return { merged, serverIds };
 }
 
@@ -107,6 +120,40 @@ export function alertsMarkAllRead(): ZbAlert[] {
 
 export function alertsUnreadCount(): number {
   return load().filter((x) => !x.read).length;
+}
+
+/** Visible tabs poll the existing inbox endpoint; reopening/reconnecting UI may request immediately. */
+export function startAlertsRefresh(opts: {
+  read: () => Promise<{ alerts: unknown[] }>;
+  onUpdate: (serverIds: string[]) => void;
+  onError: (error: Error | null) => void;
+}) {
+  const session = captureSession();
+  if (typeof window === 'undefined' || !session.scope || session.scope === 'demo') return { request: () => Promise.resolve(), close: () => {} };
+  const worker = createStateRefresh({
+    read: opts.read,
+    apply: result => {
+      if (!Array.isArray(result.alerts)) throw new Error('提醒响应格式不完整');
+      const merged = alertsMergeServer(result.alerts, session);
+      opts.onUpdate(merged.serverIds);
+    },
+    onError: opts.onError,
+    onSettled: () => {},
+    isCurrent: () => isSessionCurrent(session),
+  });
+  const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+  const timer = window.setInterval(() => { if (visible()) void worker.request(); }, 30000);
+  const onVisibility = () => { if (visible()) void worker.request(); };
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility);
+  void worker.request();
+  return {
+    request: worker.request,
+    close: () => {
+      worker.close();
+      window.clearInterval(timer);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility);
+    },
+  };
 }
 
 /** 相对时间（移植 alerts.js fmtWhen；兼容 ts/at 两种时间字段） */
@@ -136,7 +183,11 @@ export function useAlerts(): {
     refresh();
     const onStorage = () => refresh();
     window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
+    window.addEventListener(SESSION_CHANGED_EVENT, onStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener(SESSION_CHANGED_EVENT, onStorage);
+    };
   }, [refresh]);
   const unread = alerts.filter((x) => !x.read).length;
   return { alerts, unread, refresh };

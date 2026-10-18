@@ -1,81 +1,103 @@
 'use strict';
-// R4 每日邮件摘要单测：无变化不发 / 有变化一封汇总 / 未配置通道静默跳过
-// （watch-store/digest-store 等按 ZB_DATA_DIR 隔离——必须先设目录再 require 业务模块，
-//   否则会写进源码树 data/；alerts 存储硬编码 __dirname/../data，同样先清残留）
-const assert = require('node:assert');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-process.env.ZB_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-digest-test-'));
-fs.mkdirSync(process.env.ZB_DATA_DIR, { recursive: true });
-try { fs.rmSync(path.join(__dirname, '..', 'data', 'alerts'), { recursive: true, force: true }); } catch (e) {}
-const { buildDigestText, runDigest } = require('../research/digest.js');
-
-let passed = 0, failed = 0;
-function t(name, fn) {
-  try { fn(); passed++; console.log('  ok - ' + name); }
-  catch (e) { failed++; console.error('  FAIL - ' + name + ' :: ' + e.message); }
-}
-const nowIso = new Date().toISOString();
-const oldIso = new Date(Date.now() - 48 * 3600 * 1000).toISOString(); // 48h 前（窗口外）
-
-t('无变化（24h 内无预警）→ 正文为 null → 不发', () => {
-  assert.equal(buildDigestText([]), null);
-  assert.equal(buildDigestText([{ at: oldIso, type: 'price-change', text: '降价' }]), null);
-});
-
-t('有变价 → 一封汇总，含 PRD 验收格式', () => {
-  const text = buildDigestText([
-    { at: nowIso, type: 'price-change', projectId: 'p1', track: '定制手办', competitorName: 'A 品牌', text: '降价 12%（$29.99→$26.39）' },
-    { at: nowIso, type: 'competitor-move', projectId: 'p2', competitorName: 'B 品牌', moves: ['新开 TikTok 店'] },
-    { at: oldIso, type: 'price-change', text: '窗口外不应出现' },
-  ]);
-  assert.ok(text.includes('每日竞品动态摘要'));
-  assert.ok(text.includes('降价 12%（$29.99→$26.39）'));
-  assert.ok(text.includes('B 品牌'));
-  assert.ok(!text.includes('窗口外'));
-});
-
-t('runDigest：未配置邮件通道 → skipped（静默跳过，不发不发错）', async () => {
-  delete process.env.ZB_MAIL_API_URL;
-  const r = await runDigest();
-  assert.equal(r.skipped, true);
-});
-
-t('runDigest：配置通道后正常发送（注入假 fetch 验证一次一封）', async () => {
-  process.env.ZB_MAIL_API_URL = 'https://mail.example/send';
-  const sent = [];
-  const realFetch = global.fetch;
-  global.fetch = async (url, opts) => {
-    sent.push(JSON.parse(opts.body));
-    return { ok: true };
-  };
-  try {
-    // 隔离 db（临时文件）
-    process.env.MT_STORE_PATH = require('os').tmpdir() + '/zb-digest-test.db';
-    delete require.cache[require.resolve('../services/db.js')];
-    delete require.cache[require.resolve('../services/alerts.js')];
-    delete require.cache[require.resolve('../research/digest.js')];
-    const db = require('../services/db.js');
-    const Alerts = require('../services/alerts.js');
-    const { runDigest: run } = require('../research/digest.js');
-    const t1 = db.createTenant({ name: 'A', email: 'a@test.io' });
-    db.createTenant({ name: 'B', email: 'b@test.io' }); // 无预警 → 不发
-    Alerts.push(t1.id, { type: 'price-change', competitorName: 'A 品牌', text: '降价 12%（$29.99→$26.39）' }, '');
-    const r = await run();
-    assert.equal(sent.length, 1);       // 只有一封
-    assert.ok(sent[0].to === 'a@test.io');
-    assert.ok(sent[0].text.includes('降价 12%'));
-    assert.equal(r.sent, 1);
-    assert.equal(r.noChange, 1);        // B 租户无变化不发
-    db.closeDb();
-    require('fs').rmSync(process.env.MT_STORE_PATH, { force: true });
-  } finally {
-    global.fetch = realFetch;
-    delete process.env.ZB_MAIL_API_URL;
-    delete process.env.MT_STORE_PATH;
+// Test-only async harness: late assertions count as failures before exit status.
+async function runCases(cases, output = console) {
+  let failed = 0;
+  for (const [name, fn] of cases) {
+    try { await fn(); output.log('ok - ' + name); }
+    catch (e) { failed++; output.error('FAIL - ' + name + ': ' + e.message); }
   }
-});
-
-console.log('\n=== digest.test: ' + passed + ' passed, ' + failed + ' failed ===');
-process.exit(failed ? 1 : 0);
+  return failed;
+}
+async function main() {
+  const assert = require('node:assert/strict');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'zb-digest-'));
+  const envKeys = ['ZB_DATA_DIR', 'MT_STORE_PATH', 'ZB_MAIL_API_URL', 'ZB_MAIL_API_KEY', 'ZB_MAIL_FROM'];
+  const saved = Object.fromEntries(envKeys.map(k => [k, process.env[k]]));
+  const realFetch = global.fetch;
+  process.env.ZB_DATA_DIR = tmp;
+  process.env.MT_STORE_PATH = path.join(tmp, 'tenants.sqlite');
+  delete process.env.ZB_MAIL_API_KEY;
+  delete process.env.ZB_MAIL_FROM;
+  let db;
+  try {
+  // All business modules load after DATA isolation; no runtime config is read.
+  db = require('../services/db.js');
+  const Alerts = require('../services/alerts.js');
+  const { buildDigestText, runDigest } = require('../research/digest.js');
+  let sent = [];
+  let failMail = false;
+  global.fetch = async (url, opts) => {
+    assert.equal(url, 'https://mail.example.invalid/send');
+    await new Promise(resolve => setImmediate(resolve));
+    sent.push(JSON.parse(opts.body));
+    return { ok: !failMail, status: failMail ? 503 : 200 };
+  };
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+  let owner;
+  const cases = [
+    ['no recent alerts retains existing no-mail behavior (not a Coverage quiet gate)', () => {
+      assert.equal(buildDigestText([]), null);
+      assert.equal(buildDigestText([{ at: old, text: 'old' }]), null);
+    }],
+    ['recent price and move alerts render in one digest', () => {
+      const text = buildDigestText([
+        { at: now, type: 'price-change', competitorName: 'A', text: '降价 12%（$29.99→$26.39）' },
+        { at: now, type: 'competitor-move', competitorName: 'B', moves: ['new store'] },
+        { at: old, text: 'out-of-window' },
+      ]);
+      assert.ok(text.includes('每日竞品动态摘要'));
+      assert.ok(text.includes('降价 12%（$29.99→$26.39）')); assert.ok(text.includes('B'));
+      assert.ok(!text.includes('out-of-window'));
+    }],
+    ['unconfigured channel makes no HTTP calls', async () => {
+      delete process.env.ZB_MAIL_API_URL;
+      assert.equal((await runDigest()).skipped, true); assert.equal(sent.length, 0);
+    }],
+    ['configured digest waits for send and skips suspended, no-change and no-recipient tenants', async () => {
+      process.env.ZB_MAIL_API_URL = 'https://mail.example.invalid/send';
+      owner = db.createTenant({ name: 'Owner', email: 'owner@example.com' });
+      db.createTenant({ name: 'No changes', email: 'quiet@example.com' });
+      const missing = db.createTenant({ name: 'No recipient', email: '' });
+      const suspended = db.createTenant({ name: 'Suspended', email: 'suspended@example.com' });
+      db.setTenantStatus(suspended.id, 'suspended');
+      for (const t of [owner, missing, suspended]) Alerts.push(t.id, { type: 'price-change', text: 'price changed' });
+      assert.equal(Alerts.setSettings(owner.id, { mailTo: 'sales@example.com' }).mailTo, 'sales@example.com');
+      const r = await runDigest();
+      assert.equal(r.sent, 1); assert.equal(r.tenants, 3); assert.equal(r.noChange, 1); assert.equal(r.noRecipient, 1);
+      assert.equal(sent.length, 1); assert.equal(sent[0].to, 'sales@example.com');
+      assert.ok(sent[0].text.includes('price changed'));
+      assert.ok(fs.existsSync(path.join(tmp, 'alerts', owner.id.replace(/[^a-zA-Z0-9_-]/g, '_'), 'alerts.json')));
+    }],
+    ['provider rejection is awaited and preserves stored alerts', async () => {
+      failMail = true; sent = [];
+      const count = Alerts.list(owner.id).length;
+      const r = await runDigest();
+      assert.equal(r.sent, 0); assert.equal(r.failed, 1); assert.equal(sent.length, 1);
+      assert.equal(Alerts.list(owner.id).length, count);
+    }],
+    ['network rejection is awaited and preserves stored alerts', async () => {
+      global.fetch = async () => { await Promise.resolve(); throw new Error('mock transport failure'); };
+      const count = Alerts.list(owner.id).length;
+      const r = await runDigest(); assert.equal(r.failed, 1);
+      assert.equal(Alerts.list(owner.id).length, count);
+    }],
+  ];
+    const failed = await runCases(cases);
+    console.log('digest.test: ' + cases.length + ' cases, ' + failed + ' failed');
+    process.exitCode = failed ? 1 : 0;
+  } finally {
+    global.fetch = realFetch; if (db) db.closeDb();
+    // digest 路径经 watch-store（Coverage/时区）与 digest-store（幂等行）打开各自的
+    // SQLite；不关闭会让 Windows 下 finally 的 rmSync 因句柄未释放而 EPERM。
+    try { require('../services/watch-store.js').closeDb(); } catch (e) {}
+    try { require('../services/digest-store.js').closeDb(); } catch (e) {}
+    for (const k of envKeys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+if (require.main === module) main().catch(e => { console.error(e); process.exitCode = 1; });
+module.exports = { runCases };

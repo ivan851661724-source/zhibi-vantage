@@ -331,8 +331,8 @@ t('15. parser/extractor version non-null for structured Evidence, never copies c
   const meta = Store.getEvidenceById(TA, r.evidence_ids[0]);
   assert.ok(meta.parser_version && typeof meta.parser_version === 'string');
   assert.ok(meta.extractor_version && typeof meta.extractor_version === 'string');
-  assert.equal(meta.parser_version, 'shopify-products-json-1');
-  assert.equal(meta.extractor_version, 'evidence-extract-1');
+  assert.equal(meta.parser_version, 'shopify-products-json-2');
+  assert.equal(meta.extractor_version, 'evidence-extract-2');
   assert.notEqual(meta.parser_version, meta.collector_version);   // 不复制 collector_version
   assert.equal(meta.collector_version, 'net-1');                  // 溯源透传
   assert.throws(() => Store.recordEvidence({                     // 显式冒充 → 拒绝
@@ -444,7 +444,7 @@ t('21. Canonical semantic idempotency: identical->duplicate; currency/scope/stat
   assert.equal(unavail.duplicate, false);
   assert.notEqual(unavail.meta.evidence_id, first.meta.evidence_id);
   // parser/extractor 版本不同 → 不同身份（回归 T9 语义，纳入统一身份断言）
-  const v2 = Store.recordEvidence(Object.assign({}, base, { parser_version: 'shopify-products-json-2' }));
+  const v2 = Store.recordEvidence(Object.assign({}, base, { parser_version: Extract.PARSER_VERSION + '-reparse' }));
   assert.equal(v2.duplicate, false);
   assert.notEqual(v2.meta.evidence_id, first.meta.evidence_id);
   // market / unit / source / provider 差异同样进身份

@@ -1,14 +1,12 @@
 'use strict';
 // ============================================================
-// lib/price-stats.js —— 价格类聚合算法（算法规格 20261003 §三 落地 · 纯函数零依赖）
-// 客单价三件套：中位数 + 主力带(P25–P75) + 样本明细（参与/剔除/剔除清单）
-// 铁律（规格 §三/§四）：
-//   · 均值禁止用于客单价（$1 挂件 + $500 礼盒拉歪均值，中位数几乎不动）
-//   · 双截尾 P5/P95，剔除明细逐条带原因（可申诉）
-//   · 目标价不参与异常值清洗（基线 §19 / 算法规格 §6.3 冻结）：小样本不再使用
-//     目标价×0.15 / ×3 先验剔除——用户参考价只参与后续价格关系判定，绝不改变
-//     竞品原始价格统计、样本数量、异常剔除结果或价格带
-//   · 已下架/全变体不可售不计入（不卖的东西不构成客单价）；免费品单列不计入
+// lib/price-stats.js —— 商品价格聚合（docs/spec/02_Data_Algorithm_Spec_v0.3.md §6）
+// 商品价格统计：中位数 + 主力带(P25–P75) + 样本明细（参与/剔除/剔除清单）
+// 边界（02 §6；00 §16–19）：
+//   · 商品价格不称订单客单价；代表价使用可比变体中位数。
+//   · 样本≥20保留既有 P5/P95 截尾；小样本不作参考价驱动清洗（00 §19；02 §6.3）。
+//     用户参考价只用于比较，不改变客观样本、价格带或排除明细。
+//   · 已下架/全变体不可售不计入当前价格统计；免费品单列不计入
 //   · 样本 <3 款：不裁决（价格带证据不足），不凑数（规格 3.1 第 5 步）
 //   · 多峰分布（三座价格山）截尾救不了主体——按规格 3.0.2 第 1 步做线间断检测，
 //     识别出多线且无销量权重时「主力线识别不出 = 不裁决」→ 待人工确认（规格 3.0.4 纪律）
@@ -42,12 +40,12 @@ function computePriceStats(items, opts) {
   const tMax = tb && tb.max != null && isFinite(Number(tb.max)) && Number(tb.max) > 0 ? Number(tb.max) : null;
   const target = (tMin != null || tMax != null) ? { min: tMin, max: tMax, currency: tb.currency || null } : null;
   const tMid = target ? ((target.min != null && target.max != null) ? (target.min + target.max) / 2 : (target.min != null ? target.min : target.max)) : null;
-  // 币种不匹配预判：目标价锚（先验截尾/判定）对另一币种的数字无意义，一律不适用
+  // 币种不匹配时参考价不能用于关系判定。
   const currencyMismatch = !!(target && target.currency && currency
     && String(target.currency).toUpperCase() !== String(currency).toUpperCase());
 
   const all = (Array.isArray(items) ? items : []).filter(x => x && typeof x.repPrice === 'number' && !isNaN(x.repPrice));
-  const free = all.filter(x => x.repPrice <= 0);                       // 免费品单列（不构成客单价）
+  const free = all.filter(x => x.repPrice <= 0);                       // 免费品单列
   const onSale = all.filter(x => x.repPrice > 0 && !x.soldOut);        // 已下架/全变体不可售不计入
   const soldOut = all.filter(x => x.repPrice > 0 && !!x.soldOut);
   const dropList = [];
@@ -112,7 +110,7 @@ function computePriceStats(items, opts) {
     median,
     band,
     currency,
-    basis: 'verified', // 无目标价驱动的清洗，统计基面一律 verified（截尾仅 P5/P95 均匀截尾）
+    basis: 'verified',
     truncatedBy,                                              // null | 'p5p95'
     multiPeak,
     targetUsed: target ? { min: target.min, max: target.max, currency: target.currency } : null,
@@ -121,7 +119,7 @@ function computePriceStats(items, opts) {
       onSale: onSale.length,    // 在售样本
       used: used.length,        // 截尾后参与统计
       dropped: dropList.length, // 剔除数（丢弃率 = 数据质量指标）
-      soldOut: soldOut.length,  // 已下架/全变体不可售（不计入客单价）
+      soldOut: soldOut.length,  // 已下架/全变体不可售（不计入当前价格统计）
       free: free.length,        // 免费品（单列）
       dropList                  // [{title, price, reason}] 可申诉明细
     },

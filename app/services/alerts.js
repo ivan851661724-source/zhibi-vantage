@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DATA = path.join(__dirname, '..', 'data');
+const { DATA } = require('../core/paths.js');
 const ALERTS_DIR = path.join(DATA, 'alerts');
 const MAX_PER_TENANT = 200;
 
@@ -70,7 +70,7 @@ function setSettings(tenantId, patch) {
   const next = Object.assign(cur, {});
   if (patch && patch.mailTo !== undefined) {
     const v = String(patch.mailTo || '').trim();
-    if (v && !/^[^s@]+@[^s@]+.[^s@]+$/.test(v)) return { error: 'BAD_EMAIL' };
+    if (v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return { error: 'BAD_EMAIL' };
     next.mailTo = v; // 空串 = 清除（回退账号邮箱）
   }
   try { fs.writeFileSync(settingsFileOf(tenantId), JSON.stringify(next, null, 2)); } catch (e) { return { error: 'WRITE_FAILED' }; }

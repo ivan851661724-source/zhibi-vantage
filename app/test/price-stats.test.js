@@ -81,13 +81,17 @@ t('部分重叠（中点在区间外但主力带骑跨）→ partial 待人工�
   assert.equal(s.verdict.pendingHuman, true);
 });
 
-t('小样本不清洗（基线 §19 / 规格 §6.3 冻结）：×0.15/×3 目标价剔除已移除，样本全保留', () => {
-  const s = PS.computePriceStats([5, 20, 30, 45, 180].map(p => item(p)), { currency: 'USD', target: { min: 50, max: 50, currency: 'USD' } });
-  assert.equal(s.truncatedBy, null, '目标价驱动的先验截尾已删除');
-  assert.equal(s.basis, 'verified', '统计基面不再降级');
-  assert.equal(s.sample.used, 5, '极端值 180 与 5 保留（目标价不是清洗规则）');
-  assert.equal(s.median, 30);
-  assert.equal(s.sample.dropList.length, 0);
+t('小样本的客观统计不随参考价50/100/缺失改变（00 §19；02 §6.3）', () => {
+  const items = [5, 20, 30, 45, 180].map(p => item(p));
+  for (const target of [{ min: 50, max: 50, currency: 'USD' }, { min: 100, max: 100, currency: 'USD' }, null]) {
+    const s = PS.computePriceStats(items, { currency: 'USD', target });
+    assert.equal(s.truncatedBy, null);
+    assert.equal(s.sample.used, 5);
+    assert.equal(s.sample.dropped, 0);
+    assert.deepEqual(s.sample.dropList, []);
+    assert.equal(s.median, 30);
+    assert.deepEqual(s.band, { min: 20, max: 45 });
+  }
 });
 
 t('样本 <3 款：不裁决（insufficient），不凑数', () => {

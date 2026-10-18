@@ -103,6 +103,10 @@ function blobPathOf(ns, day, id) { return path.join(DATA, 'snapshots', ns, day, 
 function record(input) {
   const status = input.source_status;
   if (!VALID_STATUS.has(status)) throw new Error('source-snapshot: invalid source_status literal: ' + String(status));
+  // Internal collector implementations may declare their actual version. Legacy
+  // callers keep net-1; parser_version remains independently null under SC-01.
+  const collectorVersion = input.collectorVersion === undefined ? COLLECTOR_VERSION : input.collectorVersion;
+  if (typeof collectorVersion !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(collectorVersion)) throw new Error('source-snapshot: invalid collector version');
 
   const tenantId = resolveTenantId(input.tenantId);
   if (!tenantId) {
@@ -172,7 +176,7 @@ function record(input) {
     raw_payload_ref: store ? { kind: 'fs_blob', path: relRef, byte_size: refByteSize, encoding: 'identity' } : null,
     raw_size: rawSize,
     raw_truncated: truncated,
-    collector_version: COLLECTOR_VERSION,
+    collector_version: collectorVersion,
     // SC-01（05 v0.3.1 §4）：parser_version 字段必须存在但 nullable——快照层未解析，
     // 恒为 null（不伪造）；结构化 Adapter/Evidence/Fact 层必填实际 parser 版本。
     parser_version: null,

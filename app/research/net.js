@@ -169,11 +169,12 @@ function variantMedian(nums) {
   return n % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 // products.json 原始数组 → 价格条目（纯函数，供 net-shopify.test 单测）。
-// repPrice = 变体中位价（商品代表价，客单价统计的样本单位）；minPrice/maxPrice 保留供区间展示。
+// repPrice = 商品代表价（02 §6.1，每商品一个观察点）；minPrice/maxPrice保留供区间展示。
 // **全部变体为 0 元**的商品保留 minPrice=0 交给调用方单列 freebies（报告-数据同源 §5）——
 // 此前在变体层就被 n>0 过滤整条丢失，comp.freebies 恒空。混合免费+付费变体的商品
-// repPrice 取付费变体中位（免费变体不拉低真实价）。
-// soldOut：至少一个变体上报过 available 且全部为 false（字段缺失≠断货，规格 5.2 禁推断）。
+// repPrice 取非明确缺货的付费变体中位（02 §6.1）；未知availability维持原有观察，
+// 不编造断货。原始min/max仍覆盖所有价格，Fact提取不受展示代表价筛选影响。
+// soldOut：全部变体明确 available=false 才断货（字段缺失≠断货，规格 5.2 禁推断）。
 // publishedAt：上架时间透传（断点：上新事件的佐证字段，规格 5.2）。
 function mapShopifyItems(products, cap) {
   const list = (Array.isArray(products) ? products : []).slice(0, cap || Infinity);
@@ -181,8 +182,12 @@ function mapShopifyItems(products, cap) {
     const variants = Array.isArray(p.variants) ? p.variants : [];
     const nums = variants.map(v => parseFloat(v.price)).filter(n => !isNaN(n));
     const prices = nums.filter(n => n > 0);
-    const avail = variants.map(v => v.available).filter(a => typeof a === 'boolean');
-    const soldOut = variants.length > 0 && avail.length > 0 && avail.every(a => a === false);
+    const currentNums = variants.filter(v => v.available !== false)
+      .map(v => parseFloat(v.price)).filter(Number.isFinite);
+    const currentPrices = currentNums.filter(n => n > 0);
+    const soldOut = variants.length > 0 && variants.every(v => v.available === false);
+    const repPrice = currentPrices.length ? variantMedian(currentPrices)
+      : (soldOut && prices.length ? variantMedian(prices) : (currentNums.includes(0) ? 0 : null));
     const minPrice = prices.length ? Math.min(...prices) : (nums.length ? 0 : null);
     return {
       title: p.title, type: p.product_type || '',
@@ -190,19 +195,20 @@ function mapShopifyItems(products, cap) {
       variantCount: variants.length, // 规格签名代理：变体集变化 → 价格不可直接比较（lib/watch-price §6）
       minPrice,
       maxPrice: prices.length ? Math.max(...prices) : (nums.length ? 0 : null),
-      repPrice: prices.length ? variantMedian(prices) : (nums.length ? 0 : null),
+      repPrice,
       soldOut,
       publishedAt: p.published_at || null
     };
   }).filter(x => x.minPrice != null);
 }
 // Shopify 站结构化价格：/products.json 公开端点，零 LLM，verified 级。
-// 分页拉全量（规格 2.3：limit=250 × ≤4 页，目录型大店 500+ 款必须拉全，S2 类目占比/S3 客单价才准；
+// 分页观察目录（05 §5.2：limit=250 × ≤4页；超过预算显式partial_scan；
 // 页间 ≥2s 限速；首页失败=整体失败，后续页失败用已有数据）。total = 实抓款数（分页后趋近全量）。
 // 同时探测 /cart.js 的店铺结账币种：products.json 价格以店铺币种计且 JSON 本身不带币种，
 // 店铺币种 ≠ 调研市场币种时（如日销店 ¥800），调用方不得把数值直接当市场价入带。
-// M0-01：products.json 响应原始字节旁路落快照（cart.js 币种探测为辅助请求，不产快照），
-// blob 取首页字节；分页落地后 partial_scan 改按「枚举是否完整」判定——4×250 预算耗尽或
+// products.json 每页及已有 cart.js 请求均留真实 raw；snapshotIds 仅含产品页，
+// currencySnapshotId 单独引用 cart.js，不新增请求。
+// 覆盖各页，snapshotId保留首页兼容。partial_scan按「枚举是否完整」判定——4×250预算耗尽或
 // 中途页失败提前收束 = partial；末页自然收束 = success（05 §5.2 冻结术语）。
 // opts（可选）：{ trigger, tenantId }
 const SHOPIFY_PAGE_LIMIT = 250;
@@ -210,12 +216,20 @@ const SHOPIFY_MAX_PAGES = 4;
 const SHOPIFY_PAGE_DELAY_MS = 2000;
 async function fetchShopifyProducts(siteUrl, opts) {
   const o = opts || {};
-  const d = domainOf(siteUrl);
+  // Formal known-source monitoring refuses redirects entirely: the destination
+  // has not been admitted or DNS-checked. Legacy callers retain their behavior.
+  const redirectOptions = o.rejectRedirects === true ? { redirect: 'manual' } : {};
+  const recordSnapshot = input => Snapshot.record({ ...input, collectorVersion: o.rejectRedirects === true ? 'net-shopify-direct-2' : COLLECTOR_VERSION });
+  // The admitted hostname is an exact identity boundary. www/root aliases have
+  // not been independently approved; normalization remains legacy-only.
+  let d;
+  if (o.rejectRedirects === true) { try { d = new URL(siteUrl).hostname.toLowerCase(); } catch { d = ''; } }
+  else d = domainOf(siteUrl);
   if (!d) return { ok: false };
   const fetchedAt = new Date().toISOString();
   const recFail = (sourceStatus, errorCode, httpStatus) => {
     try {
-      const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+      const s = recordSnapshot({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId, projectRef: o.projectRef });
       return s.recorded ? s.meta.snapshot_id : undefined;
     } catch (e) { loggerError('fetchShopifyProducts', e, d); return undefined; }
   };
@@ -226,54 +240,86 @@ async function fetchShopifyProducts(siteUrl, opts) {
     // SSRF：cart.js 与分页各页同样过公网校验（d 来自用户可控 URL，hostname 直拼不过 DNS/私网检查
     // = 元数据端点探测向量；169.254.169.254 等 IP 形态 host 会被 products.json 拦但 cart.js 原先不拦）
     await assertPublicUrl(`https://${d}/cart.js`);
-    const cartReq = fetch(`https://${d}/cart.js`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal })
-      .then(r => (r.ok ? r.json() : null))
-      .then(j => (j && j.currency) ? String(j.currency).toUpperCase() : null)
-      .catch(() => null);
+    const cartReq = (async () => {
+      let buf = null, ct = null, status = null, finalUrl = null, observedAt = null;
+      let sourceStatus, errorCode = null, currency = null;
+      try {
+        const r = await fetch(`https://${d}/cart.js`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal, ...redirectOptions });
+        status = r.status; finalUrl = r.url || null; ct = r.headers.get('content-type');
+        buf = Buffer.from(await r.arrayBuffer()); observedAt = new Date().toISOString();
+        sourceStatus = r.ok ? Snapshot.SOURCE_STATUS.SUCCESS : Snapshot.mapHttpStatus(r.status);
+        if (!r.ok) errorCode = 'http:' + r.status;
+        else {
+          try {
+            const j = JSON.parse(buf.toString('utf8'));
+            if (j && typeof j.currency === 'string' && /^[A-Za-z]{3}$/.test(j.currency)
+              && (!finalUrl || new URL(finalUrl).host === d)) currency = j.currency.toUpperCase();
+          } catch (_) { sourceStatus = Snapshot.SOURCE_STATUS.PARSE_FAILED; errorCode = 'parse_failed'; }
+        }
+      } catch (e) {
+        const cls = Snapshot.classifyError(e); sourceStatus = cls.source_status; errorCode = cls.error_code;
+      }
+      let currencySnapshotId;
+      try {
+        const s = recordSnapshot({ capability: 'product_catalog', provider: 'shopify_cart_json',
+          source_url: `https://${d}/cart.js`, final_url: finalUrl, http_status: status,
+          source_status: sourceStatus, error_code: errorCode, observed_at: observedAt,
+          fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, trigger: o.trigger, tenantId: o.tenantId, projectRef: o.projectRef });
+        if (s.recorded) currencySnapshotId = s.meta.snapshot_id;
+      } catch (e) { loggerError('fetchShopifyProducts.cart', e, d); }
+      return { currency, currencySnapshotId };
+    })();
     let products = [];
     let firstStatus = null;
+    let firstError = null;
     let incompleteReason = null; // 非预算耗尽的提前收束（后续页失败）：partial_scan 的原因
-    let firstBuf = null, firstCt = null, firstLastMod = null, firstHttpStatus = null, firstObservedAt = null;
+    const pages = []; // 原始字节逐页保存；不拼接/重序列化为伪造的来源响应。
     for (let page = 1; page <= SHOPIFY_MAX_PAGES; page++) {
       let j = null;
-      let buf = null, ct = null, lastMod = null, httpStatus = null;
+      let buf = null, ct = null, lastMod = null, httpStatus = null, finalUrl = null;
+      const pageUrl = `https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`;
       try {
-        const pu = await assertPublicUrl(`https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`); // 每跳重新校验（防 DNS rebinding）
-        const r = await fetch(pu, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal });
-        if (!r.ok) { if (page === 1) firstStatus = r.status; else incompleteReason = 'products_json_page_' + page + '_http_' + r.status; break; } // 首页失败=整体失败；后续页失败用已有数据
-        buf = Buffer.from(await r.arrayBuffer());
+        const pu = await assertPublicUrl(pageUrl); // 每跳重新校验（防 DNS rebinding）
+        const r = await fetch(pu, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal, ...redirectOptions });
         ct = r.headers.get('content-type');
         lastMod = r.headers.get('last-modified');
         httpStatus = r.status;
+        finalUrl = r.url || null;
+        buf = Buffer.from(await r.arrayBuffer());
+        if (!r.ok) {
+          if (page === 1) firstStatus = r.status;
+          incompleteReason = 'products_json_page_' + page + '_http_' + r.status;
+          pages.push({ url: pageUrl, finalUrl, buf, ct, lastMod, httpStatus, observedAt: new Date().toISOString(), sourceStatus: Snapshot.mapHttpStatus(r.status), errorCode: 'http:' + r.status });
+          break; // 失败响应自身也留痕；已成功页保留，绝不把失败当无变化。
+        }
         try { j = JSON.parse(buf.toString('utf8')); } catch (pe) {
           if (page === 1) {
             // P1-1（PR#2 评审）：2XX body 已接收 = 来源内容已被真实观察 → observed_at 非空；
             // parse 失败时字节仍落 blob 供重放
             let psid;
             try {
-              const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: pu.href, final_url: null, redirect_hops: 0, http_status: httpStatus, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, trigger: o.trigger, tenantId: o.tenantId, note: 'json parse failed after body receipt; raw kept for replay' });
+              const s = recordSnapshot({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: pu.href, final_url: finalUrl, redirect_hops: 0, http_status: httpStatus, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, trigger: o.trigger, tenantId: o.tenantId, projectRef: o.projectRef, note: 'json parse failed after body receipt; raw kept for replay' });
               if (s.recorded) psid = s.meta.snapshot_id;
             } catch (e) { loggerError('fetchShopifyProducts', e, d); }
-            return { ok: false, error: 'parse_failed', snapshotId: psid };
+            const { currencySnapshotId } = await cartReq;
+            return { ok: false, error: 'parse_failed', snapshotId: psid, snapshotIds: psid ? [psid] : [], currencySnapshotId, _prov: { recorded: !!psid } };
           }
           incompleteReason = 'products_json_page_' + page + '_parse_failed';
+          pages.push({ url: pu.href, finalUrl, buf, ct, lastMod, httpStatus, observedAt: new Date().toISOString(), sourceStatus: Snapshot.SOURCE_STATUS.PARSE_FAILED, errorCode: 'parse_failed' });
           break; // 后续页 parse 失败用已有数据
         }
       } catch (e) {
-        if (page === 1) throw e; // 首页网络异常上抛（保持原错误路径）
+        if (page === 1) firstError = String(e && e.message || e);
         incompleteReason = 'products_json_page_' + page + '_error';
+        const cls = Snapshot.classifyError(e);
+        pages.push({ url: pageUrl, finalUrl, buf, ct, lastMod, httpStatus, observedAt: buf ? new Date().toISOString() : null, sourceStatus: cls.source_status, errorCode: cls.error_code });
         break; // 后续页用已有数据
       }
-      if (page === 1) { firstBuf = buf; firstCt = ct; firstLastMod = lastMod; firstHttpStatus = httpStatus; firstObservedAt = new Date().toISOString(); }
+      pages.push({ url: `https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`, finalUrl, buf, ct, lastMod, httpStatus, observedAt: new Date().toISOString() });
       const arr = Array.isArray(j.products) ? j.products : [];
       products = products.concat(arr);
       if (arr.length < SHOPIFY_PAGE_LIMIT) break; // 末页
       if (page < SHOPIFY_MAX_PAGES) await new Promise(r2 => setTimeout(r2, SHOPIFY_PAGE_DELAY_MS));
-    }
-    if (firstStatus != null) {
-      const st = Snapshot.mapHttpStatus(firstStatus);
-      const fsid = recFail(st, st === Snapshot.SOURCE_STATUS.RATE_LIMITED ? 'http:429' : ('http:' + firstStatus), firstStatus);
-      return { ok: false, status: firstStatus, snapshotId: fsid };
     }
     // B-5a：total = 实抓款数。分页后对 ≤1000 款的店趋近真实在售款数（旧版单页 limit=100 在 >100 款店上本就截断）。
     const truncated = products.length >= SHOPIFY_MAX_PAGES * SHOPIFY_PAGE_LIMIT;
@@ -283,24 +329,34 @@ async function fetchShopifyProducts(siteUrl, opts) {
     const scanStatus = partialScan ? Snapshot.SOURCE_STATUS.PARTIAL : Snapshot.SOURCE_STATUS.SUCCESS;
     const partialScanReason = truncated ? 'products_json_pagination_budget_250x4_exhausted' : incompleteReason;
     let sid, prov = { recorded: false };
-    const recordSuccess = (note) => {
-      try {
-        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: firstHttpStatus, source_status: scanStatus, observed_at: firstObservedAt, fetched_at: fetchedAt, bodyBytes: firstBuf, contentType: firstCt, source_updated_at: firstLastMod, trigger: o.trigger, tenantId: o.tenantId, partial_scan: partialScan, partial_scan_reason: partialScanReason, partial_scan_observed_count: products.length, note: note || null });
-        if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
-      } catch (e) { loggerError('fetchShopifyProducts', e, d); }
+    const snapshotIds = [];
+    const recordPages = (note) => {
+      pages.forEach((page, index) => {
+        try {
+          const s = recordSnapshot({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: page.url, final_url: page.finalUrl, redirect_hops: 0, http_status: page.httpStatus, source_status: page.sourceStatus || scanStatus, error_code: page.errorCode || null, observed_at: page.observedAt, fetched_at: fetchedAt, bodyBytes: page.buf, contentType: page.ct, source_updated_at: page.lastMod, trigger: o.trigger, tenantId: o.tenantId, projectRef: o.projectRef, partial_scan: partialScan, partial_scan_reason: partialScanReason, partial_scan_observed_count: products.length, note: note || null });
+          if (s.recorded) {
+            snapshotIds.push(s.meta.snapshot_id);
+            if (index === 0) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
+          }
+        } catch (e) { loggerError('fetchShopifyProducts', e, page.url); }
+      });
     };
+    const { currency, currencySnapshotId } = await cartReq;
+    if (firstStatus != null || firstError != null) {
+      recordPages(null);
+      return { ok: false, status: firstStatus == null ? undefined : firstStatus, error: firstError || undefined, snapshotId: sid, snapshotIds, currencySnapshotId, partialScan, partialScanReason, _prov: prov };
+    }
     if (!products.length) {
-      recordSuccess('empty_catalog');
-      return { ok: false, empty: true, snapshotId: sid, _prov: prov };
+      recordPages('empty_catalog');
+      return { ok: false, empty: true, snapshotId: sid, snapshotIds, currencySnapshotId, partialScan, partialScanReason, _prov: prov };
     }
     const items = mapShopifyItems(products); // 全量透传（截尾统计/类目占比需要全量；调用方自控上限）
-    const currency = await cartReq;
-    recordSuccess(null);
-    return { ok: items.length > 0, items, total: products.length, truncated, url: `https://${d}/products.json`, currency, snapshotId: sid, _prov: prov };
+    recordPages(null);
+    return { ok: items.length > 0, items, total: products.length, truncated, url: `https://${d}/products.json`, currency, snapshotId: sid, snapshotIds, currencySnapshotId, partialScan, partialScanReason, _prov: prov };
   } catch (e) {
     const cls = Snapshot.classifyError(e);
     const csid = recFail(cls.source_status, cls.error_code, null);
-    return { ok: false, error: String(e && e.message || e), snapshotId: csid };
+    return { ok: false, error: String(e && e.message || e), snapshotId: csid, snapshotIds: csid ? [csid] : [], _prov: { recorded: !!csid } };
   }
   finally { clearTimeout(timer); }
 }

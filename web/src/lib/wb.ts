@@ -3,10 +3,11 @@
 // 三动作裁决：localStorage 即时展示 + POST /api/material-action 服务端落盘（跨设备还原）。
 // 绝不替用户决定，不收集用户私有数据。
 import { useEffect, useState } from 'react';
-import { apiPost, getToken } from '@/lib/api';
+import { apiGet, apiPost, getToken } from '@/lib/api';
 import { isDemoMode } from '@/lib/demo';
+import { captureSession, isSessionCurrent, SESSION_CHANGED_EVENT, type BrowserSession } from '@/lib/storage-scope';
 
-export const WB_KEY = 'ci_workbench_decisions'; // 与旧前端同键：已有裁决无缝继承
+export const WB_KEY = 'ci_workbench_decisions'; // 无归属旧键保留，不自动归给当前账号。
 export const WB_ACTIONS: Record<string, string> = { keep: '收录', ignore: '忽略', later: '稍后' };
 export type WbAction = 'keep' | 'later' | 'ignore';
 
@@ -41,29 +42,99 @@ export interface WbDecisions {
   [matId: string]: WbAction;
 }
 
-export function wbLoad(): WbDecisions {
+const projects = new Map<string, string>();
+const projectGenerations = new Map<string, number>();
+interface WorkbenchContext { session: BrowserSession; projectId: string | null; generation: number }
+export function captureWorkbench(): WorkbenchContext {
+  const session = captureSession();
+  return { session, projectId: session.scope ? projects.get(session.scope) || null : null, generation: session.scope ? projectGenerations.get(session.scope) || 0 : 0 };
+}
+function contextCurrent(context: WorkbenchContext): boolean {
+  return isSessionCurrent(context.session) && !!context.session.scope && !!context.projectId && projects.get(context.session.scope) === context.projectId && (projectGenerations.get(context.session.scope) || 0) === context.generation;
+}
+function decisionKey(context: WorkbenchContext): string { return WB_KEY + ':' + context.session.scope + ':project:' + encodeURIComponent(context.projectId || ''); }
+export function wbLoad(context = captureWorkbench()): WbDecisions {
   try {
-    return JSON.parse(localStorage.getItem(WB_KEY) || '{}') as WbDecisions;
+    if (!contextCurrent(context)) return {};
+    return JSON.parse(localStorage.getItem(decisionKey(context)) || '{}') as WbDecisions;
   } catch {
     return {};
   }
 }
 
-export function wbSave(d: WbDecisions): void {
+export function wbSave(d: WbDecisions, context = captureWorkbench()): void {
   try {
-    localStorage.setItem(WB_KEY, JSON.stringify(d));
+    if (!contextCurrent(context)) return;
+    localStorage.setItem(decisionKey(context), JSON.stringify(d));
   } catch {
     /* 隐私模式等 localStorage 不可用：静默（本会话内存态仍可用） */
   }
 }
 
 // ---- 服务端持久化（POST /api/material-action） ----
-// fire-and-forget：失败静默（localStorage 仍是本设备真相，下次操作会再同步）；
+// 同项目串行提交；本地只保留待提交的即时视图，完成或失败后从权威 REST 对账。
+// 对账读取失败时保留账号/项目隔离缓存，后续统一状态刷新可继续恢复。
 // 演示模式（demo-token）跳过——后端无此会话，401 会误杀演示态。
-function wbSyncServer(matId: string, action: WbAction | ''): void {
+interface PendingDecision { matId: string; action: WbAction | ''; context: WorkbenchContext }
+const serverDecisions = new Map<string, WbDecisions>();
+const writes = new Map<string, { tail: Promise<unknown>; revision: number; pending: PendingDecision[] }>();
+export const WB_MUTATION_EVENT = 'wb-mutation-invalidated';
+function invalidateWorkbenchReads(): void {
+  try { window.dispatchEvent(new Event(WB_MUTATION_EVENT)); } catch { /* SSR/no browser */ }
+}
+function projectDecisions(decisions: unknown, context: WorkbenchContext): void {
+  const key = decisionKey(context);
+  const clean: WbDecisions = {};
+  for (const [id, value] of Object.entries(decisions && typeof decisions === 'object' ? decisions : {})) {
+    if (id !== '__proto__' && id !== 'constructor' && id !== 'prototype' && (value === 'keep' || value === 'ignore' || value === 'later')) clean[id] = value;
+  }
+  serverDecisions.set(key, clean);
+  const view = { ...clean };
+  for (const item of writes.get(key)?.pending || []) {
+    if (!contextCurrent(item.context)) continue;
+    if (item.action) view[item.matId] = item.action;
+    else delete view[item.matId];
+  }
+  wbSave(view, context);
+  fireWbChanged();
+}
+function wbSyncServer(matId: string, action: WbAction | '', context: WorkbenchContext): void {
+  if (!contextCurrent(context)) return;
   if (isDemoMode() || getToken() === 'demo-token') return;
-  apiPost('/api/material-action', { id: matId, action: action || '' }).catch(() => {
-    /* 网络失败静默：本地已生效，跨设备同步下次操作补齐 */
+  const key = decisionKey(context);
+  let queue = writes.get(key);
+  if (!queue) { queue = { tail: Promise.resolve(), revision: 0, pending: [] }; writes.set(key, queue); }
+  const currentQueue = queue;
+  const item = { matId, action, context };
+  queue.pending.push(item);
+  queue.revision++;
+  // Also invalidate the Provider's REST reads, not only this module's reconciliation read.
+  invalidateWorkbenchReads();
+  queue.tail = queue.tail.catch(() => {}).then(async () => {
+    try {
+      // Do not dispatch an old project's queued action after leaving/re-entering it.
+      if (!contextCurrent(context)) return;
+      const response = await apiPost<{ decisions?: unknown; projectId?: string }>('/api/material-action', { id: matId, action, projectId: context.projectId });
+      if (contextCurrent(context) && (!response.projectId || response.projectId === context.projectId)) {
+        projectDecisions(response.decisions, context);
+      }
+    } catch { /* The final authoritative read below reconciles failed writes too. */ }
+    finally {
+      currentQueue.pending = currentQueue.pending.filter(pending => pending !== item);
+      if (contextCurrent(context)) {
+        // Invalidate reads begun while this write was pending before dropping its overlay.
+        invalidateWorkbenchReads();
+        projectDecisions(serverDecisions.get(key) || {}, context);
+        if (!currentQueue.pending.length) {
+          const revision = currentQueue.revision;
+          try {
+            const state = await apiGet<{ projectId?: string; decisions?: unknown }>('/api/state');
+            if (contextCurrent(context) && revision === currentQueue.revision && state.projectId === context.projectId) projectDecisions(state.decisions, context);
+          } catch { /* Cached view remains scoped; a later state refresh can reconcile. */ }
+        }
+        if (contextCurrent(context)) invalidateWorkbenchReads();
+      }
+    }
   });
 }
 
@@ -79,23 +150,16 @@ function fireWbChanged(): void {
 
 /**
  * 从服务端 state.decisions 水合本地（换设备 / 清缓存后还原裁决）。
- * 策略：本地为空且服务端非空才回填——本地已有记录时以本地为准
- * （本设备是最近操作的真相源，避免服务端陈旧值复活已撤销的裁决）。
+ * 服务端为权威；项目切换时选择独立缓存，不复用另一项目的材料决策。
  * 幂等：由 use-zhibi-state 在每次拉到 state 后调用。
  */
-export function wbHydrateFromServer(decisions: unknown): void {
+export function wbHydrateFromServer(decisions: unknown, projectId?: string | null, session = captureSession()): void {
   try {
-    if (!decisions || typeof decisions !== 'object') return;
-    const local = wbLoad();
-    if (Object.keys(local).length) return; // 本地非空：不回填
-    const ok: WbDecisions = {};
-    for (const [k, v] of Object.entries(decisions as Record<string, unknown>)) {
-      if (v === 'keep' || v === 'later' || v === 'ignore') ok[k] = v;
-    }
-    if (Object.keys(ok).length) {
-      wbSave(ok);
-      fireWbChanged(); // 通知已挂载的 useWbDecisions / 徽章刷新
-    }
+    if (!isSessionCurrent(session) || !session.scope) return;
+    if ((projects.get(session.scope) || null) !== (projectId || null)) projectGenerations.set(session.scope, (projectGenerations.get(session.scope) || 0) + 1);
+    if (projectId) projects.set(session.scope, projectId); else projects.delete(session.scope);
+    const context = captureWorkbench();
+    projectDecisions(decisions, context);
   } catch {
     /* 坏数据静默 */
   }
@@ -110,22 +174,24 @@ export function useWbDecisions(): [WbDecisions, (matId: string, action: WbAction
     const onWbChanged = () => setDecisions(wbLoad()); // 同标签页水合/外部写入
     window.addEventListener('storage', onStorage);
     window.addEventListener(WB_CHANGED_EVENT, onWbChanged);
+    window.addEventListener(SESSION_CHANGED_EVENT, onStorage);
     return () => {
       window.removeEventListener('storage', onStorage);
       window.removeEventListener(WB_CHANGED_EVENT, onWbChanged);
+      window.removeEventListener(SESSION_CHANGED_EVENT, onStorage);
     };
   }, []);
   const set = (matId: string, action: WbAction | '') => {
-    // 服务端同步（撤销也同步：action='' 后端删除该条）
-    wbSyncServer(matId, action);
-    setDecisions((prev) => {
-      const d = { ...prev };
-      if (!action || d[matId] === action) delete d[matId]; // 再点取消（对齐 wbSet）
-      else d[matId] = action;
-      // 持久化延迟到微任务：updater 必须是纯函数（StrictMode 双调用会重复执行副作用）
-      queueMicrotask(() => wbSave(d));
-      return d;
-    });
+    const context = captureWorkbench();
+    if (!contextCurrent(context)) return;
+    const d = { ...wbLoad(context) };
+    if (!action || d[matId] === action) delete d[matId];
+    else d[matId] = action;
+    // Persist outside React's updater: no deferred writes can pick up a new account/project.
+    wbSave(d, context);
+    setDecisions(d);
+    fireWbChanged();
+    wbSyncServer(matId, d[matId] || '', context);
   };
   return [decisions, set];
 }

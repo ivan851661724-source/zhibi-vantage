@@ -5,7 +5,8 @@
 // ============================================================
 
 const { loadConfig } = require('../core/config.js');
-const { projFile, saveState } = require('../core/state-store.js');
+const { projFile, saveState, sanitizeNs } = require('../core/state-store.js');
+const { requestScope } = require('../core/als.js');
 const { decorateState } = require('./decorate.js');
 const { deepDiveField } = require('./deepdive.js');
 const { llmApiKey } = require('./llm.js');
@@ -43,9 +44,25 @@ function projectLastActivityAt(state) {
 }
 // 对单个项目做一轮收缩版增量研究维护（仅 recentMoves LLM 重研，无直抓、无正式监控事件）
 async function sweepProject(proj, config) {
+  // Background jobs have no request identity. Never borrow an unrelated caller's
+  // ALS or infer a raw tenant ID from a persisted filesystem namespace.
+  const tid = proj && typeof proj.tenantId === 'string' ? proj.tenantId : '';
+  if (!tid.trim() || tid === '_legacy') return { ok: false, reason: 'no_tenant_context' };
+  return requestScope.run(tid, () => sweepProjectInScope(proj, config));
+}
+async function sweepProjectInScope(proj, config) {
   let state = null;
   try { state = JSON.parse(fs.readFileSync(projFile(proj.id, proj.tenantId), 'utf8')); } catch (e) { return { ok: false, reason: 'no_state' }; }
   if (!state || !Array.isArray(state.competitors)) return { ok: false, reason: 'no_state' };
+  // Older archives store the sanitized namespace. The project's raw tenant is
+  // authoritative; accept its existing namespace spelling, reject other owners.
+  const tid = proj.tenantId;
+  if (state.tenantId && state.tenantId !== tid && state.tenantId !== sanitizeNs(tid)) {
+    return { ok: false, reason: 'tenant_mismatch' };
+  }
+  if (state.projectId && state.projectId !== proj.id) return { ok: false, reason: 'project_mismatch' };
+  state.tenantId = tid;
+  state.projectId = proj.id;
   const hasLlm = !!llmApiKey(config);
   const beforeMoves = new Map(state.competitors.map(c => [c.id, JSON.stringify(c.recentMoves || [])]));
   const newMoves = [];
@@ -129,6 +146,11 @@ function startScheduler() {
   if (process.env.SCHEDULER_ENABLED === '0') {
     try { Logger.info('scheduler 已禁用（SCHEDULER_ENABLED=0）'); } catch (e) {}
     return null;
+  }
+  // M2 技术开关：显式选择新正式监控路径（research/monitoring.js 运行时）时，
+  // 由其整体接管调度入口（不含旧 sweep / 旧 digest；02 §12 直采链路）。
+  if (process.env.FORMAL_MONITORING_ENABLED === '1') {
+    return require('./monitoring').getMonitoringRuntime().start();
   }
   const s = process.env.ZB_SWEEP_ENABLED === '1' ? Scheduler.scheduleNext(runSweep, Logger) : null;
   const d = startDigestTick(Logger);

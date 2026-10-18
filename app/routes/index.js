@@ -19,10 +19,18 @@ const MiscH = require('./handlers/misc.js');
 const TelemetryH = require('./handlers/telemetry.js');
 const AuthH = require('./handlers/auth.js'); // P0 恢复：login/register
 const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
+const IntelligenceH = require('./handlers/intelligence.js');
+const MonitoringH = require('./handlers/monitoring.js');
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
 const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 
 function registerAll() {
+  for (const method of ['GET','POST','PUT']) registry.register(method, '/api/monitoring/workspaces', 'tenant', MonitoringH.monitoring);
+  for (const method of ['GET','POST']) registry.register(method, '/api/monitoring/targets', 'tenant', MonitoringH.monitoring);
+  for (const action of ['pause','resume','recheck']) registry.register('POST', '/api/monitoring/' + action, 'tenant', MonitoringH.monitoring);
+  registry.register('GET', '/api/monitoring/status', 'tenant', MonitoringH.monitoring);
+  registry.register('GET', '/api/price-metric', 'tenant', IntelligenceH.priceMetric);
+  registry.register('GET', '/api/evidence-detail', 'tenant', IntelligenceH.evidenceDetail);
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
   registry.register('POST', '/api/login', 'public', AuthH.login);
   registry.register('POST', '/api/register', 'public', AuthH.register);

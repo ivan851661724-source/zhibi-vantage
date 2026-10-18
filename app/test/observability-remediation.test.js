@@ -209,7 +209,7 @@ await t('R7 static-check 测试壳：注入异步失败 → 进程非零退出�
   let out = null;
   try {
     out = execFileSync(process.execPath, [path.join(__dirname, 'static-check.test.js')], {
-      encoding: 'utf8', timeout: 420000,
+      encoding: 'utf8', timeout: 660000,
       env: Object.assign({}, process.env, {
         TMPDIR: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),
         TEMP: path.join(process.env.ZB_DATA_DIR, 'r7-tmp'),

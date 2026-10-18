@@ -4,13 +4,12 @@
 //   → 返回装饰后的完整 state → patch() 即时生效 + 回工作台；删除 POST /api/projects/delete
 //   → 返回 { ok, projects } 刷新清单；若删的是当前档案 → refresh() 拉回 { track: null } 空态。
 // 注：演示模式（?demo=1）下本页由 DemoPageGuard 拦截（依赖真实会话，见 F-04）。
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
 import { useIsDemoMode } from '@/lib/demo';
 import { DemoPageGuard } from '@/components/demo-page-guard';
-import type { ZhibiState } from '@/types/state';
 
 interface ProjectItem {
   id: string;
@@ -36,7 +35,10 @@ export default function HistoryPage() {
 }
 
 function HistoryPageInner() {
-  const { patch, refresh } = useZhibiState();
+  const { switchProject, refresh } = useZhibiState();
+  const alive = useRef(true);
+  const switchOrder = useRef(0);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const router = useRouter();
   const [list, setList] = useState<ProjectItem[] | null>(null); // null = 加载中
   const [err, setErr] = useState('');
@@ -58,16 +60,16 @@ function HistoryPageInner() {
 
   // 打开（复刻 switchProject：POST → patch(state) → 回工作台；track 为空则工作台自然落 onboarding）
   const open = async (id: string) => {
+    const order = ++switchOrder.current;
+    const current = () => alive.current && order === switchOrder.current;
     setBusyId(id);
     setErr('');
     try {
-      const s = await apiPost<ZhibiState>('/api/projects/switch', { id });
-      patch(s);
-      router.push('/');
+      if (await switchProject(id, current)) router.push('/');
     } catch (e) {
-      setErr('切换失败：' + ((e as Error).message || String(e)));
+      if (current()) setErr('切换失败：' + ((e as Error).message || String(e)));
     } finally {
-      setBusyId('');
+      if (current()) setBusyId('');
     }
   };
 

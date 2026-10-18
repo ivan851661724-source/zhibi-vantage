@@ -179,8 +179,132 @@ const CHANNEL_LINK = {
   tmallJD: /(tmall\.com\/shop\/\d+|jd\.com\/(?:[\w-]+\/?))/i,
   shopifyDTC: /myshopify\.com/i
 };
+// 目录摘录同时送入证据展示与分析输入；partial不能描述为完整目录。
+function shopifyCatalogExcerpt(shopify, comp) {
+  const scope = shopify.partialScan
+    ? `本次已观察${shopify.total}款，扫描未完成（原因：${shopify.partialScanReason || '未提供'}）`
+    : `共${shopify.total}款`;
+  return (comp.pricePoints || []).length
+    ? `${scope}，${fmtMoney(comp.pricePoints[0], comp.currency)}-${fmtMoney(comp.pricePoints[comp.pricePoints.length - 1], comp.currency)}`
+    : (comp.currencyMismatch ? `${scope}（店铺币种 ${shopify.currency || comp.shopCurrency || ''}，价格未入带）` : `${scope}${(comp.freebies || []).length ? `（免费品 ${comp.freebies.length}）` : ''}`);
+}
+
+function researchEvidenceText(evidences) {
+  return evidences.length
+    ? evidences.map(e => `[${e.id}] (tier${e.tier}·${e.kind}) ${e.title} — ${e.url}\n${e.excerpt}`).join('\n\n')
+    : '(本轮未获得任何可用证据)';
+}
+
+// 逐页复用原Evidence/Fact/Diff装配；单snapshotId兼容，一页失败不抹掉其他页证据。
+function persistShopifyPriceEvidence(state, comp, shopify, anchorDomain) {
+  comp.priceMetric = null;
+  comp.shopifyPartialScan = !!shopify.partialScan;
+  comp.shopifyPartialScanReason = shopify.partialScanReason || null;
+  // ---- M0-02：Evidence 基础层接线（additive，不改 legacy 契约）----
+  // 快照已落盘时，从快照 raw 原始字节确定性提取产品公开价格 Observation Evidence
+  // （verified）；失败态快照 → unavailable Evidence（source failure ≠ no_change，
+  // 00 §38）。best-effort：任何异常仅记运营错误，绝不影响 legacy 调研路径
+  // （修正 9 兼容规则）。规格锚点：00 v1.2 §1.5/§2/§5/§26/§37/§38；05 v0.3.1 §10/§19.6；06 v0.3 Traceability。
+  // M1: currency is replayed from the paired same-scope cart snapshot, never comp.currency.
+  const snapshotIds = [...new Set((Array.isArray(shopify.snapshotIds) && shopify.snapshotIds.length
+    ? shopify.snapshotIds : [shopify.snapshotId]).filter(Boolean))];
+  if (snapshotIds.length) {
+    try {
+      const EvidenceExtract = require('./evidence-extract.js');
+      const evRes = { ok: false, evidence_ids: [], unavailable: false, empty: true, reason: null };
+      for (const snapshotId of snapshotIds) {
+        try {
+          const page = EvidenceExtract.extractShopifyPriceEvidence({
+            tenantId: state.tenantId || undefined,
+            snapshotId,
+            currencySnapshotId: shopify.currencySnapshotId || undefined,
+            entityRef: { brand_name: comp.name || null, domain: anchorDomain || null, source_url: shopify.url || null },
+            projectRef: state.projectId || null,
+          });
+          if (page.ok) {
+            evRes.ok = true;
+            evRes.evidence_ids.push(...(page.evidence_ids || []));
+            evRes.unavailable = evRes.unavailable || !!page.unavailable;
+            evRes.empty = evRes.empty && !!page.empty;
+          } else {
+            evRes.reason = evRes.reason || page.reason || 'error';
+          }
+        } catch (e) {
+          evRes.reason = evRes.reason || 'error';
+          require('../services/logger.js').error('evidence_extract_error', { competitor: comp.id, snapshot_id: snapshotId, error: String((e && e.message) || e).slice(0, 200) });
+        }
+      }
+      evRes.evidence_ids = [...new Set(evRes.evidence_ids)];
+      comp.evidenceExtract = { evidence_count: evRes.evidence_ids.length, unavailable: evRes.unavailable, empty: evRes.empty && !evRes.reason, reason: evRes.reason };
+      // ---- M0-03：Fact 最小层接线（additive）----
+      // verified 价格 Evidence → public_product_price Fact（值逐字继承自
+      // Evidence，unavailable 不产 Fact——02 原则 4 unavailable≠0）。规格锚点：
+      // 00 v1.2 §1.3/§5/§37/§50；02 v0.3 §1/§2.1；06 v0.3 Traceability。
+      if (evRes.ok && evRes.evidence_ids && evRes.evidence_ids.length) {
+        try {
+          const FactStore = require('./fact-store.js');
+          let factCount = 0;
+          const newFactIds = [];
+          const recordedFactIds = [];
+          for (const eid of evRes.evidence_ids) {
+            const fr = FactStore.recordPriceFactFromEvidence({ tenantId: state.tenantId || undefined, evidenceId: eid });
+            if (fr.recorded) recordedFactIds.push(fr.meta.fact_id);
+            if (fr.recorded && !fr.duplicate) { factCount++; newFactIds.push(fr.meta.fact_id); }
+          }
+          // Retry Facts belong to this explicit observation too. Diff/Event retain
+          // their original new-Fact-only behavior; Metric does not feed S2/S3.
+          let metricResult = { recorded: false, reason: 'error' };
+          try {
+            const PriceMetric = require('./price-metric.js');
+            metricResult = PriceMetric.recordPriceMetric({ tenantId: state.tenantId || undefined,
+              factIds: recordedFactIds, snapshotIds, currencySnapshotId: shopify.currencySnapshotId || undefined });
+            if (metricResult.recorded) comp.priceMetric = PriceMetric.metricSummary(metricResult.meta);
+          } catch (me) {
+            require('../services/logger.js').error('price_metric_error', { competitor: comp.id, error: String((me && me.message) || me).slice(0, 200) });
+          }
+          // ---- M0-05：Diff → price_change_observed 检测接线（additive）----
+          // 新 Fact 落盘后找同 entity 上一观察 → Diff；仅 changed Diff 产事件
+          // （02 v0.3 §10.1）。规格锚点：00 v1.2 §37/§50；02 §10.1；06 Traceability。
+          let eventCount = 0; let diffCount = 0; let detectReason = null;
+          const comparisons = [];
+          const newFacts = new Set(newFactIds);
+          for (const fid of recordedFactIds) {
+            if (!newFacts.has(fid)) {
+              comparisons.push({ fact_id: fid, status: null, diff_id: null, event_id: null, reason: 'not_replayed' });
+              continue;
+            }
+            try {
+              const DomainEvent = require('./domain-event.js');
+                const dr = DomainEvent.detectPriceChangeFromFact({ tenantId: state.tenantId || undefined, factId: fid });
+                comparisons.push({ fact_id: fid, status: dr.status || null, diff_id: dr.diff_id || null, event_id: dr.event_id || null, reason: dr.reason || null });
+                if (dr.ok && dr.diff_id) diffCount++;
+                if (dr.ok && dr.event_id) eventCount++;
+                if (dr.ok && !dr.diff_id && dr.reason) detectReason = dr.reason; // no_previous_fact 等诚实记录
+            } catch (de) {
+              comparisons.push({ fact_id: fid, status: null, diff_id: null, event_id: null, reason: 'comparison_failed' });
+              detectReason = 'comparison_failed';
+              try { require('../services/logger.js').error('event_detect_error', { competitor: comp.id, error: String((de && de.message) || de).slice(0, 200) }); } catch (_) {}
+            }
+          }
+          comp.factExtract = { fact_count: factCount, evidence_count: evRes.evidence_ids.length, diff_count: diffCount, event_count: eventCount, detect_reason: detectReason, comparisons, reason: null, metric_reason: metricResult.recorded ? null : metricResult.reason };
+        } catch (fe) {
+          comp.factExtract = { fact_count: 0, evidence_count: (evRes.evidence_ids || []).length, diff_count: 0, event_count: 0, detect_reason: null, comparisons: [], reason: 'error' };
+          try { require('../services/logger.js').error('fact_extract_error', { competitor: comp.id, error: String((fe && fe.message) || fe).slice(0, 200) }); } catch (_) {}
+        }
+      }
+    } catch (e) {
+      comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: 'error' };
+      logAttempt(comp, 'evidence', shopify.url || comp.url, 'shopify', false, 'Evidence 提取异常（不影响调研主链路）：' + String((e && e.message) || e).slice(0, 160));
+      try { require('../services/logger.js').error('evidence_extract_error', { competitor: comp.id, snapshot_id: shopify.snapshotId, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
+    }
+  }
+
+}
+
 // 深研 v2：证据链驱动 —— L2意图查询 + L3抓取正文/结构化价格 + L4锚点消歧 + L5置信度代码推导
 async function deepResearchOne(comp, state, config, runIdOverride) {
+  // Clear before the first save/network await, including early failures.
+  comp.priceMetric = null;
   // 审核整改 §一：阶段度量归因 runId——用户点卡重新执行（enrichOne 独立 run）时用
   // 覆盖参数；否则沿用 state.runId（discover 创建的 run）。legacy state 无 runId → null。
   const _telemetryRunId = runIdOverride || state.runId || null;
@@ -222,7 +346,11 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   let officialPage = { ok: false }, shopify = { ok: false }, officialEv = null;
   if (comp.url) {
     const _tFetch = Date.now();
-    [officialPage, shopify] = await Promise.all([fetchPage(comp.url), fetchShopifyProducts(comp.url)]);
+    // M4-C 归因补全：fetchPage 补传 tenantId/trigger（net.js 可选 opts 签名，业务返回值
+    // 不变；timeoutMs 传 undefined 保持 net.js 默认）——修复该调用点快照/缓存缺租户归因的
+    // provenance 缺口，与同行 fetchShopifyProducts 的显式 tenantId 对齐。
+    // trigger='manual'：deep-research 属用户触发的调研链路（03 §20 trigger 词表）。
+    [officialPage, shopify] = await Promise.all([fetchPage(comp.url, undefined, { tenantId: state.tenantId || undefined, trigger: 'manual' }), fetchShopifyProducts(comp.url, { tenantId: state.tenantId || undefined, projectRef: state.projectId || null })]);
     Telemetry.recordStage({ runId: _telemetryRunId, tenantId: state.tenantId, projectId: state.projectId,
       stage: 'site_shopify_fetch', durationMs: Date.now() - _tFetch,
       status: officialPage.ok || shopify.ok ? 'ok' : 'error', provider: 'official+shopify' });
@@ -238,7 +366,7 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
 
   comp.priceVerified = false;
   comp.freebies = [];        // 重研残留清除（shopify.ok 时下方重填；此前上一轮的免费品清单会跨轮残留）
-  comp.priceStats = null;    // 同上：客单价三件套按本轮实抓重算
+  comp.priceStats = null;    // 同上：商品价格统计按本轮实抓重算
   comp.priceVerdict = null;  // S3 判定同步重算
   comp.soldOutCount = 0;     // 断货信号数据基础（规格 5.2；事件滞回逻辑后续接入）
   comp.typeDist = null;      // S2 类目占比数据基础（结构化，替代 LLM 猜的前置）
@@ -246,6 +374,8 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   comp.shopifyCollections = null;
   comp.shopCurrency = null;      // 重研残留清除：本轮 shopify 抓取失败时不得残留上一轮的店铺币种
   comp.shopifyTruncated = false; // 同上
+  comp.shopifyPartialScan = false;
+  comp.shopifyPartialScanReason = null;
   comp.adLibrary = null;     // Meta 广告库（本轮重取；token 未配置保持 null = 未探测）
   comp.adCreatives = null;   // S-D 广告主推信号（hero-product 消费），随广告库重取
   let shopifyEv = null;
@@ -253,7 +383,7 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
     // ▶ 报告-数据同源 §5：价格点前置过滤 $0 —— 免费品/赠品/错误条目不进价格点，
     // 单列 comp.freebies（不参与价格带聚合），避免 $0 脏值污染"全价格带覆盖"结论。
     // 注意先取整再过滤：$0.49 这类小额价"先滤后取整"会归 0 漏进价格带下限。
-    // 已下架/全变体不可售不计入客单价口径（规格 §四 #1：不卖的东西不构成客单价），单记 soldOutCount。
+    // 已下架/全变体不可售不计入当前商品价格统计（02 §6.1），单记soldOutCount。
     const onSaleItems = shopify.items.filter(x => !x.soldOut);
     comp.soldOutCount = shopify.items.length - onSaleItems.length;
     const rawPts = onSaleItems.map(x => x.minPrice).filter(n => n != null);
@@ -280,7 +410,7 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
     }
     comp.priceVerified = comp.pricePoints.length > 0;
 
-    // ▶ 客单价三件套 + S3 价格带判定（算法规格 20261003 §三）：中位数 + 主力带(P25-P75) + 样本明细。
+    // 商品价格统计（02 §6）：中位数 + 主力带(P25-P75) + 样本明细；现有S3判定阈值本票不改。
     // repPrice=变体中位价（商品代表价）；P5/P95 双截尾带剔除明细；多峰无销量权重不裁决。
     // 统计币种 = 实抓币种（shopCur；币种不匹配时 median 仍是原币真实数字，verdict 按币种不一致拒绝裁决）。
     // 目标价 = 用户画像 intent.profile.priceBand（min=max=点值；币种跟随目标市场）。
@@ -294,7 +424,7 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
     if (!shopCur && comp.priceVerdict) comp.priceVerdict.pendingHuman = true;
     const _st = comp.priceStats;
     logAttempt(comp, 'price-stats', shopify.url, 'shopify', true,
-      `客单价样本 ${_st.sample.used}/${_st.sample.onSale} 计入（剔除 ${_st.sample.dropped}，断货 ${_st.sample.soldOut}，免费 ${_st.sample.free}），` +
+      `商品价格样本 ${_st.sample.used}/${_st.sample.onSale} 计入（剔除 ${_st.sample.dropped}，断货 ${_st.sample.soldOut}，免费 ${_st.sample.free}），` +
       `中位数 ${_st.median != null ? fmtMoney(_st.median, _st.currency || comp.currency) : 'n/a'}，主力带 ${_st.band ? `${fmtMoney(_st.band.min, _st.currency || comp.currency)}-${fmtMoney(_st.band.max, _st.currency || comp.currency)}` : 'n/a'}，` +
       `判定 ${_st.verdict.code}${_st.truncatedBy ? `（截尾 ${_st.truncatedBy}）` : ''}`);
 
@@ -337,75 +467,13 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
         ? _prevReason + '+wrongSegment' : 'wrongSegment';
       logAttempt(comp, 's2-grocery-gate', comp.url || '', 'shopify', false, `S2 杂货铺判定：类目 ${comp.s2Match.distinctTypes} 个、目标类目占比 ${(comp.s2Match.typeRatio * 100).toFixed(0)}% < 40% → 自动进已剔除清单（原因 wrongSegment，可拉回赦免）`);
     }
-    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据',
-      comp.pricePoints.length ? `共${shopify.total}款，${fmtMoney(comp.pricePoints[0], comp.currency)}-${fmtMoney(comp.pricePoints[comp.pricePoints.length - 1], comp.currency)}`
-        : (comp.currencyMismatch ? `共${shopify.total}款（店铺币种 ${shopCur}，价格未入带）` : `共${shopify.total}款${comp.freebies.length ? `（免费品 ${comp.freebies.length}）` : ''}`),
-      anchorDomain);
+    shopifyEv = addEv(shopify.url, 'shopify', '官网结构化价格数据', shopifyCatalogExcerpt(shopify, comp), anchorDomain);
   }
   logAttempt(comp, 'shopify', comp.url || '(无官网URL)', 'shopify', shopify.ok, shopify.ok ? `Shopify 结构化数据 ${shopify.total} 款` : (comp.url ? '未检出 Shopify products.json' : '无官网URL，跳过'));
   // /collections.json 店铺集合（S2 跨类目佐证）：与定向探测/LLM 重叠抓取，不增加串行延迟
   const collectionsP = shopify.ok ? fetchShopifyCollections(comp.url).catch(() => null) : null;
 
-  // ---- M0-02：Evidence 基础层接线（additive，不改 legacy 契约）----
-  // 快照已落盘时，从快照 raw 原始字节确定性提取产品公开价格 Observation Evidence
-  // （verified）；失败态快照 → unavailable Evidence（source failure ≠ no_change，
-  // 00 §38）。best-effort：任何异常仅记运营错误，绝不影响 legacy 调研路径
-  // （修正 9 兼容规则）。规格锚点：00 v1.2 §1.5/§2/§5/§26/§37/§38；05 v0.3.1 §10/§19.6；06 v0.3 Traceability。
-  // P0-1（PR#5 评审）：不传 currency——cart.js 探测币种无快照背书，Evidence 币种
-  // 恒 null（诚实缺失），cart.js 快照化属后续票。
-  if (shopify.snapshotId && shopify._prov && shopify._prov.recorded) {
-    try {
-      const EvidenceExtract = require('./evidence-extract.js');
-      const evRes = EvidenceExtract.extractShopifyPriceEvidence({
-        tenantId: state.tenantId || undefined,   // 显式租户 > ALS 兜底（后台队列脱离请求上下文）
-        snapshotId: shopify.snapshotId,
-        entityRef: { brand_name: comp.name || null, domain: anchorDomain || null, source_url: shopify.url || null },
-        projectRef: state.projectId || null,
-      });
-      if (evRes.ok) comp.evidenceExtract = { evidence_count: (evRes.evidence_ids || []).length, unavailable: !!evRes.unavailable, empty: !!evRes.empty, reason: null };
-      else comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: evRes.reason || null };
-      // ---- M0-03：Fact 最小层接线（additive）----
-      // verified 价格 Evidence → public_product_price Fact（值逐字继承自
-      // Evidence，unavailable 不产 Fact——02 原则 4 unavailable≠0）。规格锚点：
-      // 00 v1.2 §1.3/§5/§37/§50；02 v0.3 §1/§2.1；06 v0.3 Traceability。
-      if (evRes.ok && evRes.evidence_ids && evRes.evidence_ids.length) {
-        try {
-          const FactStore = require('./fact-store.js');
-          let factCount = 0;
-          const newFactIds = [];
-          for (const eid of evRes.evidence_ids) {
-            const fr = FactStore.recordPriceFactFromEvidence({ tenantId: state.tenantId || undefined, evidenceId: eid });
-            if (fr.recorded && !fr.duplicate) { factCount++; newFactIds.push(fr.meta.fact_id); }
-          }
-          // ---- M0-05：Diff → price_change_observed 检测接线（additive）----
-          // 新 Fact 落盘后找同 entity 上一观察 → Diff；仅 changed Diff 产事件
-          // （02 v0.3 §10.1）。规格锚点：00 v1.2 §37/§50；02 §10.1；06 Traceability。
-          let eventCount = 0; let diffCount = 0; let detectReason = null;
-          if (newFactIds.length) {
-            try {
-              const DomainEvent = require('./domain-event.js');
-              for (const fid of newFactIds) {
-                const dr = DomainEvent.detectPriceChangeFromFact({ tenantId: state.tenantId || undefined, factId: fid });
-                if (dr.ok && dr.diff_id) diffCount++;
-                if (dr.ok && dr.event_id) eventCount++;
-                if (dr.ok && !dr.diff_id && dr.reason) detectReason = dr.reason; // no_previous_fact 等诚实记录
-              }
-            } catch (de) {
-              try { require('../services/logger.js').error('event_detect_error', { competitor: comp.id, error: String((de && de.message) || de).slice(0, 200) }); } catch (_) {}
-            }
-          }
-          comp.factExtract = { fact_count: factCount, evidence_count: evRes.evidence_ids.length, diff_count: diffCount, event_count: eventCount, detect_reason: detectReason, reason: null };
-        } catch (fe) {
-          comp.factExtract = { fact_count: 0, evidence_count: (evRes.evidence_ids || []).length, diff_count: 0, event_count: 0, detect_reason: null, reason: 'error' };
-          try { require('../services/logger.js').error('fact_extract_error', { competitor: comp.id, error: String((fe && fe.message) || fe).slice(0, 200) }); } catch (_) {}
-        }
-      }
-    } catch (e) {
-      comp.evidenceExtract = { evidence_count: 0, unavailable: false, empty: false, reason: 'error' };
-      logAttempt(comp, 'evidence', shopify.url || comp.url, 'shopify', false, 'Evidence 提取异常（不影响调研主链路）：' + String((e && e.message) || e).slice(0, 160));
-      try { require('../services/logger.js').error('evidence_extract_error', { competitor: comp.id, snapshot_id: shopify.snapshotId, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
-    }
-  }
+  persistShopifyPriceEvidence(state, comp, shopify, anchorDomain);
 
   // ---- L2 意图分型定向查询（渠道存在性 / 口碑 / 动作），并行 ----
   const probes = {
@@ -587,9 +655,7 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   } catch (e) { /* 广告库失败不阻断深研主链路 */ }
 
   // ---- LLM 只负责"从证据里抽值"，置信度由证据类型推导 ----
-  const evText = evidences.length
-    ? evidences.map(e => `[${e.id}] (tier${e.tier}·${e.kind}) ${e.title} — ${e.url}\n${e.excerpt}`).join('\n\n')
-    : '(本轮未获得任何可用证据)';
+  const evText = researchEvidenceText(evidences);
   // 平台集收缩：只抽取用户勾选的平台；未被 L2 预填(codedChannels)的才进 LLM schema
   const platforms = resolvePlatforms(state.intent);
   const scopeChannels = CHANNELS.filter(c => platforms.includes(c));
@@ -683,8 +749,8 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
   if (comp.priceVerified && comp.priceBand && shopifyEv) {
     comp.priceBand.basis = 'verified'; comp.priceBand.confidence = 'high';
     comp.priceBand.range = `${fmtMoney(Math.min(...comp.pricePoints), comp.currency)}-${fmtMoney(Math.max(...comp.pricePoints), comp.currency)}（实抓）`;
-    // ▶ B-5c（2026-09-12 任务书）：verified 路径补数值 mid（客单价点值）。
-    // 算法规格 §三：客单价 = 截尾后样本中位数（均值/minmax 均值都会被 $1 挂件与 $500 礼盒拉歪）；
+    // verified路径补数值mid（商品价格点值；02 §6代表价与分位统计）。
+    // 优先复用本轮商品价格中位数；无统计时仍保留现有区间回退兼容。
     // priceStats 不可得时退化为 min-max 均值（诚实降级，仍有值）。
     // LLM inferred 路径不写 mid（诚实纪律：无实抓不算数）。
     if (comp.pricePoints.length) {
@@ -1077,4 +1143,4 @@ function enforceBasisEvidence(comp) {
 }
 
 
-module.exports = { getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence, runTerminalStatus };
+module.exports = { shopifyCatalogExcerpt, researchEvidenceText, persistShopifyPriceEvidence, getQ, buildResearchQueue, enqueueResearch, ensureQueue, runQueue, sleep, CHANNEL_LINK, deepResearchOne, lookupBrand, enrichOne, crossValidateTearing, enforceBasisEvidence, runTerminalStatus };

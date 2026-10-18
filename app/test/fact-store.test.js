@@ -85,7 +85,7 @@ t('1. Verified evidence derives public_product_price Fact with verbatim value', 
   assert.deepEqual(fact.value.prices, ev.extracted_value.prices);
   assert.equal(fact.claim.field, 'product.price');
   assert.equal(fact.claim.scope, 'public_price_observation');
-  assert.equal(fact.derivation_version, 'fact-extract-1');
+  assert.equal(fact.derivation_version, 'fact-extract-2');
   assert.equal(fact.entity_key, ev.entity_key);
 });
 

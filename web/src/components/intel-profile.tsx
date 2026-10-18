@@ -5,9 +5,11 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
 import { toast } from '@/lib/toast';
-import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useZhibiState, useStateOperation } from '@/hooks/use-zhibi-state';
 import { LABELS, lbl } from '@/lib/labels';
 import type { Competitor, ZhibiState } from '@/types/state';
+import { PriceMetricBlock, metricPrice } from '@/components/price-metric-detail';
+import { MonitoringControls } from '@/components/monitoring-controls';
 
 // ---- 基础字典（移植 app.js 顶部常量） ----
 const REL_LABEL: Record<string, string> = {
@@ -205,9 +207,10 @@ const PRICE_VERDICT_LABEL: Record<string, string> = {
   undetermined: '币种不一致待确认',
 };
 
-// 客单价三件套（Shopify 实抓才有）：中位数 + 主力带 + 「N/M 款计入」样本说明 + 可展开剔除明细。
-// 前端只做展示不做计算（规格 §六）：所有数字直读 priceStats，缺失即整块不渲染。
+// 优先展示服务端 priceMetric 的已观察目录统计；无 Metric 时兼容旧 priceStats。
+// 两条分支均只展示服务端数值，不重算、不混用引用，也不替代当前用户的价格字段核验。
 function PriceStatsBlock({ c }: { c: Competitor }) {
+  if (c.priceMetric) return <PriceMetricBlock key={c.priceMetric.metric_id} metric={c.priceMetric} />;
   const st = c.priceStats as {
     median?: number | null; band?: { min?: number; max?: number } | null; currency?: string | null;
     basis?: string; truncatedBy?: string | null;
@@ -220,7 +223,7 @@ function PriceStatsBlock({ c }: { c: Competitor }) {
   const vLabel = st.verdict && st.verdict.code ? PRICE_VERDICT_LABEL[st.verdict.code] : '';
   const drops = s.dropList || [];
   return (
-    <FieldBlock title="客单价（主力带）">
+    <FieldBlock title="商品价格（旧版统计）">
       <span className="tag">
         中位数 {sym}{st.median} · 主力带 {st.band && st.band.min != null ? `${sym}${st.band.min}–${sym}${st.band.max}` : '—'}
       </span>
@@ -254,9 +257,11 @@ function PricingItems({ c }: { c: Competitor }) {
   const statsBlock = <PriceStatsBlock key="pstats" c={c} />;
   const pf = c.priceField as FieldLike | undefined;
   if (pf && pf.display) {
-    nodes.push(<FieldBlock key="pf" title="定价（值级核验）"><PriceFieldHTML c={c} /></FieldBlock>);
-    nodes.push(statsBlock);
-  } else {
+    nodes.push(<FieldBlock key="pf" title={c.priceMetric ? '价格字段（值级核验）' : '定价（值级核验）'}>
+      <PriceFieldHTML c={c} />
+      {c.priceMetric ? <p className="hint">此价格字段保留当前页面的核验结果、纠错提示及来源；下方公共目录样本统计独立展示，字段纠错不改写公共统计。</p> : null}
+    </FieldBlock>);
+  } else if (!c.priceMetric) {
     const band = c.priceBand as { band?: string; range?: string; basis?: string } | undefined;
     const points = (c.pricePoints as number[]) || [];
     if (band || points.length) {
@@ -279,10 +284,20 @@ function PricingItems({ c }: { c: Competitor }) {
           <span className="tag inferred">旧版·重研后启用值级核验</span>
         </FieldBlock>,
       );
-      nodes.push(statsBlock);
     }
   }
-  return <>{nodes}</>;
+  return <><CatalogLimit c={c} />{nodes}{statsBlock}</>;
+}
+
+function CatalogLimit({ c }: { c: Competitor }) {
+  if (!c.shopifyPartialScan && !c.shopifyTruncated) return null;
+  const reason = c.shopifyPartialScanReason || '';
+  let explanation = '部分商品资料未能取得，具体原因暂不可用。';
+  if (c.shopifyTruncated || reason.includes('budget')) explanation = '本次已达到目录读取上限，后续页面尚未检查。';
+  else if (/products_json_page_\d+_http_429$/.test(reason)) explanation = '后续页面访问频率受限，未能完成目录检查。';
+  else if (/products_json_page_\d+_parse_failed$/.test(reason)) explanation = '后续页面资料未能解析，未能完成目录检查。';
+  else if (/products_json_page_\d+_(http_\d+|error)$/.test(reason)) explanation = '后续页面访问失败，未能完成目录检查。';
+  return <p className="hint" role="note"><b>采集不完整</b>：{explanation} 当前价格和商品统计仅代表已取得的部分，不能视为全店完整目录。</p>;
 }
 
 function ChannelItems({ c }: { c: Competitor }) {
@@ -306,7 +321,7 @@ function ChannelItems({ c }: { c: Competitor }) {
 }
 
 function ProductItems({ c }: { c: Competitor }) {
-  const nodes: ReactNode[] = [];
+  const nodes: ReactNode[] = [<CatalogLimit key="catalog-limit" c={c} />];
   const pm = c.productMatrix as
     | { skuCount?: number; priceBandDist?: string; heroSku?: string[]; productLines?: string[] }
     | undefined;
@@ -562,7 +577,9 @@ export function IntelProfile({
   const osLine = [c.category as string, tierTxt].filter(Boolean).join(' · ') || '—';
   // 档案头指标（P1-3：缺数据口径统一——「未探测」≠ 确认的 0/—）
   const pr = compPriceRange(c);
-  const priceTxt = pr
+  const priceTxt = c.priceMetric
+    ? `${metricPrice(c.priceMetric.value.p25, c.priceMetric.currency)}–${metricPrice(c.priceMetric.value.p75, c.priceMetric.currency)}`
+    : pr
     ? curSym(pr.currency) + pr.min + '–' + pr.max
     : ((c.priceField as FieldLike)?.display) || (c.priceBand as { range?: string })?.range || '未探测';
   const lc = c.launchCadence as FieldLike | undefined;
@@ -589,7 +606,7 @@ export function IntelProfile({
           <div className="pf-tag">{osLine}{c.estSize ? ' · ' + (c.estSize as string) : ''}</div>
           {c.url ? <a className="pf-url" href={c.url as string} target="_blank" rel="noopener">{c.url as string} ↗</a> : null}
           <div className="pf-metrics">
-            <div className="pf-m"><span className="k">主力价格带</span><span className="v num">{priceTxt}</span></div>
+            <div className="pf-m"><span className="k">{c.priceMetric ? '目录样本四分位区间' : '旧版价格区间'}</span><span className="v num">{priceTxt}</span></div>
             <div className="pf-m"><span className="k">上新节奏</span><span className="v">{lcTxt}</span></div>
             <div className="pf-m"><span className="k">口碑</span><span className="v num">{rtTxt}</span></div>
             <div className="pf-m"><span className="k">覆盖渠道</span><span className={chN ? 'v num' : 'v'}>{chN ? <>{chN} <small>个</small></> : '未探测'}</span></div>
@@ -602,11 +619,13 @@ export function IntelProfile({
         </div>
       </div>
 
+      <MonitoringControls c={c} projectId={state.projectId || null} />
+
       {/* 六字段折叠 */}
-      <IntelFieldBox icon="price" colorVar="down" title="价格" sub="price · 实抓 + 推算混合" defaultOpen>
+      <IntelFieldBox icon="price" colorVar="down" title="价格" sub={c.priceMetric ? '已观察目录 · 派生统计' : 'price · 旧版字段兼容'} defaultOpen>
         <div className="fb-value">
           {priceTxt}{' '}
-          {(c.priceField as FieldLike)?.basis
+          {c.priceMetric ? null : (c.priceField as FieldLike)?.basis
             ? intelEvTag((c.priceField as FieldLike).basis)
             : (c.priceBand as { basis?: string })?.basis
               ? intelEvTag((c.priceBand as { basis?: string }).basis)
@@ -646,8 +665,11 @@ export function IntelProfile({
 function BlankItems({ c }: { c: Competitor }) {
   const [busy, setBusy] = useState<string | null>(null);
   const { patch } = useZhibiState();
+  const beginOperation = useStateOperation();
 
   async function deepdive(fieldKey: string) {
+    const operation = beginOperation();
+    if (!operation.isCurrent()) return;
     setBusy(fieldKey);
     const label = L1_FIELD_LABEL[fieldKey] || fieldKey;
     try {
@@ -656,17 +678,18 @@ function BlankItems({ c }: { c: Competitor }) {
         field: fieldKey,
         level: 'field',
       });
+      if (!operation.isCurrent()) return;
       if (r && r.state) {
         const okN = (r.results || []).filter((x) => x.ok).length;
-        patch(r.state); // 对齐旧版 state = r.state; renderAll()
+        if (!patch(r.state, operation)) return;
         toast(`「${label}」已补查（命中 ${okN} 项，来源可点开核验）。`);
       } else {
         toast(`「${label}」暂未挖到有效信息。`);
       }
     } catch (e) {
-      toast('深挖失败：' + (e instanceof Error ? e.message : String(e)));
+      if (operation.isCurrent()) toast('深挖失败：' + (e instanceof Error ? e.message : String(e)));
     } finally {
-      setBusy(null);
+      if (operation.isCurrent()) setBusy(null);
     }
   }
 

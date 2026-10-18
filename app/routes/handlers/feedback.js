@@ -89,6 +89,15 @@ async function materialAction(ctx, req, res, url, p) {
   }
   const s = ctx.loadState();
   if (!s) { ctx.sendJSON(res, 404, { error: 'NO_STATE' }); return true; }
+  // Optional project precondition; reject before mutations, persistence or telemetry.
+  if (body.projectId !== undefined) {
+    if (typeof body.projectId !== 'string' || !body.projectId.trim()) {
+      ctx.sendJSON(res, 400, { error: 'BAD_INPUT', message: '非法 projectId' }); return true;
+    }
+    if (body.projectId !== s.projectId) {
+      ctx.sendJSON(res, 409, { error: 'PROJECT_CHANGED', message: '当前调研已切换，请刷新后重试。' }); return true;
+    }
+  }
   s.decisions = s.decisions || {};
   // 键防护：__proto__ 等保留键会破坏对象原型
   const sid = (id === '__proto__' || id === 'constructor' || id === 'prototype') ? '' : id.replace(/[^\w\u4e00-\u9fff:-]/g, '').slice(0, 80);
@@ -108,6 +117,6 @@ async function materialAction(ctx, req, res, url, p) {
     }
   }
   ctx.saveState(s);
-  ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[sid] || null, decisions: s.decisions });
+  ctx.sendJSON(res, 200, { ok: true, id, action: s.decisions[sid] || null, decisions: s.decisions, projectId: s.projectId || null });
   return true;
 }

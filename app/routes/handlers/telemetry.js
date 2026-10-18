@@ -52,7 +52,8 @@ async function schedulerStatus(ctx, req, res, url, p) {
   if (p !== '/api/scheduler/status' || req.method !== 'GET') return false;
   const ap = ctx.getAuthPayload(req);
   if (!ap || ap.kind !== 'tenant') return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可查看。' });
-  return ctx.sendJSON(res, 200, Scheduler.status());
+  const formal = require('../../research/monitoring').getMonitoringRuntime().status(ap.payload.tid);
+  return ctx.sendJSON(res, 200, { ...Scheduler.status(), formal });
 }
 
 // ---------- GET/POST /api/alerts/settings（tenant：每日摘要收件人，R4.3） ----------

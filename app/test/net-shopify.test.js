@@ -4,6 +4,11 @@
 // （报告-数据同源 §5 的免费品单列从未生效）。修复后：全 0 元商品保留 minPrice=0 透传，
 // 混合免费+付费变体的商品仍以正价 min 为准（免费变体不拉低真实价）。
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zb-shopify-items-'));
+process.env.ZB_DATA_DIR = TMP;
 const { mapShopifyItems } = require('../research/net.js');
 
 let passed = 0, failed = 0;
@@ -57,7 +62,39 @@ t('repPrice = 变体中位价（规格 3.1 第 2 步：引流小样最低价不�
   assert.equal(items[0].maxPrice, 31);
 });
 
-t('soldOut：至少一个变体上报 available 且全 false 才算断货（字段缺失≠断货，禁推断）', () => {
+t('当前代表价排除明确不可售变体，原始价格区间保留（02 §6.1）', () => {
+  const products = [{ title: 'Active size', variants: [
+    { price: '10', available: true }, { price: '100', available: false }, { price: '200', available: false },
+  ] }];
+  const items = mapShopifyItems(products);
+  assert.equal(items[0].repPrice, 10);
+  assert.equal(items[0].minPrice, 10);
+  assert.equal(items[0].maxPrice, 200);
+  assert.equal(items[0].soldOut, false);
+  assert.equal(products[0].variants.length, 3, '原始输入保留');
+});
+
+t('availability缺失保持可观察价格，不编造断货或新的准入裁决', () => {
+  const items = mapShopifyItems([{ title: 'Unknown size', variants: [
+    { price: '10' }, { price: '30' }, { price: '200', available: false },
+  ] }]);
+  assert.equal(items[0].repPrice, 20);
+  assert.equal(items[0].maxPrice, 200);
+});
+
+t('可售价格缺失不借缺货价格编造免费；只有真实可售0才记0', () => {
+  const items = mapShopifyItems([
+    { title: 'Missing active price', variants: [{ price: 'bad', available: true }, { price: '100', available: false }] },
+    { title: 'Free active price', variants: [{ price: '0', available: true }, { price: '100', available: false }] },
+    { title: 'Unknown availability', variants: [{ price: '10' }, { price: '100', available: false }] },
+  ]);
+  assert.equal(items[0].repPrice, null);
+  assert.equal(items[1].repPrice, 0);
+  assert.equal(items[2].repPrice, 10);
+  assert.equal(items[2].soldOut, false, '部分availability未知不能判全规格断货');
+});
+
+t('soldOut：全部变体明确available=false才断货（字段缺失≠断货）', () => {
   const items = mapShopifyItems([
     { title: 'A', variants: [{ price: '10', available: false }, { price: '12', available: false }] },
     { title: 'B', variants: [{ price: '10', available: true }] },
@@ -65,6 +102,7 @@ t('soldOut：至少一个变体上报 available 且全 false 才算断货（字�
   ]);
   assert.equal(items.length, 3);
   assert.equal(items[0].soldOut, true);
+  assert.equal(items[0].repPrice, 11, '全缺货保留历史代表价，当前统计通过soldOut排除');
   assert.equal(items[1].soldOut, false);
   assert.equal(items[2].soldOut, false);
 });
@@ -108,5 +146,6 @@ t('SSRF：localhost / 元数据 IP 形态的站点 URL 被拒（不发起任何�
     catch (e) { failed++; console.error('  FAIL - ' + name + ' :: ' + (e && e.message || e)); }
   }
   console.log('\n=== net-shopify.test: ' + passed + ' passed, ' + failed + ' failed ===');
+  fs.rmSync(TMP, { recursive: true, force: true });
   process.exit(failed ? 1 : 0);
 })();

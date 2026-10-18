@@ -57,3 +57,6 @@ qa-*.tmp.js
 # 黑客松/比赛产物（本地脚本与生成的提交材料）
 scripts/hackathon/
 *.docx
+
+# Local pnpm package/project cache (may contain junctions into the checkout)
+.pnpm-store/

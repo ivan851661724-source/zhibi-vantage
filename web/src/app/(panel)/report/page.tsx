@@ -4,13 +4,12 @@
 // F-2（B-4 异步契约）：POST /api/brief 立即回 202 {ok,status:'running'}（401 NO_KEYS /
 // 404 NO_STATE 同步错误仍同步抛）→ 前端轮询 GET /api/state 按 s.briefStatus 分派：
 //   running → 继续轮（间隔 ≥3s，避免打爆 state 接口）
-//   done    → patch(s) 渲染 s.brief，停止轮询
+//   done    → patch(s) 触发统一权威REST对账，停止本页轮询
 //   failed  → 显示 s.briefError + 重试入口（重试 = 再 POST，后端幂等）
 // 轮询纪律：不新建接口/通道，只用现有 GET /api/state；组件卸载/切页清理定时器。
-// 注意：落地轮询结果用 patch() 而非 refresh()——refresh 走 stateSig 签名比对，
-// 签名不含 brief 字段，briefStatus 终态会被「数据未变」跳过导致报告永不渲染。
+// 轮询结果需携带当前项目操作所有权，切换项目后的旧终态不得覆盖新档案。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useZhibiState, useStateOperation } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { renderMarkdown } from '@/lib/md';
@@ -31,6 +30,7 @@ interface Brief {
 
 export default function ReportPage() {
   const { state, loading, patch } = useZhibiState();
+  const beginOperation = useStateOperation();
   const brief = (state ? (state.brief as Brief | undefined) : undefined) || undefined;
   const dist = (brief && brief.evidenceDist) || (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined);
   const [busy, setBusy] = useState(false);
@@ -49,19 +49,22 @@ export default function ReportPage() {
   }, []);
 
   // 组件卸载/页面切换：清理轮询定时器（任务书 F-2 第 3 条）
-  useEffect(() => stopPoll, [stopPoll]);
+  useEffect(() => { stopPoll(); return stopPoll; }, [stopPoll, beginOperation]);
 
-  // 轮询一次 /api/state：按 briefStatus 分派（终态 patch 落地，running 静默续轮）
+  // 按 briefStatus 分派；终态经Provider统一对账，避免本页旧读取覆盖较新的整包状态。
   const pollOnce = useCallback(async () => {
+    const operation = beginOperation();
+    if (!operation.isCurrent()) return;
     try {
       const s = await apiGet<ZhibiState>('/api/state');
+      if (!operation.isCurrent()) return;
       if (s.briefStatus === 'done') {
         stopPoll();
-        patch(s); // 绕过签名比对，brief 报告立即可渲染
+        if (!patch(s, operation)) return;
         setBusy(false);
       } else if (s.briefStatus === 'failed') {
         stopPoll();
-        patch(s);
+        if (!patch(s, operation)) return;
         setBusy(false);
         setErr(s.briefError || '报告生成失败，请点击「生成调研报告」重试');
       } else if (Date.now() - Math.max(Number(s.briefStartedAt) || 0, acceptRef.current) > BRIEF_STALE_MS) {
@@ -75,7 +78,7 @@ export default function ReportPage() {
     } catch {
       // 单次轮询失败静默，下一轮自愈（对齐 onPush 的 catch 口径）
     }
-  }, [patch, stopPoll]);
+  }, [patch, stopPoll, beginOperation]);
 
   const startPoll = useCallback(() => {
     if (pollRef.current) return; // 幂等：running 期间重复触发不叠加定时器
@@ -93,15 +96,19 @@ export default function ReportPage() {
   }, [state, startPoll]);
 
   async function generate() {
+    const operation = beginOperation();
+    if (!operation.isCurrent()) return;
     setErr('');
     setBusy(true);
     try {
       // F-2：POST 只负责任务受理（202）；401 NO_KEYS / 404 NO_STATE 同步错误会抛 ApiError。
       // 不再读 body 里的报告（异步契约下 body 无报告），改由轮询取终态。
       await apiPost('/api/brief');
+      if (!operation.isCurrent()) return;
       acceptRef.current = Date.now(); // 刷新本端 15 分钟窗：后端可能受理的是仍在跑的旧任务（其 startedAt 偏旧）
       startPoll();
     } catch (e) {
+      if (!operation.isCurrent()) return;
       setBusy(false);
       setErr(e instanceof Error ? e.message : '报告生成失败，请稍后再试');
     }
