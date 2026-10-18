@@ -4,9 +4,58 @@
 // 铁律：分母常驻可见、每条可溯源、置信度封顶「中」、覆盖率不足不作排序结论。
 // 结构：卖点空缺（市场空缺，来自空白视图）默认主层 → 口碑机会（满意度×重要性）补充层。
 // 交互：散点图点 → 高亮下方对应卡片并平滑滚动（复刻 L1292-1299）。
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import type { ZhibiState } from '@/types/state';
+import { fetchOpportunities, type OpportunityView } from '@/lib/core-api';
+
+// 统一读模型机会基础（SC-04）：先展示「已具备什么数据」，再展示机会。
+// 样本不足 → 明确「资料不足，暂不生成机会判断」，绝不把未接入维度伪装成市场机会。
+function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
+  const [v, setV] = useState<OpportunityView | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    const ctrl = new AbortController();
+    fetchOpportunities(projectId, ctrl.signal)
+      .then(r => { if (alive) { setV(r); setErr(null); } })
+      .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
+    return () => { alive = false; ctrl.abort(); };
+  }, [projectId]);
+  if (err) return <p className="core-err">{err}</p>;
+  if (!v) return null;
+  return (
+    <section className="core-opp-basis">
+      <h3>数据基础与样本范围</h3>
+      <ul>
+        <li>竞争品牌数：{v.sample.brandCount}（已具备真实数据：{v.sample.brandsWithData}{v.sample.required ? ` / 至少需要 ${v.sample.required}` : ''}）</li>
+        <li>机会状态：{v.statusText}</li>
+        {v.note ? <li>{v.note}</li> : null}
+      </ul>
+      {v.status === 'insufficient' ? (
+        <p className="hint">当前样本不足，Vantage 不输出机会结论（不做估算填充）。</p>
+      ) : (
+        <ul className="core-opp-items">
+          {v.items.slice(0, 10).map((it, i) => (
+            <li key={it.id || i}>
+              <span>{it.theme}</span>
+              <span>覆盖品牌数 {it.brandCount != null ? it.brandCount : '—'}</span>
+              <span>{it.status || '线索（待验证）'}</span>
+              {it.caveats && it.caveats.length ? <span className="core-opp-caveat">限制：{it.caveats.join('；')}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {v.limits.length ? (
+        <ul className="core-opp-limits">
+          {v.limits.map((l, i) => <li key={i}>{l}</li>)}
+        </ul>
+      ) : null}
+      <p className="hint">机会只是待验证线索，不是经营建议或确定结论。</p>
+    </section>
+  );
+}
 
 // ---------- 类型（对齐后端 opportunity / whiteSpace.gaps 结构） ----------
 interface OppSource {
@@ -398,6 +447,7 @@ export default function OpportunityPage() {
           <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
         </div>
       </div>
+      <UnifiedOpportunityBasis projectId={String((state as { projectId?: string } | null)?.projectId || '')} />
       <div className="ws-head">
         <h3>口碑机会 · 重要但没人做好的地方（补充层）</h3>
         <p>

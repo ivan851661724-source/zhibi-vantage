@@ -22,6 +22,7 @@ const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
 const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 const DataSurfaceH = require('./handlers/data-surface.js'); // 五维数据面（SC-02）：overview/dimension/refresh/admin matrix
+const CoreH = require('./handlers/core-product.js'); // 核心产品主闭环（SC-04）：竞品库/情报库/机会/报告
 
 function registerAll() {
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
@@ -113,6 +114,17 @@ function registerAll() {
   registry.register('GET', '/api/data-surface/dimension', 'tenant', DataSurfaceH.dimension);
   registry.register('POST', '/api/data-surface/refresh', 'tenant', DataSurfaceH.refresh);
   registry.register('GET', '/api/data-surface/refresh-policy', 'tenant', DataSurfaceH.refreshPolicy); // SC-02 §6.3：capability 级 cooldown/额度
+
+  // —— 核心产品主闭环（SC-04）：竞品库 → 情报库 → 机会视图 → 调研报告 ——
+  registry.register('GET', '/api/brands', 'tenant', CoreH.brandsList);
+  registry.register('GET', '/api/brands/:brandId', 'tenant', CoreH.brandDetail);
+  registry.register('GET', '/api/brands/:brandId/timeline', 'tenant', CoreH.brandTimeline);
+  registry.register('GET', '/api/brands/:brandId/coverage', 'tenant', CoreH.brandCoverage);
+  registry.register('GET', '/api/intelligence', 'tenant', CoreH.intelligence);
+  registry.register('GET', '/api/opportunities', 'tenant', CoreH.opportunities);
+  registry.register('GET', '/api/reports', 'tenant', CoreH.reportsList);
+  registry.register('POST', '/api/reports', 'tenant', CoreH.reportsCreate);
+  registry.register('GET', '/api/reports/:reportId', 'tenant', CoreH.reportDetail);
   registry.register('GET', '/api/admin/data-surface/capabilities', 'admin', DataSurfaceH.adminCapabilities);
   // R5.2 候补名单（public，匿名可提交）+ R7.2 真实数据示例（闸门在 handler 内）
   registry.register('POST', '/api/waitlist', 'public', SystemH.waitlist);

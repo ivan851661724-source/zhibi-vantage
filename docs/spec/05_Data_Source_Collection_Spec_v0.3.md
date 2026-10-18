@@ -864,3 +864,10 @@ Provider 进入 GA 前必须完成 06 §15 的真实品牌 POC、展示与保存
 - **raw 快照对应律**：每个 raw snapshot 的 source_url（含影响返回范围的查询参数）、响应 body、content_hash（sha256: 前缀）对应同一次真实请求；聚合统计只存 attempt summary，禁止伪装成单个原始响应快照；JSON 型快照解析失败不得产生 success evidence。
 - **fencing 与幂等**：attempt 终态写入与 identity resolved 升级均须有效 job claim fence；completeAttempt 以 `status='running'` 条件更新（原子 CAS）；终态 attempt 的恢复零外部请求。
 - **adapterStrategy**：single / fallback / fanout；provider 运行不写终态，执行器统一落账；链耗尽产生唯一最终失败。
+
+## 25.8 核心产品主闭环对采集的约束（SC-04，随 review/core-product-framework 分支，未合并）
+
+- 读模型只消费已登记并通过验收的 capability；未接入维度在产品层显示「未接入」，不得由前端、报告或 LLM 生成任何替代数值。
+- 商品与价格结论必须能追溯到 SourceSnapshot / Evidence；没有 Evidence 的内容不得标记「已核实」。
+- 报告使用生成时刻冻结的事实包，生成后实时采集变化不改写报告内容。
+- 未接入 provider 的接入路径：Registry 登记 → SC-03 POC/GA 验收 → 读模型自动消费（维度状态从「未接入」转为真实状态）。

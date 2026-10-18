@@ -361,4 +361,7 @@ try {
 // Data Surface（SC-02 整改轮）：采集持久任务常驻 worker（reclaim + reconcile + 消费）。
 // 替代进程内 fire-and-forget——重启后 pending/过期 running 自动恢复执行。
 try { require('./services/collect-jobs.js').startWorker(); } catch (e) { console.error('[collect-jobs] worker 启动失败（忽略，刷新时可即时触发）:', e.message); }
+// SC-04：调研报告生成常驻 worker（持久化 report_jobs：reclaim + 认领 + 执行）。
+// 重启后 pending/过期 running 自动恢复执行或诚实失败；生成只由用户显式触发。
+try { require('./services/report-service.js').startWorker(); } catch (e) { console.error('[report-service] worker 启动失败（忽略，可在报告列表重试）:', e.message); }
 startServer(PORT0);

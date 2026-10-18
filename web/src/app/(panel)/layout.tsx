@@ -39,6 +39,13 @@ const NAV_GROUPS: {
     sec: 'INTELLIGENCE · 情报',
     items: [
       {
+        href: '/brands',
+        label: '竞品库',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h16M4 12h16M4 17h10" strokeLinecap="round" /><circle cx="19" cy="17" r="2" /></svg>
+        ),
+      },
+      {
         href: '/intel',
         label: '情报库',
         icon: (
@@ -93,6 +100,7 @@ const NAV_GROUPS: {
 const PANEL_TITLES: Record<string, string> = {
   '/': '工作台',
   '/radar': '竞品雷达',
+  '/brands': '竞品库',
   '/intel': '情报库',
   '/opportunity': '机会视图',
   '/report': '调研报告',

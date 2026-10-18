@@ -15,6 +15,21 @@ import { apiGet, apiPost } from '@/lib/api';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { renderMarkdown } from '@/lib/md';
 import type { ZhibiState } from '@/types/state';
+import { ReportPanel } from '@/components/brand/report-panel';
+import { useRouter } from 'next/navigation';
+
+// 正式调研报告（SC-04）：用户显式触发生成；任务持久化可恢复；报告含版本、
+// 生成范围、数据覆盖、事实引用、机会与限制、纠错入口。
+function CoreReportsSection({ projectId }: { projectId: string }) {
+  const router = useRouter();
+  if (!projectId) return null;
+  return (
+    <section className="core-reports-section">
+      <h3>调研报告（正式版）</h3>
+      <ReportPanel projectId={projectId} onOpen={(id) => router.push(`/report/${id}`)} />
+    </section>
+  );
+}
 
 const BRIEF_POLL_MS = 3000; // 任务书 F-2：轮询间隔 ≥3s
 const BRIEF_STALE_MS = 15 * 60 * 1000; // 与后端对齐：running 超 15 分钟无终态视为中断
@@ -123,6 +138,9 @@ export default function ReportPage() {
 
       {/* R6.2：报告顶部诚实条（三色横条 + 点击展开字段清单） */}
       <EvidenceBar dist={dist} />
+
+      {/* SC-04：正式调研报告（冻结事实包 + 持久任务 + 引用可追溯） */}
+      <CoreReportsSection projectId={String(state?.projectId || '')} />
 
       {err && <p className="hint">⚠ {err}</p>}
       {!hasTrack && !loading && <p className="hint">还没有调研数据——先在工作台发起一次赛道调研。</p>}

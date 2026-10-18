@@ -42,3 +42,12 @@
 - collect-jobs.js：executeJob 统一策略循环（single/fallback/fanout），链耗尽唯一最终失败（fence 贯穿）。
 - 测试：D30 SSRF（单 IP lookup/mock DNS 公网/rebinding/重定向私网零连接）、D31 fallback 终态语义（四场景）、D32 fencing（三场景）、D33 raw 快照真值链（三场景）；source-snapshot.test 适配 node http/https stub 层（#13/#16 对齐页级快照契约）。
 - 文档：SC-02 §13/§14（R3 整改 + SC-03 边界）；05 §25.7。v1.5 宪法与 SC-03 零改动。
+
+## v0.4.0-SC04 修订（2026-10-18，核心竞争情报主闭环，未合并——随 review/core-product-framework 分支）
+
+- 新增 SC-04（品牌档案/读模型/情报项/机会视图/报告与引用冻结/API/页面/状态表达/验收/与 SC-03 关系）。
+- 新增：app/services/brand-store.js（brands.db：brand_records / brand_project_links / brand_timeline / reports / report_citations / report_jobs）、app/services/brand-service.js（统一竞品读模型）、app/services/report-service.js（冻结事实包 + 持久生成任务 + worker）、app/routes/handlers/core-product.js（9 个 tenant-scoped 端点）。
+- 前端：新增 /brands 与 /brands/:brandId、/report/:reportId；扩展 /intel（统一读模型情报库 + 筛选 + 证据入口）、/opportunity（数据基础与样本范围）、/report（正式报告列表与生成）；导航新增「竞品库」；新增 web/src/lib/core-api.ts 与 web/src/components/brand/*。
+- 未接入维度（社媒/广告/评论/搜索/流量/经营估算）一律「未接入」，零 mock、零估算填充；机会样本不足不输出结论。
+- 测试：新增 app/test/core-product.test.js（C1–C8：品牌档案/未接入/采集贯通/情报筛选/机会样本/报告冻结与恢复/两租户隔离/零 mock）8/8 通过；后端全量零失败。
+- 本分支第一项包含 robots.txt 路径 P0 SSRF 修复（robots 与正文共用受控安全请求路径）。
