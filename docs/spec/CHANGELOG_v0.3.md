@@ -1,3 +1,12 @@
+## Unreleased · SC-03 竞争数据网络提案（2026-10-18）
+
+状态：提案，等待产品与独立技术审核；不代表 capability 已实现或已上线。
+
+- 产品评审稿升级至 v1.5.0，补充外部竞争数据边界、广告/社媒/KOL/流量受众/平台经营估算和长期品牌时间线。
+- 新增 SC-03，冻结候选数据面、来源取得优先级、measurement_method、指标命名与公式准入、Provider POC、许可、迁移和 GA Gate。
+- 保持 00 的 SourceSnapshot → Evidence → Fact → Metric → DomainEvent → Judgment、EvidenceStatus、Coverage 与 correction/retraction 语义不变。
+- architecture/ 继续只描述现行实现；目标 API 与 UI 在代码合并后再同步。
+
 # Vantage v0.3 Change Log
 
 ## 必须改（P0）

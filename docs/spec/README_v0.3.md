@@ -15,7 +15,7 @@
 | 06 | [质量与验收](06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md) | 质量评审稿，不替代实际独立数据验收 |
 | 07 | [监控与运维](07_Monitoring_Operations_Runbook_v0.3.md) | 能力级运行要求与事故处置 |
 
-已批准变更见[SC-01](changes/SC-01_collector_version_vs_parser_version.md)，版本变更见[变更记录](CHANGELOG_v0.3.md)。待产品决定及本次质量核查统一见[产品评审稿](../01_Product_PRD_v1.4.0_review.md)，该稿尚未替代本目录的01版本。
+已批准变更见[SC-01](changes/SC-01_collector_version_vs_parser_version.md)。[SC-03](changes/SC-03_competitive_data_network.md)是竞争数据网络提案，尚未批准。版本变更见[变更记录](CHANGELOG_v0.3.md)。待产品决定及质量核查统一见[产品评审稿](../01_Product_PRD_v1.5.0_review.md)，该稿尚未替代本目录的01版本。
 
 本轮是一次横切治理升级，目标不是增加更多功能，而是让 Vantage 在“持续监控 + 持续建库”的前提下仍然可信、可扩展、可控成本。
 

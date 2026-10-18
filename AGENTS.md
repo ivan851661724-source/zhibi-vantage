@@ -58,12 +58,12 @@ If implementation conflicts with specification, do not silently reinterpret the 
 
 Create a Spec Change Proposal.
 
-The combined product review is `docs/01_Product_PRD_v1.4.0_review.md`.
+The combined product review is `docs/01_Product_PRD_v1.5.0_review.md`.
 It contains product requirements, unresolved decisions, P0 issues, acceptance
 scenarios and a review-evidence appendix. It has not replaced the v1.3.3
 baseline. Do not silently treat its recommendations or unresolved thresholds
 as approved business rules. Approved spec changes apply only to their stated
-scope, including SC-01 under `docs/spec/changes/`.
+scope, including SC-01 under `docs/spec/changes/`. SC-03 is a proposal on `main` and remains non-authoritative until explicitly approved.
 
 Runtime architecture and current API documents describe implemented structure
 and compatibility. They do not override the business authority order above.
