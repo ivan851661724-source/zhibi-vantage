@@ -34,7 +34,7 @@ Current runtime architecture:
 Current frozen baseline:
 
 - docs/spec/00_Engineering_Baseline_v1.2.md
-- docs/spec/01_Product_PRD_v1.3.3.md
+- docs/spec/01_Product_PRD_v1.5.0.md
 - docs/spec/02_Data_Algorithm_Spec_v0.3.md
 - docs/spec/03_Backend_API_Contract_v0.3.md
 - docs/spec/04_Frontend_Interaction_Spec_v0.3.md
@@ -58,12 +58,9 @@ If implementation conflicts with specification, do not silently reinterpret the 
 
 Create a Spec Change Proposal.
 
-The combined product review is `docs/01_Product_PRD_v1.5.0_review.md`.
-It contains product requirements, unresolved decisions, P0 issues, acceptance
-scenarios and a review-evidence appendix. It has not replaced the v1.3.3
-baseline. Do not silently treat its recommendations or unresolved thresholds
-as approved business rules. Approved spec changes apply only to their stated
-scope, including SC-01 under `docs/spec/changes/`. SC-03 is a proposal on `main` and remains non-authoritative until explicitly approved.
+`docs/spec/01_Product_PRD_v1.5.0.md` is the current product constitution and replaces v1.3.3. Its external competitive-intelligence boundary is mandatory: do not require or depend on user order, ERP, CRM, ad-account, customer-list, or payment data. Vantage observes and analyzes competitors and markets; it does not execute merchant decisions.
+
+SC-01 and SC-03 under `docs/spec/changes/` are approved within their stated scope. SC-03 approves the capability and engineering contracts, but does not mean a provider is integrated or GA. Confirm actual availability from the Capability Registry, runtime architecture, real-sample QA, and release evidence.
 
 Runtime architecture and current API documents describe implemented structure
 and compatibility. They do not override the business authority order above.
@@ -195,7 +192,7 @@ Before modifying code:
 1. Read this file.
 2. Read docs/README.md and the applicable current architecture documents.
 3. Read 00 and 01 under docs/spec/ and the task-specific upstream specs.
-4. Check the combined product review for relevant unresolved decisions; do not treat it as approved policy.
+4. Apply the v1.5.0 product constitution and approved SCs; unresolved provider, threshold, and market choices remain implementation decisions.
 5. Inspect the actual implementation.
 6. Identify acceptance criteria.
 7. Produce an implementation plan and expected changed files.

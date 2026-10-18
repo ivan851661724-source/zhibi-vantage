@@ -1,8 +1,8 @@
 # Vantage · 07 Monitoring & Operations Runbook
 
-**版本：v0.3**  
-**状态：评审稿**  
-**上位依赖：00 v1.2 / 03 v0.3 / 05 v0.3 / 06 v0.3**  
+**版本：v0.4.0（SC-03 修订，2026-10-18）**  
+**状态：受控规格；仅对已进入 Registry 的真实 capability 生效**  
+**上位依赖：00 v1.2 / 01 v1.5.0 / 03 v0.4 / 05 v0.4 / 06 v0.4 / SC-03**  
 
 ---
 
@@ -401,3 +401,47 @@ DomainEvent 已存在时：
 - metrics / logs。
 
 迁移任务不得抢占 P0 monitoring 的主要容量。
+
+# 22. 竞争数据网络运维（SC-03）
+
+## 22.1 Provider 与 Capability Health
+
+按 provider × capability × market 监控：成功率、429/403、超时、空响应、字段覆盖、schema version、分页完成率、freshness、素材下载、identity unresolved/conflicted、cache hit、重试、调用量和归因成本。
+
+Provider 健康不能代替 capability 健康。某接口成功但关键字段消失时，capability 必须降级。
+
+## 22.2 Schema Drift
+
+检测新增/删除字段、类型变化、枚举变化、分页变化、时间/币种/单位变化和素材 URL 结构变化。关键字段 drift 时暂停 normalize 到 Fact/Metric，保留原始允许记录，标记 partial/failed，并触发人工复核；不得用 null 或默认值静默通过。
+
+## 22.3 素材与链接失效
+
+素材 URL 失效不等于广告或内容不存在。系统保留稳定 id、原始 URL、hash、首次/最后观察、下载状态和允许的归档引用。重新下载必须遵守 retention 与许可，不无限重试。
+
+## 22.4 许可、保留与停用
+
+每个 provider 保存合同/条款版本、允许用途、终端展示权、原始响应与素材保存权、保留期、跨 Workspace 复用和地区限制。到期前告警；许可不明、到期或被撤回时将 capability 置为 suspended，停止新采集并按策略删除或去标识化受限数据。
+
+## 22.5 历史回填
+
+回填使用独立队列和预算，记录 requested range、actual snapshots、来源、限流、失败、history_origin 和 ingestion time。队列积压不影响日常巡检；重复回填必须幂等。档案来源不可用时显示缺口，不用模型补写历史事实。
+
+## 22.6 Incident
+
+| 级别 | 示例 | 动作 |
+|---|---|---|
+| P0 | 跨租户泄露、provider secret 泄漏、受限数据违规展示、直接值/估算值混淆造成系统性错误 | 立即关闭 capability、阻断投影、保全证据并启动安全/合规处置 |
+| P1 | 关键 provider 大面积失败、schema drift、错误身份合并、公式版本错误、历史来源错标 | 降级或暂停、停止生成新结论、评估 correction/retraction |
+| P2 | 非关键字段缺失、素材缩略图失效、单一市场延迟 | 显示 partial/stale，排期修复 |
+
+恢复前必须完成受影响对象范围、数据修复、缓存/派生结果失效、回放、纠错通知和回归测试。不能只恢复接口返回 200。
+
+## 22.7 上线 Checklist 补充
+
+- Registry、许可与 retention 已登记；
+- provider/config/schema/methodology version 可追溯；
+- 两租户、重启、重复任务、失败和降级测试通过；
+- 观测与告警按 capability 生效；
+- secret scan 和响应泄漏检查通过；
+- 06 §15 对应市场达到 GA；
+- architecture 与 deployment 文档在代码合并后同步。

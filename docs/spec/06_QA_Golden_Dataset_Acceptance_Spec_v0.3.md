@@ -1,8 +1,8 @@
 # Vantage · 06 QA / Golden Dataset / Acceptance Spec
 
-**版本：v0.3**  
-**状态：评审稿**  
-**上位依赖：00 v1.2 / 01 v1.3.3 / 02 v0.3 / 03 v0.3 / 04 v0.3 / 05 v0.3**  
+**版本：v0.4.0（SC-03 修订，2026-10-18）**  
+**状态：受控规格；质量阈值必须以真实样本冻结，不得凭空设定**  
+**上位依赖：00 v1.2 / 01 v1.5.0 / 02–05 v0.4 / SC-03**  
 
 ---
 
@@ -317,3 +317,46 @@ P0 Release 前至少要求：
 - observed/backfilled provenance 保留；
 - partial/failed migration 可重试；
 - cutover 后 authoritative read model 唯一。
+
+# 15. 竞争数据网络 Golden Dataset 与验收（SC-03）
+
+## 15.1 真实样本
+
+首批 POC 至少覆盖 20 个目标品牌、独立站/Amazon/TikTok Shop、至少两个目标市场、大中小不同数据量、广告活跃与不活跃品牌，以及多地区站点、同名品牌、经销商和账号迁移案例。
+
+每个品牌由人工建立：Canonical Brand、官方域名与平台身份、关键商品、已知广告/内容/KOL/评论样本、可核对的供应商字段、时间范围和预期缺口。样本不得只选容易成功的品牌。
+
+## 15.2 分数据面测量
+
+| 数据面 | 至少测量 |
+|---|---|
+| 身份 | resolve 成功率、误合并、漏合并、冲突保留 |
+| 商品与价格 | 商品覆盖、规格匹配、价格/币种/可售准确性、partial_scan |
+| 广告 | 广告主匹配、素材去重、字段覆盖、首次/最后出现时间、失效素材 |
+| 社媒/KOL | 账号匹配、内容覆盖、互动字段、商业合作证据、受众标签来源 |
+| 评论 | 评论对象、时间、评分、原文支持、主题提取精确度 |
+| 流量受众 | 市场与周期覆盖、供应商方法、缺失与范围、版本变化 |
+| 平台经营估算 | 字段语义、周期、币种、区间、与独立来源的偏差 |
+| 历史 | observed/provider_history/archive_backfill/recomputed 分类正确率 |
+
+准确率、召回率、误报率、延迟和覆盖阈值由产品与数据负责人基于首轮样本冻结。没有真实测量不得填一个看似合理的数字。
+
+## 15.3 强制行为测试
+
+每个 capability 至少验证：正常、无数据、字段缺失、分页未完成、429、超时、鉴权失败、schema drift、素材 URL 失效、stale、供应商冲突、任务重复提交、进程重启、两租户隔离和许可禁用。
+
+公式测试必须用已知输入验证 AOV/ASP、CAC proxy、conversion、ROAS、GMV 范围与单位；缺少准入字段时断言不生成指标。LLM 输入测试必须证明模型不能新增未提供的定量经营值。
+
+## 15.4 可追溯与前端验收
+
+所有用户可见定量声明 100% 能回到 ProviderRecord/SourceSnapshot/Evidence 或公式输入。前端必须正确显示 measurement_method、平台、市场、周期、新鲜度、范围、限制和历史来源。受限原始响应不可泄漏。
+
+## 15.5 发布结论
+
+- 只有 fixture/mock：`NOT_INTEGRATED`；
+- 真实调用成功但覆盖、字段、许可或失败路径未完成：`BENCHMARK`；
+- 质量门槛部分通过：`PARTIAL`，仅开放通过的市场和字段；
+- 全部门槛通过且运维就绪：`GA`；
+- 出现跨租户、密钥、许可或定量造假风险：`BLOCKED`。
+
+Release 报告必须列 commit、tree、唯一 parent、provider/config/schema version、样本、市场、失败项、延期项和当前 Capability Registry 状态。

@@ -1,8 +1,8 @@
 # Vantage · 03 Backend & API Contract
 
-**版本：v0.3**  
-**状态：评审稿**  
-**上位依赖：00 v1.2 / 01 v1.3.3 / 02 v0.3 / 05 v0.3**
+**版本：v0.4.0（SC-03 修订，2026-10-18）**  
+**状态：受控规格；新增接口只有在 architecture/02 登记后才视为已实现**  
+**上位依赖：00 v1.2 / 01 v1.5.0 / 02 v0.4 / 05 v0.4 / SC-03**
 
 ---
 
@@ -624,3 +624,60 @@ backfilled_at?
 ```
 
 前端不得自行猜测历史来源。
+
+# 25. 竞争数据网络后端合同（SC-03）
+
+本节定义目标域对象和接口。它是实现合同，不代表这些端点当前已经存在；现行端点以 `docs/architecture/02_现行API契约.md` 为准。
+
+## 25.1 新增或扩展的域对象
+
+| 对象 | 责任 | 关键约束 |
+|---|---|---|
+| `CanonicalBrand` | 公共品牌身份 | 与 Workspace 私有竞争关系分离；合并/拆分版本化 |
+| `PlatformIdentity` | 域名、店铺、账号、广告主体、达人等平台身份 | `resolved/unresolved/conflicted`；证据和有效期必填 |
+| `ProviderRecord` | 保存供应商原始记录的允许字段和引用 | 保留 provider record id、scope、period、method、license/retention |
+| `MediaAsset` | 广告、图片、视频、落地页和内容素材 | 稳定标识、来源 URL、hash、首次/最后观察、过期状态 |
+| `BrandMetric` | 花费、流量、受众、销量、收入、GMV、转化等记录或派生值 | 服从 02 §25；不得丢失范围、方法和输入 |
+| `BrandTimelineItem` | 跨数据面的品牌历史投影 | 区分 observed/provider_history/archive_backfill/recomputed |
+| `CapabilityRegistration` | provider × capability × market × field 合同 | maturity、freshness、failure、fallback、license、retention |
+
+公共事实只在品牌身份、市场、范围、新鲜度和许可一致时复用。Workspace 的 watch scope、关系、备注和参考上下文保持租户私有。
+
+## 25.2 存储分层
+
+`ProviderRecord/SourceSnapshot → Evidence → Fact/Metric → DomainEvent → Judgment`。原始供应商响应不得直接成为用户投影。素材二进制、URL、缩略图和文本按许可分别设置 retention；到期删除不应删除仍可合法保留的结构化来源说明。
+
+任何迁移均采用 additive schema、双读或显式 backfill；不得破坏现有 Evidence、Fact、Metric、事件和纠错链。项目级 identity 向 CanonicalBrand 映射前必须保留原 id 和 reconciliation 记录。
+
+## 25.3 目标 API
+
+```text
+GET  /api/brands/:brandId/data-surfaces
+GET  /api/brands/:brandId/products
+GET  /api/brands/:brandId/ads
+GET  /api/brands/:brandId/social-content
+GET  /api/brands/:brandId/creators
+GET  /api/brands/:brandId/reviews
+GET  /api/brands/:brandId/metrics
+GET  /api/brands/:brandId/timeline
+GET  /api/metrics/:metricId/provenance
+POST /api/data-surface/refresh
+GET  /api/admin/data-sources/capabilities
+GET  /api/admin/data-sources/health
+```
+
+列表端点必须分页和稳定排序，支持 platform、market、period、measurement_method 筛选。响应必须传播 unsupported、loading、failed、empty、stale、partial、ok 及相应原因，不能用空数组吞掉失败。
+
+## 25.4 刷新与任务
+
+刷新请求先做租户、品牌、capability、market、quota 和 cooldown 校验；同 scope 的 running attempt 复用。任务使用持久队列、租约、fencing 和 idempotency key。请求超时不等于任务失败，最终状态以持久任务为准。
+
+Provider 更新周期慢于用户刷新时，返回现有数据及其真实更新时间，不制造新的 `observed_at`。回填任务使用独立低优先级队列，不阻塞日常巡检。
+
+## 25.5 安全与租户
+
+普通响应不得包含 provider secret、内部文件路径、原始受限响应或堆栈。管理端点只对 platform_admin 开放。跨 Workspace 访问品牌关系、监控配置、报告、提醒和纠错必须拒绝；公共数据复用不得泄露由哪个 Workspace 首次触发采集。
+
+## 25.6 兼容与验收
+
+新增字段优先向后兼容；未知 summary/measurement_method 必须诚实降级。接口进入现行 API 文档前，必须具备真实 adapter、双租户测试、失败测试、重启恢复、provenance 回读和前端消费测试。

@@ -1,13 +1,18 @@
-## Unreleased · SC-03 竞争数据网络提案（2026-10-18）
+# Vantage Specification Change Log
 
-状态：提案，等待产品与独立技术审核；不代表 capability 已实现或已上线。
+## v1.5.0 / v0.4.0 · 产品宪法与 SC-03 生效（2026-10-18）
 
-- 产品评审稿升级至 v1.5.0，补充外部竞争数据边界、广告/社媒/KOL/流量受众/平台经营估算和长期品牌时间线。
-- 新增 SC-03，冻结候选数据面、来源取得优先级、measurement_method、指标命名与公式准入、Provider POC、许可、迁移和 GA Gate。
-- 保持 00 的 SourceSnapshot → Evidence → Fact → Metric → DomainEvent → Judgment、EvidenceStatus、Coverage 与 correction/retraction 语义不变。
-- architecture/ 继续只描述现行实现；目标 API 与 UI 在代码合并后再同步。
+- 01：v1.5.0 正式生效并替代 v1.3.3；冻结外部竞争情报边界，不要求或依赖用户订单、ERP、CRM、广告账户和客户数据。
+- SC-03：批准竞争数据网络与长期品牌记忆的产品和工程方向；候选 provider、质量阈值和 capability GA 仍须真实 POC。
+- 02：加入 measurement_method、经营指标准入、来源冲突、历史语义与 LLM 定量边界。
+- 03：加入 Canonical Brand 扩展、ProviderRecord、MediaAsset、BrandMetric、目标 API、任务和迁移合同。
+- 04：加入广告、社媒、KOL、评论、流量受众、平台经营估算和时间线交互合同。
+- 05：加入九类 capability、Provider Registry、Adapter Contract、许可、频率与 GA Gate。
+- 06：加入 20 品牌真实样本、数据面质量、公式、失败、租户与发布结论验收。
+- 07：加入 provider health、schema drift、素材失效、许可到期、历史回填与事故处置。
+- architecture/ 与 operations/ 仍只描述当前实现；相关代码合并后再逐项更新。
 
-# Vantage v0.3 Change Log
+## 历史：Vantage v0.3 Change Log
 
 ## 必须改（P0）
 

@@ -1,4 +1,6 @@
-# 知彼 Vantage 产品需求文档
+# 知彼 Vantage 产品需求文档 · v1.5.0 评审归档
+
+> 历史材料：保留批准前评审状态，不参与当前规范优先级。现行产品宪法见 [01_Product_PRD_v1.5.0](../spec/01_Product_PRD_v1.5.0.md)。
 
 版本：v1.5.0 产品评审稿  
 日期：2026-10-18  
@@ -488,13 +490,13 @@ P0表示阻塞对应能力或承诺。问题尚未关闭时，应限制相关能
 
 ## 相关资料
 
-- [现行产品需求](spec/01_Product_PRD_v1.3.3.md)
-- [工程基线](spec/00_Engineering_Baseline_v1.2.md)
-- [数据与算法说明](spec/02_Data_Algorithm_Spec_v0.3.md)
-- [前端交互说明](spec/04_Frontend_Interaction_Spec_v0.3.md)
-- [数据来源与采集说明](spec/05_Data_Source_Collection_Spec_v0.3.md)
-- [SC-03 竞争数据网络与品牌长期记忆](spec/changes/SC-03_competitive_data_network.md)
-- [质量验收说明](spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md)
+- [现行产品需求](2026-10-18_Product_PRD_v1.3.3_retired.md)
+- [工程基线](../spec/00_Engineering_Baseline_v1.2.md)
+- [数据与算法说明](../spec/02_Data_Algorithm_Spec_v0.3.md)
+- [前端交互说明](../spec/04_Frontend_Interaction_Spec_v0.3.md)
+- [数据来源与采集说明](../spec/05_Data_Source_Collection_Spec_v0.3.md)
+- [SC-03 竞争数据网络与品牌长期记忆](../spec/changes/SC-03_competitive_data_network.md)
+- [质量验收说明](../spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md)
 - [评审核查记录](#评审核查记录)
 
 ## 评审核查记录
@@ -520,22 +522,22 @@ P0表示阻塞对应能力或承诺。问题尚未关闭时，应限制相关能
 
 #### 本地文件
 
-现行[01 PRD v1.3.3](spec/01_Product_PRD_v1.3.3.md)与核查时GitHub main的blob一致：`547e49925307a2f5b9cff503ce050dc163e0b5bb`。代码抽查对应本地HEAD：`ed3e237e8d75cd17484939ab76a4f821a378d60a`。这些标识描述核查范围，不证明生产部署与本地相同。
+现行[01 PRD v1.3.3](2026-10-18_Product_PRD_v1.3.3_retired.md)与核查时GitHub main的blob一致：`547e49925307a2f5b9cff503ce050dc163e0b5bb`。代码抽查对应本地HEAD：`ed3e237e8d75cd17484939ab76a4f821a378d60a`。这些标识描述核查范围，不证明生产部署与本地相同。
 
 | 依据 | 核查结果 |
 |---|---|
-| [02 Data & Algorithm](spec/02_Data_Algorithm_Spec_v0.3.md) §2、§4至6、§10至17、§21至24 | 已有验证、异常、覆盖范围、身份与成本框架；专项算法与评估仍待补齐 |
-| [05 Data Source & Collection](spec/05_Data_Source_Collection_Spec_v0.3.md) §15、§17、§21至24 | 已有来源质量维度、正式上线要求及能力契约；没有统一多数票真值标准 |
-| [质量验收说明](spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md) §2至5、§8、§10至12 | 已有独立标注评估与护栏方案；独立终验和完整统计协议需补齐 |
-| [README](spec/README_v0.3.md) 第46行 | 已明确记录当天承诺与离散巡检的矛盾 |
-| [metrics.js](../app/lib/metrics.js) 第331、414行 | 存在最小样本和准确率门禁，主要作用于机会/空白推理展示；不代表全系统效度验收 |
-| [source-fusion.js](../app/lib/source-fusion.js) 第51行 | 搜索供应商共同域名命中可产生已核实；只能证明检索印证，需限定下游含义 |
-| [field-confidence.js](../app/lib/field-confidence.js) 第45行 | 辅助函数按匹配来源数设置置信度；冲突依赖调用方处理，需统一端到端契约 |
-| [source-identity.js](../app/lib/source-identity.js) 第106行 | 已有域名与可选指纹归并；不能据此宣称完全没有来源去重 |
-| [research/evidence.js](../app/research/evidence.js) 第35行 | deriveBasis根据一级来源引用直接返回已核实且高可信，本函数不检查声明支持 |
-| [enrich.js](../app/research/enrich.js) 第832、855行 | 已有批量引用支持性复核；失败或漏答时仍复核失败时保留原判断，且部分占位字段不承载值、不进入该复核 |
-| [price-stats.js](../app/lib/price-stats.js) 第66行及[enrich.js](../app/research/enrich.js) 第288行 | 当前小样本清洗使用用户目标价，违反00 §19与02 §6.3；调用路径传入画像参考价 |
-| [services/db.js](../app/services/db.js)及[core/state-store.js](../app/core/state-store.js) | 本地仍可见SQLite和文件存储，无法确认截图讨论的数据库生产迁移已完成 |
+| [02 Data & Algorithm](../spec/02_Data_Algorithm_Spec_v0.3.md) §2、§4至6、§10至17、§21至24 | 已有验证、异常、覆盖范围、身份与成本框架；专项算法与评估仍待补齐 |
+| [05 Data Source & Collection](../spec/05_Data_Source_Collection_Spec_v0.3.md) §15、§17、§21至24 | 已有来源质量维度、正式上线要求及能力契约；没有统一多数票真值标准 |
+| [质量验收说明](../spec/06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md) §2至5、§8、§10至12 | 已有独立标注评估与护栏方案；独立终验和完整统计协议需补齐 |
+| [README](../spec/README_v0.3.md) 第46行 | 已明确记录当天承诺与离散巡检的矛盾 |
+| [metrics.js](../../app/lib/metrics.js) 第331、414行 | 存在最小样本和准确率门禁，主要作用于机会/空白推理展示；不代表全系统效度验收 |
+| [source-fusion.js](../../app/lib/source-fusion.js) 第51行 | 搜索供应商共同域名命中可产生已核实；只能证明检索印证，需限定下游含义 |
+| [field-confidence.js](../../app/lib/field-confidence.js) 第45行 | 辅助函数按匹配来源数设置置信度；冲突依赖调用方处理，需统一端到端契约 |
+| [source-identity.js](../../app/lib/source-identity.js) 第106行 | 已有域名与可选指纹归并；不能据此宣称完全没有来源去重 |
+| [research/evidence.js](../../app/research/evidence.js) 第35行 | deriveBasis根据一级来源引用直接返回已核实且高可信，本函数不检查声明支持 |
+| [enrich.js](../../app/research/enrich.js) 第832、855行 | 已有批量引用支持性复核；失败或漏答时仍复核失败时保留原判断，且部分占位字段不承载值、不进入该复核 |
+| [price-stats.js](../../app/lib/price-stats.js) 第66行及[enrich.js](../../app/research/enrich.js) 第288行 | 当前小样本清洗使用用户目标价，违反00 §19与02 §6.3；调用路径传入画像参考价 |
+| [services/db.js](../../app/services/db.js)及[core/state-store.js](../../app/core/state-store.js) | 本地仍可见SQLite和文件存储，无法确认截图讨论的数据库生产迁移已完成 |
 
 现行代码有引用复核与准确率门禁，前次审查中“引用支持性仅缺失”的描述应据此收窄。新版关注复核覆盖、失败处理和独立效度证明，不能沿用过时报告直接判定当前所有路径。
 

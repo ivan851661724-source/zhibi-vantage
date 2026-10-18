@@ -1,14 +1,14 @@
 # SC-03 Spec Change：竞争数据网络与品牌长期记忆
 
-**状态：提案，待产品与独立技术审核；不得据此宣称能力已实现或已上线**  
+**状态：已批准的产品与工程方向；供应商选择、质量阈值和各 capability GA 仍须逐项验收；不得据此宣称能力已实现或已上线**  
 **日期：2026-10-18**  
-**提案基线：review/data-surface-foundation @ 35a6061100b05784220fc694daf2682d75aeee0f**  
-**上位依赖：00 v1.2、01 v1.3.3、02–07 v0.3、SC-01、SC-02**  
-**影响范围：产品评审稿、02 数据与算法、03 后端、04 前端、05 数据源、06 QA、07 运维；00 的事实链与 EvidenceStatus 不变**
+**批准基线：main 产品宪法 v1.5.0（2026-10-18）**  
+**上位依赖：00 v1.2、01 v1.5.0、02–07 的 SC-03 修订、SC-01；SC-02 如后续合并必须服从本变更**  
+**影响范围：01 产品宪法、02 数据与算法、03 后端、04 前端、05 数据源、06 QA、07 运维；00 的事实链与 EvidenceStatus 不变**
 
 ---
 
-## 0. 提案目的
+## 0. 变更目的
 
 Vantage 已冻结并部分实现以下基础：
 
@@ -16,11 +16,10 @@ Vantage 已冻结并部分实现以下基础：
 - Canonical Brand Intelligence 与 Workspace × Brand Relationship 分离；
 - Monitoring ≠ Research、Direct-first、No-change 不调用 LLM；
 - WatchTarget、MonitoringWindow、Coverage 与三态日报；
-- SC-02 的 Capability Registry、Source Adapter、CollectionAttempt、Data Surface 和持久任务。
 
 下一阶段需要把广告、社媒、KOL、评论、流量受众和平台经营估算接入同一品牌档案。当前规格虽列出 Ads、Review、Sales Proxy 和 GMV Proxy，但没有冻结完整的数据面、来源性质、指标计算条件、用户表达和发布门槛。
 
-本提案只建立统一合同和实施顺序。供应商接口未完成样本验收和展示许可确认前，相关 capability 保持 not_integrated 或 benchmark，不得向用户承诺已覆盖。
+本变更冻结统一合同和实施顺序。供应商接口未完成样本验收和展示许可确认前，相关 capability 保持 not_integrated 或 benchmark，不得向用户承诺已覆盖。
 
 ---
 
@@ -62,7 +61,7 @@ Vantage 不：
 
 ## 2. 数据面与 Capability Map
 
-SC-02 的 dimension 是产品层分组，不是领域状态。本提案扩展为以下目标数据面；尚未接入的维度保持明确占位。
+Data Surface 的 dimension 是产品层分组，不是领域状态。本变更冻结以下目标数据面；尚未接入的维度保持明确占位。
 
 | dimension | 用户可见内容 | 目标 capability | 首批来源方向 |
 |---|---|---|---|
@@ -124,7 +123,7 @@ SC-02 的 dimension 是产品层分组，不是领域状态。本提案扩展为
 
 ## 5. Canonical Brand 与平台身份
 
-现有 Canonical Brand Intelligence 保持公共事实复用方向。SC-02 的项目级 BrandSourceIdentity 是当前实现切片，不自动等于全局 Canonical Identity。
+现有 Canonical Brand Intelligence 保持公共事实复用方向。任何项目级 BrandSourceIdentity 都只是实现切片，不自动等于全局 Canonical Identity。
 
 目标模型：
 
@@ -162,13 +161,13 @@ WorkspaceBrandRelationship
 - Canonical 公共事实与 Workspace 私有关系分库存储或具备等价硬隔离；
 - 供应商许可不允许跨租户复用时，即使对象相同也不得共享受限数据。
 
-迁移前，SC-02 的项目级 identity 保持有效；不得破坏性删除或静默提升为全局身份。
+迁移前，现有项目级 identity 保持有效；不得破坏性删除或静默提升为全局身份。
 
 ---
 
 ## 6. Adapter Contract 扩展
 
-沿用 SC-02 五方法：supports、resolveIdentity、collect、normalize、health。
+统一 Adapter 五方法：supports、resolveIdentity、collect、normalize、health。
 
 新增能力要求：
 
@@ -446,7 +445,7 @@ GA 至少要求：
 
 ### Phase A：规格与 POC
 
-- SC-02 独立审核并裁决；
+- 如复用 `review/data-surface-foundation` 的 SC-02 实现，须先独立审核并确认与本变更一致；
 - 本 SC-03 产品、数据、工程、设计评审；
 - 20 品牌真实数据 POC；
 - 冻结首批 provider 与 capability；
@@ -484,7 +483,7 @@ GA 至少要求：
 
 ## 17. 受影响规格
 
-审核通过后按职责更新：
+本变更批准后按职责更新；本次已同步 01–07 的规范入口：
 
 - 01：产品范围、用户表达、页面和验收；
 - 02：来源性质、指标公式、冲突和 LLM 边界；
@@ -494,13 +493,13 @@ GA 至少要求：
 - 06：20 品牌 POC、估算误差、身份、素材、公式与证据验收；
 - 07：provider health、schema drift、素材过期、许可到期、回填队列和事故处置。
 
-00 的事实链、EvidenceStatus、正交状态、价格术语、Coverage 和 correction/retraction 继续生效。本提案不新增与其同义的领域状态。
+00 的事实链、EvidenceStatus、正交状态、价格术语、Coverage 和 correction/retraction 继续生效。本变更不新增与其同义的领域状态。
 
 现行 architecture/ 文档只描述已经运行的系统。相关代码合并后再更新，不得提前把目标设计写成当前事实。
 
 ---
 
-## 18. 待裁决事项
+## 18. 实施裁决事项
 
 | 编号 | 事项 | 推荐方向 |
 |---|---|---|
@@ -519,7 +518,7 @@ GA 至少要求：
 
 ## 19. 验收结论规则
 
-- 规格、许可、POC 或关键质量门槛未完成：PROPOSED / PARTIAL，不得写 PASS；
+- 许可、POC、实现或关键质量门槛未完成：NOT_READY / PARTIAL，不得写 PASS；
 - 接口能返回数据但字段语义、身份或展示权未确认：不可 GA；
 - 只有 mock 或固定 fixture：不可宣称真实数据源已接入；
 - 任何定量结果无法回到供应商记录、SourceSnapshot/Evidence 或公式输入：不可展示；
