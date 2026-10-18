@@ -109,46 +109,49 @@ async function fetchPage(url, timeoutMs, opts) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || 12000);
   let lastHost = null; // 网络异常（超时等）也计入同域失败熔断
   try {
-    let current = url, hops = 0, r = null;
+    // 🔴 连接语义（复审 §一）：每跳 = safeRequestOnce（assertPublicUrl 先行 +
+    // safeLookup 受控连接）——禁止经全局 fetch 绕过连接阶段 DNS 校验；
+    // 重定向由本层手动逐跳处理，每一跳都重新过 FetchGate/robots/公网校验。
+    let current = url, hops = 0, res = null;
     while (true) {
-      const u = await assertPublicUrl(current); // 每跳校验（含 DNS 解析后的 IP 判定）
-      lastHost = u.hostname;
+      const preU = new URL(current);
+      lastHost = preU.hostname;
       // 合规门：熔断中直接退出；robots 禁止=确定性合规退出（不算站点失败）；同域节流等待
-      const gate = FetchGate.beforeRequest(u.hostname);
+      const gate = FetchGate.beforeRequest(preU.hostname);
       if (!gate.allowed) return { ok: false, error: 'FETCH_CIRCUIT_OPEN' };
       if (gate.waitMs) await new Promise(r2 => setTimeout(r2, gate.waitMs));
-      const robots = await FetchGate.robotsAllows(u.origin, u.pathname);
-      if (robots === false) { FetchGate.recordResult(u.hostname, true); return { ok: false, error: 'ROBOTS_DISALLOWED' }; }
-      r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' }, signal: ctrl.signal, redirect: 'manual' });
-      if (r.status >= 300 && r.status < 400 && r.headers.get('location')) {
+      const robots = await FetchGate.robotsAllows(preU.origin, preU.pathname);
+      if (robots === false) { FetchGate.recordResult(preU.hostname, true); return { ok: false, error: 'ROBOTS_DISALLOWED' }; }
+      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' } });
+      if (res.status >= 300 && res.status < 400 && res.headers && res.headers.location) {
         hops++;
-        if (hops > 3) { try { r.body && r.body.cancel(); } catch (e) {} const sid = recFail(Snapshot.SOURCE_STATUS.UNAVAILABLE, 'too_many_redirects', r.status, current, hops); return { ok: false, error: 'too_many_redirects', snapshotId: sid }; }
-        current = new URL(r.headers.get('location'), u).href;
-        try { r.body && r.body.cancel(); } catch (e) {}
+        if (hops > 3) { const sid = recFail(Snapshot.SOURCE_STATUS.UNAVAILABLE, 'too_many_redirects', res.status, current, hops); return { ok: false, error: 'too_many_redirects', snapshotId: sid }; }
+        current = new URL(String(res.headers.location), res.url).href;
         continue;
       }
       break;
     }
-    if (!r.ok) {
+    if (!(res.status >= 200 && res.status < 300)) {
       FetchGate.recordResult(lastHost, false); // 计入同域失败熔断
-      const st = Snapshot.mapHttpStatus(r.status);
-      const sid = recFail(st, st === Snapshot.SOURCE_STATUS.RATE_LIMITED ? 'http:429' : ('http:' + r.status), r.status, current, hops);
-      return { ok: false, status: r.status, snapshotId: sid };
+      const st = Snapshot.mapHttpStatus(res.status);
+      const sid = recFail(st, st === Snapshot.SOURCE_STATUS.RATE_LIMITED ? 'http:429' : ('http:' + res.status), res.status, current, hops);
+      return { ok: false, status: res.status, snapshotId: sid };
     }
     FetchGate.recordResult(lastHost, true);
     // 原始字节截获：hash/blob 基于「解析与规范化之前」的响应字节（修正 5）
-    const buf = Buffer.from(await r.arrayBuffer());
+    const buf = res.buffer;
     const observedAt = new Date().toISOString();
-    const lastMod = r.headers.get('last-modified');
+    const lastMod = res.headers && res.headers['last-modified'];
+    const resCt = res.headers && res.headers['content-type'];
     let sid;
     let prov = { recorded: false };
     try {
-      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: current, redirect_hops: hops, http_status: r.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers.get('content-type'), source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: current, redirect_hops: hops, http_status: res.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: resCt, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
       if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
       else prov = s;
     } catch (e) { loggerError('fetchPage', e, url); }
     const html = buf.toString('utf8');
-    const out = { ok: true, url: r.url || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
+    const out = { ok: true, url: current || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
     Cache.set('fetch-page', ck, out);
     return out;
   } catch (e) {
@@ -201,129 +204,345 @@ function mapShopifyItems(products, cap) {
 // 页间 ≥2s 限速；首页失败=整体失败，后续页失败用已有数据）。total = 实抓款数（分页后趋近全量）。
 // 同时探测 /cart.js 的店铺结账币种：products.json 价格以店铺币种计且 JSON 本身不带币种，
 // 店铺币种 ≠ 调研市场币种时（如日销店 ¥800），调用方不得把数值直接当市场价入带。
-// M0-01：products.json 响应原始字节旁路落快照（cart.js 币种探测为辅助请求，不产快照），
-// blob 取首页字节；分页落地后 partial_scan 改按「枚举是否完整」判定——4×250 预算耗尽或
-// 中途页失败提前收束 = partial；末页自然收束 = success（05 §5.2 冻结术语）。
+// 🔴 2026-10-18 整改（SC-02 §4/§9，独立审核真值链要求）：
+//   · 每个参与汇总的页面各自落 SourceSnapshot（source_url 带 ?page=N），
+//     Evidence 必须引用**全部**页面快照——不允许用首页快照证明全部页的
+//     总数/最低/最高/中位（汇总可复算性）；
+//   · 汇总快照（source_url 无 page 参数）保留扫描级 partial_scan 元数据；
+//   · /cart.js 币种为独立 SourceSnapshot（capability 'storefront_currency'）；
+//     currency 值只有在币种快照成功落账时才非 null，否则一律 null——
+//     「无可追溯快照的币种不得进入 Evidence/业务口径」。
+// M0-01：products.json 响应原始字节旁路落快照；分页落地后 partial_scan 改按
+// 「枚举是否完整」判定——4×250 预算耗尽或中途页失败提前收束 = partial；
+// 末页自然收束 = success（05 §5.2 冻结术语）。
 // opts（可选）：{ trigger, tenantId }
 const SHOPIFY_PAGE_LIMIT = 250;
 const SHOPIFY_MAX_PAGES = 4;
 const SHOPIFY_PAGE_DELAY_MS = 2000;
+// ============================================================
+// SSRF 安全抓取（2026-10-18 复审整改 §一）
+//   · assertPublicUrl 先行：任何连接建立前完成协议/主机/DNS 解析/IP/私网校验；
+//   · manual redirect：不自动跟随。逐跳解析 Location（相对→绝对），每跳重新
+//     执行 assertPublicUrl（含重解析 DNS）——公网 302 到私网/多跳中途入私网
+//     一律拒绝；
+//   · 受控 lookup：连接阶段对 DNS 结果再过一次 isPrivateIp 黑名单，挡住
+//     DNS rebinding（校验通过后 IP 被换成私网地址的连接尝试）。
+//     注：IP 字面量 host 不经过 lookup（node 直连 IP 不回调），IP 形态已在
+//     assertPublicUrl 逐跳判定；
+//   · 超过 MAX_REDIRECT_HOPS 跳 = SAFE_FETCH_TOO_MANY_REDIRECTS（不跟随）。
+// 返回 { status, headers, buffer }；拒绝/超时抛 Error（SSRF_BLOCKED:* 前缀）。
+// ============================================================
+const nodeHttp = require('node:http');
+const nodeHttps = require('node:https');
+const dnsMod = require('node:dns');
+const MAX_REDIRECT_HOPS = 3;
+const SAFE_FETCH_MAX_BYTES = 2 * 1024 * 1024; // shopify products.json 单页上限（防内存炸）
+
+// 受控 DNS 解析：连接阶段第二道闸（rebinding 防线）
+// 受控 DNS 解析：连接阶段第二道闸（rebinding 防线）。
+// 🔴 整改（r3 §一）：Node 连接层自定义 lookup 回调必须返回**单个已验证公网 IP +
+// 正确 address family**（address, family）——返回数组会触发 ERR_INVALID_IP_ADDRESS
+// （真实最小复现：safeRequest('https://<公网域名>/…') 即崩）。
+// DNS 解析、私网过滤、实际连接使用的地址必须是**同一份受控结果**：本函数完成
+// 解析 → 私网过滤 → 选出首个公网 IP → 把该 IP 与 family 交给连接层，杜绝
+// 「校验一份、连接另一份」的 rebinding 窗口。
+// IP 字面量 host 不经过本函数（node 直连 IP 不回调 lookup），IP 形态已在
+// assertPublicUrl 逐跳判定。
+function safeLookup(hostname, options, cb) {
+  dnsMod.lookup(hostname, { all: true }, (err, addrs) => {
+    if (err) { cb(err); return; }
+    const list = (Array.isArray(addrs) ? addrs : [addrs]).filter(Boolean);
+    if (!list.length) { cb(new Error('SSRF_BLOCKED:dns_empty:' + hostname)); return; }
+    // 私网过滤：任一解析结果为私网即拒（不挑公网放行——避免「混合记录」绕过）
+    for (const a of list) {
+      if (isPrivateIp(a && a.address)) { cb(new Error('SSRF_BLOCKED:private_dns_connect:' + hostname)); return; }
+    }
+    // 受控结果 = 首个公网条目（IP + family 成对交出）
+    const first = list[0];
+    const address = String(first.address);
+    const family = first.family === 6 || (first.family == null && address.includes(':')) ? 6 : 4;
+    cb(null, address, family);
+  });
+}
+
+// 单跳安全请求：assertPublicUrl 先行 → 受控 lookup（safeLookup：单 IP+family，
+// 连接阶段二次私网校验）发起连接。不跟随重定向——由调用方决定逐跳语义。
+// 返回 { status, headers, buffer, url }；url = 实际请求的已校验 URL。
+async function safeRequestOnce(rawUrl, opts) {
+  const o = opts || {};
+  const u = await assertPublicUrl(rawUrl); // 连接前校验：协议/主机/DNS+私网
+  const res = await new Promise((resolve, reject) => {
+    const mod = u.protocol === 'https:' ? nodeHttps : nodeHttp;
+    const req = mod.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: o.method || 'GET',
+      headers: Object.assign({ 'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'en-US;en;q=0.8' }, o.headers || {}),
+      lookup: safeLookup,
+      timeout: o.timeoutMs || 30000,
+    }, (r) => {
+      const chunks = [];
+      let total = 0;
+      r.on('data', (c) => {
+        total += c.length;
+        if (total > (o.maxBytes || SAFE_FETCH_MAX_BYTES)) { req.destroy(new Error('SAFE_FETCH_TOO_LARGE')); return; }
+        chunks.push(c);
+      });
+      r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, buffer: Buffer.concat(chunks), url: u.href }));
+      r.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('SAFE_FETCH_TIMEOUT')));
+    req.on('error', reject);
+    req.end();
+  });
+  return res;
+}
+
+async function safeRequest(rawUrl, opts) {
+  const o = opts || {};
+  const maxHops = o.followRedirects === false ? 0 : MAX_REDIRECT_HOPS; // followRedirects:false = 调用方自行逐跳控制
+  let current = String(rawUrl);
+  for (let hop = 0; hop <= maxHops; hop++) {
+    const res = await safeRequestOnce(current, o);
+    if (res.status >= 300 && res.status < 400 && res.headers && res.headers.location) {
+      current = new URL(String(res.headers.location), res.url).href; // 相对/绝对 Location 归一
+      continue; // 下一跳重新走 assertPublicUrl + safeLookup
+    }
+    return res;
+  }
+  throw new Error('SAFE_FETCH_TOO_MANY_REDIRECTS');
+}
+// Shopify collection 存储/展示预算（SC-02 整改 §三.4）：超出部分诚实标 partial，
+// 不谎报完整枚举；原始字节仍在快照内可追溯。
+const COLLECTIONS_STORE_CAP = 50;
+
+// HTTP status → 05 §11 字面量（快照层 mapHttpStatus 未导出，此处同规则内联）
+function cartHttpStatusToSourceStatus(status) {
+  const s = Number(status);
+  if (s === 429) return 'rate_limited';
+  if (s === 401 || s === 403 || s === 407) return 'blocked';
+  return 'unavailable';
+}
 async function fetchShopifyProducts(siteUrl, opts) {
   const o = opts || {};
   const d = domainOf(siteUrl);
   if (!d) return { ok: false };
   const fetchedAt = new Date().toISOString();
-  const recFail = (sourceStatus, errorCode, httpStatus) => {
+  const recFail = (sourceStatus, errorCode, httpStatus, failUrl) => {
     try {
-      const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: failUrl || `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
       return s.recorded ? s.meta.snapshot_id : undefined;
     } catch (e) { loggerError('fetchShopifyProducts', e, d); return undefined; }
   };
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30000); // 总预算：分页 × 每页超时的上限
   try {
+    // 🔴 SSRF 纪律（复审 §一.1/§一.2）：全部校验先行于任何连接——products.json 与
+    // cart.js 的 assertPublicUrl 都完成后才发起请求；之后所有请求走 safeRequest
+    //（manual redirect + 逐跳重校验 + 受控 lookup）。
     await assertPublicUrl(`https://${d}/products.json`);
-    // SSRF：cart.js 与分页各页同样过公网校验（d 来自用户可控 URL，hostname 直拼不过 DNS/私网检查
-    // = 元数据端点探测向量；169.254.169.254 等 IP 形态 host 会被 products.json 拦但 cart.js 原先不拦）
     await assertPublicUrl(`https://${d}/cart.js`);
-    const cartReq = fetch(`https://${d}/cart.js`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal })
-      .then(r => (r.ok ? r.json() : null))
-      .then(j => (j && j.currency) ? String(j.currency).toUpperCase() : null)
-      .catch(() => null);
+    // 币种探测：cart.js 原始响应体落独立快照——currency 非 null ⟺ 币种快照可解析
+    //（无快照的币种不得进入业务口径）。
+    const cartProbe = (async () => {
+      try {
+        const r = await safeRequest(`https://${d}/cart.js`, { timeoutMs: 15000 });
+        if (!r || (r.status < 200 || r.status >= 300)) {
+          const st = cartHttpStatusToSourceStatus(r && r.status);
+          let sid;
+          try {
+            const s = Snapshot.record({ capability: 'storefront_currency', provider: 'shopify_cart_js_json', source_url: `https://${d}/cart.js`, final_url: null, redirect_hops: 0, http_status: r && r.status, source_status: st, error_code: 'http:' + (r && r.status), observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+            if (s.recorded) sid = s.meta.snapshot_id;
+          } catch (e) { loggerError('fetchShopifyProducts:cart', e, d); }
+          return { currency: null, snapshotId: sid };
+        }
+        const buf = r.buffer || Buffer.alloc(0);
+        const observedAt = new Date().toISOString();
+        let cur = null;
+        try { const j = JSON.parse(buf.toString('utf8')); if (j && j.currency) cur = String(j.currency).toUpperCase(); } catch (e) { /* 保持 null */ }
+        let sid;
+        try {
+          const s = Snapshot.record({ capability: 'storefront_currency', provider: 'shopify_cart_js_json', source_url: `https://${d}/cart.js`, final_url: null, redirect_hops: 0, http_status: r.status, source_status: 'success', observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers && r.headers['content-type'], trigger: o.trigger, tenantId: o.tenantId, note: cur ? 'storefront checkout currency' : 'cart.js responded without currency field' });
+          if (s.recorded) sid = s.meta.snapshot_id;
+        } catch (e) { loggerError('fetchShopifyProducts:cart', e, d); }
+        return { currency: sid ? cur : null, snapshotId: sid };
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        const isTimeout = /timeout/i.test(msg);
+        let cls;
+        try { cls = Snapshot.classifyError(e); } catch (e2) { cls = { source_status: 'unavailable', error_code: msg.slice(0, 120) }; }
+        if (isTimeout) cls = { source_status: 'timeout', error_code: 'abort:timeout' };
+        let sid;
+        try {
+          const s = Snapshot.record({ capability: 'storefront_currency', provider: 'shopify_cart_js_json', source_url: `https://${d}/cart.js`, final_url: null, redirect_hops: 0, http_status: null, source_status: cls.source_status, error_code: cls.error_code, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+          if (s.recorded) sid = s.meta.snapshot_id;
+        } catch (e2) { loggerError('fetchShopifyProducts:cart', e2, d); }
+        return { currency: null, snapshotId: sid };
+      }
+    })();
+
     let products = [];
     let firstStatus = null;
     let incompleteReason = null; // 非预算耗尽的提前收束（后续页失败）：partial_scan 的原因
-    let firstBuf = null, firstCt = null, firstLastMod = null, firstHttpStatus = null, firstObservedAt = null;
+    let firstObservedAt = null; // 首页快照 observed_at（Evidence 观察时间载体；非快照引用）
+    const pageSnapshotIds = []; // 每页原始响应快照（全部参与汇总复算）
+    const successfullyFetchedPages = []; // 结构化的页级成功清单（复审 §二.1）
+    let failedPage = null; // { page, reason } 结构化失败页（复审 §二.1）
     for (let page = 1; page <= SHOPIFY_MAX_PAGES; page++) {
       let j = null;
       let buf = null, ct = null, lastMod = null, httpStatus = null;
+      const pageUrl = `https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`;
       try {
-        const pu = await assertPublicUrl(`https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`); // 每跳重新校验（防 DNS rebinding）
-        const r = await fetch(pu, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal });
-        if (!r.ok) { if (page === 1) firstStatus = r.status; else incompleteReason = 'products_json_page_' + page + '_http_' + r.status; break; } // 首页失败=整体失败；后续页失败用已有数据
-        buf = Buffer.from(await r.arrayBuffer());
-        ct = r.headers.get('content-type');
-        lastMod = r.headers.get('last-modified');
+        const r = await safeRequest(pageUrl, { timeoutMs: 20000 });
         httpStatus = r.status;
+        ct = r.headers && r.headers['content-type'];
+        lastMod = r.headers && r.headers['last-modified'];
+        buf = r.buffer || Buffer.alloc(0);
+        if (!r.status || r.status < 200 || r.status >= 300) {
+          if (page === 1) { firstStatus = r.status; }
+          else {
+            incompleteReason = 'products_json_page_' + page + '_http_' + r.status;
+            failedPage = { page, reason: incompleteReason };
+          }
+          break; // 首页失败=整体失败；后续页失败用已有数据（partial）
+        }
         try { j = JSON.parse(buf.toString('utf8')); } catch (pe) {
           if (page === 1) {
-            // P1-1（PR#2 评审）：2XX body 已接收 = 来源内容已被真实观察 → observed_at 非空；
-            // parse 失败时字节仍落 blob 供重放
             let psid;
             try {
-              const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: pu.href, final_url: null, redirect_hops: 0, http_status: httpStatus, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, trigger: o.trigger, tenantId: o.tenantId, note: 'json parse failed after body receipt; raw kept for replay' });
+              const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: pageUrl, final_url: null, redirect_hops: 0, http_status: httpStatus, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, trigger: o.trigger, tenantId: o.tenantId, note: 'json parse failed after body receipt; raw kept for replay' });
               if (s.recorded) psid = s.meta.snapshot_id;
             } catch (e) { loggerError('fetchShopifyProducts', e, d); }
-            return { ok: false, error: 'parse_failed', snapshotId: psid };
+            return { ok: false, error: 'parse_failed', snapshotId: psid, partialScan: true, partialScanReason: 'products_json_page_1_parse_failed', successfullyFetchedPages: [], failedPage: { page: 1, reason: 'products_json_page_1_parse_failed' } };
           }
           incompleteReason = 'products_json_page_' + page + '_parse_failed';
-          break; // 后续页 parse 失败用已有数据
+          failedPage = { page, reason: incompleteReason };
+          break; // 后续页 parse 失败用已有数据（partial）
         }
       } catch (e) {
+        const msg = String((e && e.message) || e);
+        if (msg.indexOf('SSRF_BLOCKED') === 0) throw e; // SSRF 拒绝不做 partial 收束，整体拒绝
         if (page === 1) throw e; // 首页网络异常上抛（保持原错误路径）
-        incompleteReason = 'products_json_page_' + page + '_error';
-        break; // 后续页用已有数据
+        incompleteReason = /timeout/i.test(msg) ? 'products_json_page_' + page + '_timeout' : 'products_json_page_' + page + '_error';
+        failedPage = { page, reason: incompleteReason };
+        break; // 后续页超时/网络错误用已有数据（partial）
       }
-      if (page === 1) { firstBuf = buf; firstCt = ct; firstLastMod = lastMod; firstHttpStatus = httpStatus; firstObservedAt = new Date().toISOString(); }
+      // 页级快照：本页 2XX + 解析成功的原始字节（source_url 唯一化到页）
+      try {
+        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: pageUrl, final_url: null, redirect_hops: 0, http_status: httpStatus, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: ct, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId, note: 'products.json page ' + page });
+        if (s.recorded) { pageSnapshotIds.push(s.meta.snapshot_id); if (page === 1) firstObservedAt = s.meta.observed_at || null; }
+      } catch (e) { loggerError('fetchShopifyProducts:page' + page, e, d); }
+      successfullyFetchedPages.push(page);
       const arr = Array.isArray(j.products) ? j.products : [];
       products = products.concat(arr);
-      if (arr.length < SHOPIFY_PAGE_LIMIT) break; // 末页
+      if (arr.length < SHOPIFY_PAGE_LIMIT) break; // 末页自然收束
       if (page < SHOPIFY_MAX_PAGES) await new Promise(r2 => setTimeout(r2, SHOPIFY_PAGE_DELAY_MS));
     }
     if (firstStatus != null) {
       const st = Snapshot.mapHttpStatus(firstStatus);
-      const fsid = recFail(st, st === Snapshot.SOURCE_STATUS.RATE_LIMITED ? 'http:429' : ('http:' + firstStatus), firstStatus);
-      return { ok: false, status: firstStatus, snapshotId: fsid };
+      const fsid = recFail(st, st === Snapshot.SOURCE_STATUS.RATE_LIMITED ? 'http:429' : ('http:' + firstStatus), firstStatus, `https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=1`);
+      const cart = await cartProbe;
+      return { ok: false, status: firstStatus, snapshotId: fsid, currency: cart.currency, currencySnapshotId: cart.snapshotId || null, snapshotIds: fsid ? [fsid] : [], partialScan: false, partialScanReason: null, successfullyFetchedPages: [], failedPage: null };
     }
-    // B-5a：total = 实抓款数。分页后对 ≤1000 款的店趋近真实在售款数（旧版单页 limit=100 在 >100 款店上本就截断）。
-    const truncated = products.length >= SHOPIFY_MAX_PAGES * SHOPIFY_PAGE_LIMIT;
-    // P0-1/P0 终审：枚举不完整（预算耗尽或中途页失败）不得宣称完整枚举 → partial +
-    // 冻结术语 partial_scan（05 §5.2）；末页自然收束 = success。业务返回值（items/total）契约不变。
-    const partialScan = truncated || incompleteReason != null;
-    const scanStatus = partialScan ? Snapshot.SOURCE_STATUS.PARTIAL : Snapshot.SOURCE_STATUS.SUCCESS;
-    const partialScanReason = truncated ? 'products_json_pagination_budget_250x4_exhausted' : incompleteReason;
-    let sid, prov = { recorded: false };
-    const recordSuccess = (note) => {
-      try {
-        const s = Snapshot.record({ capability: 'product_catalog', provider: 'shopify_products_json', source_url: `https://${d}/products.json`, final_url: null, redirect_hops: 0, http_status: firstHttpStatus, source_status: scanStatus, observed_at: firstObservedAt, fetched_at: fetchedAt, bodyBytes: firstBuf, contentType: firstCt, source_updated_at: firstLastMod, trigger: o.trigger, tenantId: o.tenantId, partial_scan: partialScan, partial_scan_reason: partialScanReason, partial_scan_observed_count: products.length, note: note || null });
-        if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
-      } catch (e) { loggerError('fetchShopifyProducts', e, d); }
-    };
+    // partial 语义结构化（复审 §二）：预算耗尽 / 后续页 HTTP 失败 / 解析失败 / 超时网络错误 → partial
+    const budgetExhausted = successfullyFetchedPages.length >= SHOPIFY_MAX_PAGES
+      && products.length >= SHOPIFY_MAX_PAGES * SHOPIFY_PAGE_LIMIT;
+    const partialScan = budgetExhausted || incompleteReason != null;
+    const partialScanReason = budgetExhausted
+      ? 'products_json_pagination_budget_250x4_exhausted'
+      : (incompleteReason || null);
+    // 🔴 复审 §四：**无聚合快照**。聚合统计（count/中位价/partial 范围）只进
+    // attempt summary；原始字节以页级快照存在（source_url 与真实请求逐页对应，
+    // 含 ?limit=&page= 查询参数）。禁止把 page=1 的 body 标成无查询参数的聚合 URL。
+    const currency = await cartProbe;
+    const scanMeta = { partialScan, partialScanReason, successfullyFetchedPages: successfullyFetchedPages.slice(), failedPage };
+    const snapIds = pageSnapshotIds.concat(currency.snapshotId ? [currency.snapshotId] : []);
+    const prov = { recorded: pageSnapshotIds.length > 0, observed_at: firstObservedAt }; // 元数据载体（非快照引用）
     if (!products.length) {
-      recordSuccess('empty_catalog');
-      return { ok: false, empty: true, snapshotId: sid, _prov: prov };
+      return { ok: false, empty: true, snapshotIds: snapIds, currency: currency.currency, currencySnapshotId: currency.snapshotId || null, _prov: prov, ...scanMeta };
     }
     const items = mapShopifyItems(products); // 全量透传（截尾统计/类目占比需要全量；调用方自控上限）
-    const currency = await cartReq;
-    recordSuccess(null);
-    return { ok: items.length > 0, items, total: products.length, truncated, url: `https://${d}/products.json`, currency, snapshotId: sid, _prov: prov };
+    return { ok: items.length > 0, items, total: products.length, truncated: budgetExhausted, url: `https://${d}/products.json`, currency: currency.currency, snapshotIds: snapIds, currencySnapshotId: currency.snapshotId || null, _prov: prov, ...scanMeta };
   } catch (e) {
     const cls = Snapshot.classifyError(e);
     const csid = recFail(cls.source_status, cls.error_code, null);
-    return { ok: false, error: String(e && e.message || e), snapshotId: csid };
+    return { ok: false, error: String(e && e.message || e), snapshotId: csid, partialScan: false, partialScanReason: null, successfullyFetchedPages: [], failedPage: null };
   }
-  finally { clearTimeout(timer); }
 }
 // Shopify /collections.json 店铺集合清单（S2 佐证：集合数/跨类目信号；规格 2.3 增强项的轻量版——
 // 每 collection 的商品归属需逐集合再抓，成本高，留待 S2 全量接入时按需做）。
-async function fetchShopifyCollections(siteUrl) {
+// Shopify /collections.json 店铺集合清单（S2 佐证：集合数/跨类目信号）。
+// 🔴 2026-10-18 复审整改 §三：原始响应字节由本函数直接落 SourceSnapshot
+//（adapter 不得重新序列化冒充）；查询参数进 source_url（影响返回范围）；
+// 存储预算 COLLECTIONS_STORE_CAP 截断时诚实标 partial（sourceObservedCount/
+// storedCount/partialScan/partialScanReason）。
+async function fetchShopifyCollections(siteUrl, opts) {
+  const o = opts || {};
   const d = domainOf(siteUrl);
   if (!d) return { ok: false };
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
+  const sourceUrl = `https://${d}/collections.json?limit=250`;
+  const fetchedAt = new Date().toISOString();
   try {
-    const u = await assertPublicUrl(`https://${d}/collections.json?limit=250`);
-    const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal });
-    if (!r.ok) return { ok: false, status: r.status };
-    const j = await r.json();
-    const cols = Array.isArray(j.collections) ? j.collections : [];
+    await assertPublicUrl(sourceUrl); // SSRF：校验先行于连接
+    const r = await safeRequest(sourceUrl, { timeoutMs: 15000 });
+    if (!r.status || r.status < 200 || r.status >= 300) {
+      return { ok: false, status: r.status, sourceUrl, partialScan: false, successfullyFetchedPages: 0, failedPage: { page: 'collections', reason: 'http_' + r.status } };
+    }
+    const buf = r.buffer || Buffer.alloc(0);
+    let cols = [];
+    let parseOk = true;
+    try { const j = JSON.parse(buf.toString('utf8')); cols = Array.isArray(j.collections) ? j.collections : []; }
+    catch (pe) { parseOk = false; }
+    if (!parseOk) {
+      // 原始字节仍落盘（parse_failed 快照供重放），语义失败
+      try {
+        Snapshot.record({ capability: 'storefront_collections', provider: 'shopify_collections_json', source_url: sourceUrl, final_url: null, redirect_hops: 0, http_status: r.status, source_status: Snapshot.SOURCE_STATUS.PARSE_FAILED, observed_at: new Date().toISOString(), fetched_at: fetchedAt, bodyBytes: buf, contentType: r.headers && r.headers['content-type'], trigger: o.trigger, tenantId: o.tenantId, note: 'collections.json parse failed; raw kept for replay' });
+      } catch (e) { loggerError('fetchShopifyCollections', e, d); }
+      return { ok: false, error: 'parse_failed', sourceUrl, partialScan: true, partialScanReason: 'collections_json_parse_failed', successfullyFetchedPages: 0, failedPage: { page: 'collections', reason: 'parse_failed' } };
+    }
+    const sourceObservedCount = cols.length;
+    const stored = cols.slice(0, COLLECTIONS_STORE_CAP);
+    const truncatedByBudget = sourceObservedCount > COLLECTIONS_STORE_CAP;
+    const collections = stored.map(c => ({ title: String(c.title || '').slice(0, 80), handle: String(c.handle || '').slice(0, 80) }));
+    // 原始响应字节快照（真实服务器返回，非重新序列化）
+    let snapshotId = null;
+    const partialScan = truncatedByBudget;
+    const partialScanReason = truncatedByBudget
+      ? 'collections_store_cap_' + COLLECTIONS_STORE_CAP + '_of_' + sourceObservedCount
+      : null;
+    try {
+      const s = Snapshot.record({
+        capability: 'storefront_collections', provider: 'shopify_collections_json',
+        source_url: sourceUrl, final_url: null, redirect_hops: 0, http_status: r.status,
+        source_status: partialScan ? Snapshot.SOURCE_STATUS.PARTIAL : Snapshot.SOURCE_STATUS.SUCCESS,
+        observed_at: new Date().toISOString(), fetched_at: fetchedAt,
+        bodyBytes: buf, contentType: r.headers && r.headers['content-type'],
+        trigger: o.trigger, tenantId: o.tenantId,
+        partial_scan: partialScan, partial_scan_reason: partialScanReason,
+        partial_scan_observed_count: sourceObservedCount,
+        note: 'collections raw response bytes (query params preserved in source_url)',
+      });
+      if (s.recorded) {
+        snapshotId = s.meta.snapshot_id;
+        return {
+          ok: collections.length > 0 || sourceObservedCount === 0,
+          collections, url: `https://${d}/collections.json`, sourceUrl, snapshotId,
+          _prov: { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at },
+          partialScan, partialScanReason, sourceObservedCount, storedCount: collections.length,
+          successfullyFetchedPages: 1, failedPage: null,
+        };
+      }
+    } catch (e) { loggerError('fetchShopifyCollections', e, d); }
+    // 快照落账失败：返回无快照结果（validator 会拒绝证据不完整的 success）
     return {
-      ok: cols.length > 0,
-      collections: cols.map(c => ({ title: String(c.title || '').slice(0, 80), handle: String(c.handle || '').slice(0, 80) })).slice(0, 50),
-      url: `https://${d}/collections.json`
+      ok: collections.length > 0 || sourceObservedCount === 0,
+      collections, url: `https://${d}/collections.json`, sourceUrl, snapshotId: null,
+      partialScan, partialScanReason, sourceObservedCount, storedCount: collections.length,
+      successfullyFetchedPages: 1, failedPage: null,
     };
-  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
-  finally { clearTimeout(timer); }
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e), sourceUrl, partialScan: false, successfullyFetchedPages: 0, failedPage: { page: 'collections', reason: 'error' } };
+  }
 }
 
-module.exports = { domainOf, stripHtml, isPrivateIp, assertPublicUrl, fetchPage, mapShopifyItems, variantMedian, fetchShopifyProducts, fetchShopifyCollections, COLLECTOR_VERSION };
+module.exports = { domainOf, stripHtml, isPrivateIp, assertPublicUrl, safeLookup, safeRequest, safeRequestOnce, fetchPage, mapShopifyItems, variantMedian, fetchShopifyProducts, fetchShopifyCollections, COLLECTOR_VERSION, COLLECTIONS_STORE_CAP };

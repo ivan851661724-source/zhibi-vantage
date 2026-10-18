@@ -854,3 +854,13 @@ maturity 只允许 `not_integrated`、`benchmark`、`ga`、`suspended`。调用�
 ## 25.6 GA Gate
 
 Provider 进入 GA 前必须完成 06 §15 的真实品牌 POC、展示与保存许可确认、两租户隔离、失败传播、schema drift 检测、成本归因、重启恢复和人工抽样。只有 mock、fixture、搜索 snippet 或单个成功品牌时不可标记 integrated/GA。
+
+## 25.7 Data Surface Foundation 采集基础设施（SC-02 复审整改轮 3，随 review/data-surface-foundation-r2 分支，未合并）
+
+> 边界声明：本节描述已批准的**采集基础设施**契约（SC-02）；未接入数据源不因本节存在而具备任何覆盖宣称（SC-03 为准）。
+
+- **连接层受控 DNS**：所有采集请求（products.json 分页 / cart.js / collections.json / fetchPage 内层）经 `safeRequest/safeRequestOnce`——assertPublicUrl 先行、受控 lookup 回调交出单个已验证公网 IP+family（连接阶段二次私网校验，防 DNS rebinding）、manual redirect 逐跳重校验、≤3 跳、大小/超时保守限制保留。
+- **partial 扫描级语义**：`partialScan/partialScanReason/successfullyFetchedPages/failedPage` 为采集返回值与 attempt summary 的冻结字段；后续页任何失败形态（HTTP/解析/超时/网络）均 partial。
+- **raw 快照对应律**：每个 raw snapshot 的 source_url（含影响返回范围的查询参数）、响应 body、content_hash（sha256: 前缀）对应同一次真实请求；聚合统计只存 attempt summary，禁止伪装成单个原始响应快照；JSON 型快照解析失败不得产生 success evidence。
+- **fencing 与幂等**：attempt 终态写入与 identity resolved 升级均须有效 job claim fence；completeAttempt 以 `status='running'` 条件更新（原子 CAS）；终态 attempt 的恢复零外部请求。
+- **adapterStrategy**：single / fallback / fanout；provider 运行不写终态，执行器统一落账；链耗尽产生唯一最终失败。

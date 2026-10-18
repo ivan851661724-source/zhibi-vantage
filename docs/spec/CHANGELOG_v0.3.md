@@ -33,3 +33,12 @@
 ## v0.3.1 修订（2026-10-07，SC-01，随 M0-01 PR#2 二审裁决生效）
 
 - 05：SC-01 落地——Raw Snapshot 层 `collector_version` 必填、`parser_version` nullable（未解析时 null，不得伪造）；结构化 Adapter/Evidence/Fact 层 parser/extractor 版本必填。影响 05 §4 / §10 / §19.5。提案全文见 `docs/spec/changes/SC-01_collector_version_vs_parser_version.md`。
+
+## v0.4.0-R3 修订（2026-10-18，SC-02 复审整改轮 3，未合并——随 review/data-surface-foundation-r2 分支）
+
+- net.js：safeLookup 单 IP+family 修复（ERR_INVALID_IP_ADDRESS 根因）；fetchPage 内层改走 safeRequestOnce（连接阶段受控 DNS，弃全局 fetch 旁路）；删除聚合伪装快照（页级快照 source_url 带 page=N）；失败快照 source_url 携带真实页 URL。
+- source-adapter.js：provider-run 执行器模型（runProviderOutput / commitProviderTerminal / commitProviderEmpty）——provider 运行不写终态，fallback 首 provider 失败不再固化父 attempt；fanout 全链真执行、首个可用者胜出；validateOutput 增 JSON 可解析校验。
+- surface-store.js：completeAttempt 原子 CAS（status='running' 条件更新）；upsertIdentity resolved 升级 fence 门控。
+- collect-jobs.js：executeJob 统一策略循环（single/fallback/fanout），链耗尽唯一最终失败（fence 贯穿）。
+- 测试：D30 SSRF（单 IP lookup/mock DNS 公网/rebinding/重定向私网零连接）、D31 fallback 终态语义（四场景）、D32 fencing（三场景）、D33 raw 快照真值链（三场景）；source-snapshot.test 适配 node http/https stub 层（#13/#16 对齐页级快照契约）。
+- 文档：SC-02 §13/§14（R3 整改 + SC-03 边界）；05 §25.7。v1.5 宪法与 SC-03 零改动。

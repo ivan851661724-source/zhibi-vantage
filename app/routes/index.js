@@ -21,6 +21,7 @@ const AuthH = require('./handlers/auth.js'); // P0 恢复：login/register
 const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
 const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
+const DataSurfaceH = require('./handlers/data-surface.js'); // 五维数据面（SC-02）：overview/dimension/refresh/admin matrix
 
 function registerAll() {
   // —— 账号（public，匿名可访问；POST 限流在鉴权门统一处理） ——
@@ -107,6 +108,12 @@ function registerAll() {
   registry.register('DELETE', '/api/watch-targets/:id', 'tenant', WatchH.deleteTarget);
   registry.register('GET', '/api/digests/daily', 'tenant', WatchH.dailyDigest);
   registry.register('GET', '/api/watch-targets/coverage', 'tenant', WatchH.coverageDay);
+  // —— 五维数据面（SC-02 / 03 §7 扩展；admin 端点对租户 403） ——
+  registry.register('GET', '/api/data-surface/overview', 'tenant', DataSurfaceH.overview);
+  registry.register('GET', '/api/data-surface/dimension', 'tenant', DataSurfaceH.dimension);
+  registry.register('POST', '/api/data-surface/refresh', 'tenant', DataSurfaceH.refresh);
+  registry.register('GET', '/api/data-surface/refresh-policy', 'tenant', DataSurfaceH.refreshPolicy); // SC-02 §6.3：capability 级 cooldown/额度
+  registry.register('GET', '/api/admin/data-surface/capabilities', 'admin', DataSurfaceH.adminCapabilities);
   // R5.2 候补名单（public，匿名可提交）+ R7.2 真实数据示例（闸门在 handler 内）
   registry.register('POST', '/api/waitlist', 'public', SystemH.waitlist);
   registry.register('GET', '/api/sample', 'public', SystemH.sample);

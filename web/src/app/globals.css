@@ -2763,3 +2763,70 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .watch-gap{font-size:11px;color:#a35a00;background:#fdf4e6;border-radius:6px;padding:4px 8px;margin-top:6px}
 .watch-actions{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
 .watch-err{font-size:11px;color:#a33}
+
+/* ===== 数据面五维总览（data-surface，SC-02） ===== */
+.ds-wrap{margin:14px 0}
+.ds-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.ds-title{font-weight:600;font-size:14px}
+.ds-ident{font-size:11px;color:var(--ink3)}
+.ds-poll-hint{font-size:11px;color:var(--warn)}
+.ds-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.ds-card{border:1px solid var(--line1);border-radius:10px;padding:10px;background:var(--card);display:flex;flex-direction:column;gap:6px}
+.ds-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ds-card-name{font-weight:600;font-size:13px}
+.ds-card-sum{font-size:12px;color:var(--ink2)}
+.ds-card-note{font-size:11px;color:var(--ink3);margin:0}
+.ds-note-fail{color:var(--crisis)}
+.ds-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid;white-space:nowrap}
+.ds-badge-icon{font-weight:700}
+.ds-ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
+.ds-loading{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.ds-failed{color:var(--crisis);background:var(--crisis-bg);border-color:var(--crisis-line)}
+.ds-empty{color:var(--ink3);background:var(--bg2);border-color:var(--line1)}
+.ds-partial{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.ds-stale{color:#a35a00;background:#fdf4e6;border-color:#ebd3a7}
+.ds-unsupported{color:var(--ink4);background:transparent;border-color:var(--line1)}
+.ds-fresh{font-size:11px;color:var(--ink3)}
+.ds-fresh-ok{color:var(--ok)}
+.ds-fresh-stale{color:#a35a00}
+.ds-fresh-unk{color:var(--ink3)}
+.ds-gaps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.ds-gaps li{font-size:11px;color:#a35a00}
+.ds-evids{display:flex;gap:8px}
+.ds-card-acts{display:flex;gap:8px;flex-wrap:wrap}
+.ds-obs{border-top:1px dashed var(--line1);padding-top:6px}
+.ds-obs-sum{font-size:11px;color:var(--ink3);margin-bottom:4px}
+.ds-obs-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto}
+.ds-obs-item{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.ds-obs-item .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.ds-obs-item .val{display:flex;gap:6px;align-items:center}
+.ds-obs-noprice{font-size:11px;color:var(--ink3)}
+.ds-obs-soldout{font-size:11px;color:var(--crisis)}
+.ds-obs-pager{display:flex;align-items:center;gap:8px;margin-top:6px}
+.ds-drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-end;justify-content:flex-end;z-index:60}
+.ds-drawer{background:var(--card);width:min(420px,92vw);max-height:80vh;overflow:auto;border-radius:12px 0 0 12px;padding:14px;border:1px solid var(--line1)}
+.ds-drawer-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:8px}
+.ds-drawer-body{display:flex;flex-direction:column;gap:6px}
+.ds-ev-row{display:flex;gap:10px;font-size:12px}
+.ds-ev-row .k{color:var(--ink3);min-width:64px}
+.ds-ev-row .num{word-break:break-all}
+.ds-ev-snaps{border-top:1px dashed var(--line1);padding-top:6px;display:flex;flex-direction:column;gap:6px}
+.ds-ev-snap{display:flex;gap:10px;font-size:12px;flex-wrap:wrap}
+.ds-ev-snap .k{color:var(--ink3);min-width:64px}
+
+/* ---------- Data Surface 整改轮新增（2026-10-18） ---------- */
+.ds-refreshing-tag{font-size:11px;color:var(--ink3);display:inline-flex;align-items:center;gap:3px;margin-left:6px}
+.ds-ident{display:inline-flex;flex-wrap:wrap;gap:2px 10px}
+.ds-ident-item{white-space:nowrap}
+.ds-agg-block{border-left:2px solid var(--line1);padding-left:8px;margin-top:4px}
+.ds-agg-cap{display:block;font-size:10px;color:var(--ink3);margin-bottom:1px}
+.ds-card-sum-unknown{color:var(--ink3)}
+.ds-note-warn{color:#a35a00}
+.ds-ev-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.ds-ev-tab{font-size:11px;padding:2px 8px;border:1px solid var(--line1);border-radius:10px;background:transparent;color:var(--ink3);cursor:pointer}
+.ds-ev-tab.on{border-color:var(--accent,#1d9e75);color:var(--accent,#1d9e75)}
+.ds-ev-snap-id{font-size:11px;color:var(--ink3);word-break:break-all}
+.ds-obs-cap{border-top:1px dashed var(--line1);padding-top:6px;margin-top:6px}
+.ds-obs-cap:first-child{border-top:none;padding-top:0;margin-top:0}
+.ds-obs-failnote{font-size:11px;color:#a35a00;margin:0 0 4px}
+.ds-obs-pub{font-size:11px;color:var(--ink3)}

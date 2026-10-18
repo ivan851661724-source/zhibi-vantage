@@ -101,8 +101,8 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
   }
 }
 
-export function apiGet<T>(url: string): Promise<T> {
-  return request<T>(url);
+export function apiGet<T>(url: string, signal?: AbortSignal): Promise<T> {
+  return request<T>(url, signal ? { signal } : undefined);
 }
 
 export function apiPost<T>(url: string, body?: unknown): Promise<T> {

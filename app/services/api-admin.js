@@ -63,6 +63,11 @@ async function handleAdminRoutes(req, res, ctx) {
   // “未鉴权的超管接口”而返回 401。
   if (!p.startsWith('/api/admin/')) return false;
 
+  // 整改（SC-02 §8，2026-10-18）：注册表托管的 admin 端点由 handler 自行裁决鉴权语义
+  // ——未认证 401（统一鉴权门）/ 普通租户 403（handler isAdmin 判定）/ 超管 200。
+  // 若在此前置 requireAdmin，租户 token 会被误判为 401 BAD_ADMIN_TOKEN。放行交还路由链。
+  if (p === '/api/admin/data-surface/capabilities') return false;
+
   // ---- 登录（无需先验） ----
   if (p === '/api/admin/login' && req.method === 'POST') {
     const body = await readBody(req);
