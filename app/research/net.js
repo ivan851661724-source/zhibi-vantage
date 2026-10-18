@@ -73,7 +73,9 @@ async function assertPublicUrl(rawUrl) {
   let u;
   try { u = new URL(String(rawUrl)); } catch (e) { throw new Error('SSRF_BLOCKED:invalid_url'); }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('SSRF_BLOCKED:protocol');
-  const host = u.hostname;
+  // 🔴 R3：URL.hostname 对 IPv6 字面量保留方括号（'[::1]'）——net.isIP 判 0 → 绕过 IP
+  // 直判而下沉到 dns.lookup，形成私网/回环绕过。判定前统一剥离括号。
+  const host = String(u.hostname || '').replace(/^\[/, '').replace(/\]$/, '');
   if (BLOCKED_HOST_RE.test(host) || BLOCKED_HOST_SUFFIX.test(host)) throw new Error('SSRF_BLOCKED:host');
   if (net.isIP(host)) {
     if (isPrivateIp(host)) throw new Error('SSRF_BLOCKED:ip');
@@ -275,7 +277,7 @@ async function safeRequestOnce(rawUrl, opts) {
     const mod = u.protocol === 'https:' ? nodeHttps : nodeHttp;
     const req = mod.request({
       protocol: u.protocol,
-      hostname: u.hostname,
+      hostname: String(u.hostname || '').replace(/^\[/, '').replace(/\]$/, ''), // IPv6 字面量去括号（连接层期望裸地址）
       port: u.port || (u.protocol === 'https:' ? 443 : 80),
       path: u.pathname + u.search,
       method: o.method || 'GET',
@@ -544,5 +546,10 @@ async function fetchShopifyCollections(siteUrl, opts) {
     return { ok: false, error: String(e && e.message || e), sourceUrl, partialScan: false, successfullyFetchedPages: 0, failedPage: { page: 'collections', reason: 'error' } };
   }
 }
+
+// 🔴 R3 P0：把受控安全取回器注入 fetch-gate——robots.txt 从此与正文共用同一条
+// 安全网络路径（assertPublicUrl 先行 + 受控 DNS 连接 + 手动逐跳重定向 + 超时/大小/跳数），
+// 关闭「robots 阶段先于校验形成连接」的 SSRF 绕过（未注入时 fetch-gate 返回 null 即 fail-open）。
+try { FetchGate.setRobotsFetcher(safeRequest); } catch (e) { /* 注入失败不阻断模块加载 */ }
 
 module.exports = { domainOf, stripHtml, isPrivateIp, assertPublicUrl, safeLookup, safeRequest, safeRequestOnce, fetchPage, mapShopifyItems, variantMedian, fetchShopifyProducts, fetchShopifyCollections, COLLECTOR_VERSION, COLLECTIONS_STORE_CAP };

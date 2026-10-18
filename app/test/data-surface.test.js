@@ -1122,7 +1122,6 @@ function okFetchResult(tid, url, opts) {
     const origLookup = dnsMod.lookup;
     const origPLookup = dnsMod.promises.lookup;
     const origReq = nodeHttps.request;
-    const origRobots = FetchGate.robotsAllows;
     const PUB = { address: '93.184.216.34', family: 4 };
     const PRIV = { address: '10.9.9.9', family: 4 };
     let httpsCalls = 0; let responses = 0; // responses = 真实收到服务端响应的次数
@@ -1131,7 +1130,9 @@ function okFetchResult(tid, url, opts) {
       dnsMod.lookup = function (h, o, cb) { if (typeof o === 'function') { cb = o; o = {}; } const r = map(h); if (!r) return cb(new Error('nxdomain')); if (o.all) return cb(null, [r]); cb(null, r.address, r.family); };
     };
     const mockHttps = (fn) => { nodeHttps.request = function (opts, cb) { httpsCalls++; return fn(opts, cb); }; };
-    FetchGate.robotsAllows = async () => true;
+    // 🔴 纪律：robots 判定不得 mock 成常量 true——改为预热 robots 缓存，
+    // 让 FetchGate.robotsAllows 被真实调用（缓存命中，不额外发请求、不影响计数）。
+    require('../services/cache.js').set('robots-txt', 'https://pub.example.com', { txt: 'User-agent: *\nAllow: /' }, 86400);
     FetchGate.resetForTest();
     try {
       // a) safeLookup 回调交出【单个 IP + family】，不是数组（§1 最小复现修复）
@@ -1219,7 +1220,7 @@ function okFetchResult(tid, url, opts) {
       dnsMod.lookup = origLookup;
       dnsMod.promises.lookup = origPLookup;
       nodeHttps.request = origReq;
-      FetchGate.robotsAllows = origRobots;
+      // robots 未被 mock（走真实路径 + 缓存），无需恢复
     }
   });
 
