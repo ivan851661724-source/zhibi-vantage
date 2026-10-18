@@ -1,8 +1,8 @@
 # Vantage · 02 Data & Algorithm Spec
 
-**版本：v0.3**  
-**状态：评审稿**  
-**上位依赖：00 v1.2 / 01 v1.3.3**  
+**版本：v0.4.0（SC-03 修订，2026-10-18）**  
+**状态：受控规格；新增竞争数据 capability 的实现与 GA 状态须单独验证**  
+**上位依赖：00 v1.2 / 01 v1.5.0 / SC-03**  
 **所有权：数据规则、算法规则、业务判定规则**
 
 ---
@@ -900,3 +900,56 @@ entity scope
 freshness SLA
 collection policy version
 ```
+
+# 25. 竞争数据度量与推导合同（SC-03）
+
+本节规范广告、社媒、KOL、评论、流量受众、平台经营估算和长期品牌时间线。它扩展现有事实链，不修改 `EvidenceStatus`。
+
+## 25.1 measurement_method
+
+`measurement_method` 描述数据怎样取得，与 `EvidenceStatus`、freshness 和 Coverage 正交：
+
+| 值 | 含义 | 允许进入 |
+|---|---|---|
+| `direct_observation` | Vantage 从公开直接来源观察 | Fact |
+| `official_disclosure` | 平台官方透明接口披露 | Fact 或 Metric |
+| `licensed_provider_record` | 授权数据商返回记录型字段 | Fact 或 Metric |
+| `licensed_estimate` | 授权数据商模型估算 | Metric |
+| `deterministic_derivation` | 使用可追溯输入和确定公式计算 | Metric |
+| `semantic_extraction` | 从原文提取主题、卖点或标签 | Fact candidate 或非定量 Metric |
+| `archive_backfill` | 后来从允许使用的历史档案补入 | Fact 或 Metric，同时标记 backfilled |
+| `discovery_only` | 只用于发现、身份路由或候选证据 | 不得进入最终 Fact/Metric |
+
+多个搜索服务找到同一页面不是多份独立证据。LLM 只允许归纳已有内容，不得生成花费、销量、订单、转化率、GMV、CAC、ROAS 或 ROI。
+
+## 25.2 Metric 最小字段
+
+竞争数据 Metric 至少保存：`metric_code`、`brand_id`、platform、market、period、value/range、currency/unit、`measurement_method`、methodology/algorithm/config version、source/evidence/provider record ids、coverage、freshness、sample size、limitations。派生指标另存 `input_metric_ids`，必须可以回算。
+
+## 25.3 指标准入与命名
+
+| 指标 | 准入条件 | 输出名称与限制 |
+|---|---|---|
+| 广告花费 | 官方披露或授权数据商估算 | `estimated_ad_spend`，带平台、市场、周期、币种和来源 |
+| 客单价 | 同周期收入与订单数 | `estimated_aov = estimated_revenue / estimated_order_count` |
+| 平均售价 | 同周期收入与销量 | `average_selling_price = estimated_revenue / estimated_units_sold`；不得称 AOV |
+| 获客成本 | 广告花费与新增转化客户数可比 | `estimated_customer_acquisition_cost`；若分母是访问/订单，改称相应 proxy |
+| 转化率 | 分子分母属于同平台、市场、周期和流量范围 | `estimated_conversion_rate`；口径不明时保留供应商原值 |
+| ROAS | 广告花费与可归因收入可比 | `estimated_roas` |
+| ROI | 完整收入、成本、退货与利润输入 | 缺少任一关键输入时禁止展示竞争品牌真实 ROI |
+| GMV/收入 | 官方披露或授权估算，范围明确 | 按平台、市场、周期和来源分别保存，不无条件相加 |
+| 用户画像 | 聚合受众或内容主题 | 不建立可识别个人档案，不强行合成唯一真实用户 |
+
+不得用公开商品标价、评论数、搜索热度或广告数量反推真实销量、GMV、AOV、CAC 或 ROI。
+
+## 25.4 多来源比较
+
+融合前依次核验品牌身份、对象、市场、币种、规格、统计周期、数据性质、字段定义、范围和来源独立性。方法或范围不同的估算分别保留；未批准融合算法前不得平均成单一值。只有可比来源仍互相矛盾时才使用 `conflicted`。
+
+## 25.5 历史语义
+
+时间线必须区分 `observed`、`provider_history`、`archive_backfill` 和 `recomputed`。回填数据不得伪装成 Vantage 当时已经观察。后续资料改变旧结论时，沿用 correction/retraction 链，不覆盖历史。
+
+## 25.6 发布阻断条件
+
+出现以下任一情况，该 capability 不得 GA：定量结果无法回溯；公式不可回算；LLM 产生经营数字；估算未标明；冲突被静默压平；历史来源不可区分；用户私有数据被当作公共品牌事实。

@@ -1,8 +1,8 @@
 # Vantage · 05 Data Source & Collection Spec
 
-**版本：v0.3.1（SC-01 修订，2026-10-07；基线 v0.3 + 本修订，见 CHANGELOG 与 docs/spec/changes/SC-01）**  
-**状态：评审稿**  
-**上位依赖：00 v1.2 / 01 v1.3.3 / 02 v0.3 / 03 v0.3**  
+**版本：v0.4.0（含 SC-01 与 SC-03 修订，2026-10-18）**  
+**状态：受控规格；候选 provider 必须通过真实 POC 后才能从 benchmark 升为 GA**  
+**上位依赖：00 v1.2 / 01 v1.5.0 / 02 v0.4 / 03 v0.4 / SC-01 / SC-03**  
 **所有权：Provider、采集能力、字段、频率、失败、fallback、成本与上线状态**
 
 ---
@@ -801,3 +801,56 @@ heat 可参考：
 - 是否需要 attribution / deletion / audit 能力。
 
 不满足合规要求的采集路径不得仅因为“技术上能抓到”就进入 GA。
+
+# 25. 竞争数据网络 Capability 与 Provider 合同（SC-03）
+
+本节覆盖 SC-03 新增数据面。候选服务名称用于 POC，不代表已经采购、接通或达到 GA。价格、额度和合同条款不得写死在本规格。
+
+## 25.1 Capability Map
+
+| capability | 用户需要看到 | 首选取得路径 | 候选路径 | 未满足时 |
+|---|---|---|---|---|
+| `website_products` | 商品、SKU、价格、促销、可售、卖点 | 品牌官网/公开商品页直接采集 | Shopify/DTC adapter | partial / unavailable |
+| `ad_intelligence` | 素材、文案、CTA、落地页、首次/最后出现、地区及允许的花费/展示估算 | 官方透明库或授权广告数据服务 | Meta/Google/TikTok 官方路径；Pathmatics 类数据服务 | not_integrated / partial |
+| `social_content` | 官方账号、帖子、视频、直播、互动快照和关联商品 | 官方公开接口或允许访问的公开页面 | YouTube Data API；经许可的社媒数据服务 | not_integrated / partial |
+| `creator_kol` | 达人身份、标签、受众、品牌合作、内容和公开商业表现 | 官方公开内容或授权 KOL 数据服务 | Modash 类服务及平台官方接口 | not_integrated / partial |
+| `reviews_reputation` | 评分、评论原文、主题、卖点与抱怨变化 | 官网/平台公开评论或授权数据服务 | DataForSEO 类服务及允许采集的页面 | partial / unavailable |
+| `traffic_audience` | 访问、渠道、地区、设备和聚合人群分布 | 授权网站情报数据服务 | Similarweb 类服务 | not_integrated |
+| `marketplace_commerce` | 价格历史、销量/收入/GMV/转化估算 | 授权平台数据服务 | Keepa、Jungle Scout、FastMoss、Kalodata、Particl 等候选 | not_integrated |
+| `search_interest` | 关键词相对热度和趋势 | 官方或授权趋势服务 | Google Trends 类路径 | partial；不得称销量 |
+| `brand_timeline` | 跨数据面的历史变化 | 自有 observed 历史优先，供应商历史和允许的档案回填 | Wayback/Common Crawl 等允许路径 | warming / insufficient_history |
+
+搜索服务仅用于 discovery、identity routing 和 evidence candidate，不进入最终定量事实。
+
+## 25.2 Provider Registry 必填字段
+
+每个 provider × capability × market 登记：supported objects、fields、history span、refresh cadence、freshness、pagination、rate limit、known failures、fallback、maturity、license scope、display rights、retention、cross-workspace reuse、cost attribution、collector/parser/schema version。
+
+maturity 只允许 `not_integrated`、`benchmark`、`ga`、`suspended`。调用成功不等于 GA；缺少字段语义、样本覆盖、展示权或失败路径时保持 benchmark。
+
+## 25.3 Adapter Contract
+
+所有 adapter 实现 `supports`、`resolveIdentity`、`collect`、`normalize`、`health`，并返回 attempt id、provider record ids、source timestamp、period、measurement_method、methodology version、field coverage、pagination/partial_scan、cache hit、retryable、cost attribution、license/retention class 和 Evidence refs。
+
+`normalize` 不得把供应商估算写成 direct Fact。素材 URL、二进制、缩略图和结构化字段必须分别服从许可与保留策略。
+
+## 25.4 取得顺序与回退
+
+默认顺序：直接公开来源 → 官方透明接口 → 授权数据服务 → 允许的历史档案 → 确定性计算 → 有原文证据的语义提取。回退只在 scope、许可和字段语义兼容时发生；达到 retry/fallback/cost ceiling 后显式结束为 degraded 或 unavailable。
+
+不实现绕过登录、验证码、访问控制、付费墙或技术保护的采集。robots、服务条款、合同或地区规则不允许时，关闭相应路径并登记原因。
+
+## 25.5 频率
+
+- 商品、价格、促销和可售：按监控等级每日多次；
+- 广告：每日一至两次或供应商实际更新周期；
+- 社媒、KOL 和评论：默认每日一次，可按重要对象提升；
+- marketplace 经营估算：每日或供应商更新周期；
+- 网站流量、转化和受众：按周/月更新周期；
+- 历史回填：独立低优先级任务。
+
+刷新请求不能制造比来源更新周期更“新”的时间戳。身份已解析后优先复用已知直接源和 fingerprint/diff。
+
+## 25.6 GA Gate
+
+Provider 进入 GA 前必须完成 06 §15 的真实品牌 POC、展示与保存许可确认、两租户隔离、失败传播、schema drift 检测、成本归因、重启恢复和人工抽样。只有 mock、fixture、搜索 snippet 或单个成功品牌时不可标记 integrated/GA。
