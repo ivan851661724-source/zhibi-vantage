@@ -7,11 +7,11 @@
 ## 规格与范围
 
 - [工程基线](../00_Engineering_Baseline_v1.2.md)：§1.12、21–25、37–38、51、54。
-- [冻结 PRD](../01_Product_PRD_v1.3.3.md)：§17–19、24–25，A09/A12/A13/A22/A28。
+- [冻结 PRD](../../history/2026-10-18_Product_PRD_v1.3.3_retired.md)：§17–19、24–25，A09/A12/A13/A22/A28。
 - [数据规范](../02_Data_Algorithm_Spec_v0.3.md)：§10–13、23；[后端规范](../03_Backend_API_Contract_v0.3.md)：§0、9、12、14–15；[交互规范](../04_Frontend_Interaction_Spec_v0.3.md)：§16–17。
 - [采集规范](../05_Data_Source_Collection_Spec_v0.3.md)：required P0、direct-first；[运行规范](../07_Monitoring_Operations_Runbook_v0.3.md)：§3、9。
 - [现行架构](../../architecture/00_整体架构规范.md)、[现行 API](../../architecture/02_现行API契约.md)、[M2](2026-10-17_M2_监控主链.md)、[总计划](2026-10-17_PRD补全计划.md)。
-- [产品评审](../../01_Product_PRD_v1.4.0_review.md)的决策08/10/11及覆盖、通知、摘要相关条款为未决输入，不是批准政策。
+- [产品评审](../../history/2026-10-18_Product_PRD_v1.5.0_review.md)的决策08/10/11及覆盖、通知、摘要相关条款为未决输入，不是批准政策。
 
 冻结阈值已经明确：quiet 必须达到 required P0 100% 覆盖，且窗口完成、无 verified/actionable 事件。actionable 不等于 confirmed，也不等于已取得外部推送资格；缺少判定依据时不能声称没有 actionable 事件。以下仍未批准：P0 能力机器映射；窗口中加入/暂停的成员归属；Daily Window 边界；数值 freshness SLA；外部通知资格、聚合与偏好默认值；周回执“有效巡检”和时间范围政策。
 

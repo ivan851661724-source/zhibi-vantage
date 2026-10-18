@@ -33,7 +33,7 @@
 
 ## 文档维护
 
-2026-10-17代码核查见[产品评审附录](01_Product_PRD_v1.4.0_review.md#2026-10-17代码补全核查)，执行见[PRD补全计划](spec/plans/2026-10-17_PRD补全计划.md)。[SCP-02冲突提案](spec/changes/SCP-02_runtime_PRD_conflicts.md)仍为Proposed，不批准新业务规则或承诺。2026-10-18合并origin/main watch-*基础闭环后，双监控线Coverage/quiet/摘要外发口径冲突上报见[SCP-03](spec/changes/SCP-03_双监控线coverage_quiet冲突上报.md)，仍为Proposed，两线取舍未裁决。
+2026-10-17代码核查见[产品评审附录](history/2026-10-18_Product_PRD_v1.5.0_review.md#2026-10-17代码补全核查)，执行见[PRD补全计划](spec/plans/2026-10-17_PRD补全计划.md)。[SCP-02冲突提案](spec/changes/SCP-02_runtime_PRD_conflicts.md)仍为Proposed，不批准新业务规则或承诺。2026-10-18合并origin/main watch-*基础闭环后，双监控线Coverage/quiet/摘要外发口径冲突上报见[SCP-03](spec/changes/SCP-03_双监控线coverage_quiet冲突上报.md)，仍为Proposed，两线取舍未裁决。
 
 M1本轮目录Fact→Metric接线、逐任务复审及质量验收边界见[M1专项计划](spec/plans/2026-10-17_M1_Fact_Metric.md)。独立Golden数据缺口保留，不能以合成回归替代真实质量终验。
 

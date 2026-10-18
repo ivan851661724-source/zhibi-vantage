@@ -8,7 +8,7 @@
 
 **技术：** Node内置模块、现有Next.js/React/TypeScript；零新增依赖、零新增外部调用。
 
-**规格：** [00基线](../00_Engineering_Baseline_v1.2.md)§1.3–1.6/§8/§17–20/§26/§38/§42/§56；[01 PRD](../01_Product_PRD_v1.3.3.md)§5.4/§7.2/§20；[02算法](../02_Data_Algorithm_Spec_v0.3.md)§2/§6.1–6.4；[03接口](../03_Backend_API_Contract_v0.3.md)§17；[05采集](../05_Data_Source_Collection_Spec_v0.3.md)§5.3/§10/§19.6及[SC-01](../changes/SC-01_collector_version_vs_parser_version.md)；[06验收](../06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md)Traceability。总入口：[PRD补全计划](2026-10-17_PRD补全计划.md)。
+**规格：** [00基线](../00_Engineering_Baseline_v1.2.md)§1.3–1.6/§8/§17–20/§26/§38/§42/§56；[01 PRD](../../history/2026-10-18_Product_PRD_v1.3.3_retired.md)§5.4/§7.2/§20；[02算法](../02_Data_Algorithm_Spec_v0.3.md)§2/§6.1–6.4；[03接口](../03_Backend_API_Contract_v0.3.md)§17；[05采集](../05_Data_Source_Collection_Spec_v0.3.md)§5.3/§10/§19.6及[SC-01](../changes/SC-01_collector_version_vs_parser_version.md)；[06验收](../06_QA_Golden_Dataset_Acceptance_Spec_v0.3.md)Traceability。总入口：[PRD补全计划](2026-10-17_PRD补全计划.md)。
 
 ## 约束与选择
 
