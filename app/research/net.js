@@ -187,6 +187,7 @@ function mapShopifyItems(products, cap) {
     return {
       title: p.title, type: p.product_type || '',
       id: p.id != null ? p.id : null,
+      variantCount: variants.length, // 规格签名代理：变体集变化 → 价格不可直接比较（lib/watch-price §6）
       minPrice,
       maxPrice: prices.length ? Math.max(...prices) : (nums.length ? 0 : null),
       repPrice: prices.length ? variantMedian(prices) : (nums.length ? 0 : null),

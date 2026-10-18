@@ -1,6 +1,14 @@
 'use strict';
 // R4 每日邮件摘要单测：无变化不发 / 有变化一封汇总 / 未配置通道静默跳过
+// （watch-store/digest-store 等按 ZB_DATA_DIR 隔离——必须先设目录再 require 业务模块，
+//   否则会写进源码树 data/；alerts 存储硬编码 __dirname/../data，同样先清残留）
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+process.env.ZB_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-digest-test-'));
+fs.mkdirSync(process.env.ZB_DATA_DIR, { recursive: true });
+try { fs.rmSync(path.join(__dirname, '..', 'data', 'alerts'), { recursive: true, force: true }); } catch (e) {}
 const { buildDigestText, runDigest } = require('../research/digest.js');
 
 let passed = 0, failed = 0;

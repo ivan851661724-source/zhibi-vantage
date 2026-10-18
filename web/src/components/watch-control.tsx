@@ -11,6 +11,7 @@ interface WatchTarget {
   competitorId: string;
   monitoringStatus: string;
   enabledSignals: string[];
+  supportedSignals?: string[];
   freshnessStatus: string;
   lastSuccessAt?: string | null;
   lastWindow?: { slot: string; coverage: string; partialScan: boolean; failureReasons?: Record<string, number> } | null;
@@ -90,17 +91,41 @@ export function WatchControl({ competitorId }: { competitorId: string }) {
     );
   }
 
+  const inactive = !!target && target.monitoringStatus === 'inactive';
+  if (!target || inactive) {
+    return (
+      <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
+        <button className="watch-btn watch-join" type="button" disabled={busy} onClick={join}>
+          加入监控
+        </button>
+        {inactive ? <span className="watch-meta">曾加入过监控（已移出，历史保留），再次加入将恢复原对象</span> : null}
+        {err ? <span className="watch-err">{err}</span> : null}
+      </div>
+    );
+  }
+
   const paused = target.monitoringStatus === 'paused';
+  const degraded = target.monitoringStatus === 'degraded';
+  // §9 能力门槛：只展示当前品牌真实可用的直接监控范围，不让用户误以为全部信号都在监控
+  const supported = target.supportedSignals || target.enabledSignals || [];
   const covBad = target.lastWindow && (target.lastWindow.coverage !== 'full' || target.lastWindow.partialScan);
   return (
     <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
       <div className="watch-line">
         <span className={'watch-badge ' + (paused ? 'is-paused' : 'is-active')}>
-          {paused ? '已暂停' : '已监控'}
+          {paused ? '已暂停' : degraded ? '降级巡检中' : '已监控'}
         </span>
         <span className="watch-meta">
           信号：{(target.enabledSignals || []).map((s) => SIGNAL_ZH[s] || s).join('、')}
+          {(target.enabledSignals || []).some((s) => !supported.includes(s))
+            ? '（含暂无直接源、尚无法持续巡检的信号）'
+            : ''}
           {target.lastSuccessAt ? ` ｜ 最近成功检查 ${String(target.lastSuccessAt).slice(0, 16).replace('T', ' ')}` : ' ｜ 尚无成功检查'}
+        </span>
+      </div>
+      <div className="watch-line">
+        <span className="watch-meta">
+          当前支持范围：{supported.length ? supported.map((s) => SIGNAL_ZH[s] || s).join('、') : '暂无（该品牌没有可用的直接监控源）'}
         </span>
       </div>
       {covBad ? (

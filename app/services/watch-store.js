@@ -76,6 +76,10 @@ function getDb() {
     UNIQUE (tenant_id, project_id, competitor_id)
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wt_tenant ON watch_targets(tenant_id)`);
+  // 加法迁移（老库升级）：supported_signals / deactivated_at —— 只加列，不改既有列
+  const cols = db.prepare('PRAGMA table_info(watch_targets)').all().map(c => c.name);
+  if (!cols.includes('supported_signals')) db.exec("ALTER TABLE watch_targets ADD COLUMN supported_signals TEXT NOT NULL DEFAULT '[]'");
+  if (!cols.includes('deactivated_at')) db.exec('ALTER TABLE watch_targets ADD COLUMN deactivated_at TEXT');
   db.exec(`CREATE TABLE IF NOT EXISTS monitoring_windows (
     window_id TEXT PRIMARY KEY,            -- watch_target_id + ':' + window_key
     tenant_id TEXT NOT NULL,
@@ -100,6 +104,21 @@ function getDb() {
     UNIQUE (watch_target_id, window_key)
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_mw_tenant ON monitoring_windows(tenant_id)`);
+  // 单品价格快照（整改 §6：正式价格事件按稳定商品身份比较，目录中位数不入此表）
+  db.exec(`CREATE TABLE IF NOT EXISTS watch_price_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    competitor_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,              -- 稳定商品身份（products.json 商品 id）
+    currency TEXT NOT NULL,
+    spec_signature TEXT NOT NULL DEFAULT '',-- 规格签名（变体数代理）；变化 → 不可比
+    price REAL NOT NULL,
+    display TEXT,
+    title TEXT,
+    at TEXT NOT NULL,
+    UNIQUE (tenant_id, project_id, competitor_id, subject_id, currency)
+  )`);
   _db = db;
   return db;
 }
@@ -150,18 +169,46 @@ function sanitizeSignals(list) {
   return out.length ? out : ['price', 'launch', 'stock'];
 }
 
-function createWatchTarget({ tenantId, projectId, competitorId, market, timezone, enabledSignals, enrichmentStatus }) {
+// supported_signals 专用：只过滤词表 + 去重，允许空数组（空 = 无已实现直接源，§9）
+function filterKnownSignals(list) {
+  const out = [];
+  for (const s of Array.isArray(list) ? list : []) {
+    const k = String(s || '').trim().toLowerCase();
+    if (SIGNALS.has(k) && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
+function createWatchTarget({ tenantId, projectId, competitorId, market, timezone, enabledSignals, enrichmentStatus, supportedSignals }) {
   const db = getDb();
   const tid = String(tenantId || '');
-  // 幂等（03 §9：创建 WatchTarget 支持等价去重）：同 (tenant, project, competitor) 已存在 → 原样返回
+  // 幂等（03 §9）：同 (tenant, project, competitor) 已存在 → 原对象返回；
+  // 整改 §5：若该对象处于 inactive（曾退出监控）→ 重新加入 = 恢复原 WatchTarget
+  // 并重新激活（不得因唯一键返回 inactive 对象却不重启巡检）；历史窗口全部保留。
   const existed = db.prepare('SELECT * FROM watch_targets WHERE tenant_id=? AND project_id=? AND competitor_id=?')
     .get(tid, String(projectId || ''), String(competitorId || ''));
-  if (existed) return { target: rowToTarget(existed), existed: true };
+  if (existed) {
+    if (existed.monitoring_status === 'inactive') {
+      let signals;
+      try { signals = sanitizeSignals(enabledSignals || JSON.parse(existed.enabled_signals || '[]')); } catch (e) { signals = ['price', 'launch', 'stock']; }
+      db.prepare(`UPDATE watch_targets SET monitoring_status='active', deactivated_at=NULL, updated_at=?,
+        enabled_signals=?, market=COALESCE(NULLIF(?,''), market), timezone=CASE WHEN ? IS NOT NULL THEN ? ELSE timezone END
+        WHERE tenant_id=? AND watch_target_id=?`)
+        .run(nowIso(), JSON.stringify(signals),
+          String(market || ''), timezone && validTimezone(timezone) ? timezone : null, timezone && validTimezone(timezone) ? timezone.trim() : null,
+          tid, existed.watch_target_id);
+      return { target: getWatchTarget(tid, existed.watch_target_id), existed: true, reactivated: true };
+    }
+    return { target: rowToTarget(existed), existed: true, reactivated: false };
+  }
   const t = {
     watch_target_id: rid('wt'),
     market: String(market || '').slice(0, 40),
     timezone: validTimezone(timezone) ? timezone.trim() : 'UTC',
     enabled_signals: sanitizeSignals(enabledSignals),
+    // 能力门槛（整改 §9）：supportedSignals 由 handler 按真实直接源计算，可为空数组
+    //（无任何已实现直接源）——这里只做词表过滤 + 去重，不回退默认（空 = 明确不支持任何信号）
+    supported_signals: JSON.stringify(filterKnownSignals(supportedSignals)),
     monitoring_status: 'active',            // 用户明确「加入监控」→ 进入正式巡检（01 §16）
     qualification_status: 'unresolved',     // 00 §3.1：QualificationResult 链未建前不得虚标 qualified
     enrichment_status: ENRICHMENT_STATUSES.has(enrichmentStatus) ? enrichmentStatus : 'not_started',
@@ -171,22 +218,24 @@ function createWatchTarget({ tenantId, projectId, competitorId, market, timezone
     baseline_started_at: nowIso(),          // 基线观察期从加入时刻起算
     baseline_completed_at: null,
     last_success_at: null,
+    deactivated_at: null,
   };
   db.prepare(`INSERT INTO watch_targets
-    (watch_target_id, tenant_id, project_id, competitor_id, market, timezone, enabled_signals,
+    (watch_target_id, tenant_id, project_id, competitor_id, market, timezone, enabled_signals, supported_signals,
      monitoring_status, qualification_status, enrichment_status, freshness_status,
-     created_at, updated_at, baseline_started_at, baseline_completed_at, last_success_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+     created_at, updated_at, baseline_started_at, baseline_completed_at, last_success_at, deactivated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(t.watch_target_id, tid, String(projectId || ''), String(competitorId || ''), t.market, t.timezone,
-      JSON.stringify(t.enabled_signals), t.monitoring_status, t.qualification_status, t.enrichment_status,
-      t.freshness_status, t.created_at, t.updated_at, t.baseline_started_at, null, null);
-  return { target: getWatchTarget(tid, t.watch_target_id), existed: false };
+      JSON.stringify(t.enabled_signals), t.supported_signals, t.monitoring_status, t.qualification_status, t.enrichment_status,
+      t.freshness_status, t.created_at, t.updated_at, t.baseline_started_at, null, null, null);
+  return { target: getWatchTarget(tid, t.watch_target_id), existed: false, reactivated: false };
 }
 
 function rowToTarget(r) {
   if (!r) return null;
-  let signals = [];
+  let signals = [], supported = [];
   try { signals = JSON.parse(r.enabled_signals || '[]'); } catch (e) {}
+  try { supported = JSON.parse(r.supported_signals || '[]'); } catch (e) {}
   return {
     watchTargetId: r.watch_target_id,
     tenantId: r.tenant_id,
@@ -195,6 +244,7 @@ function rowToTarget(r) {
     market: r.market,
     timezone: r.timezone,
     enabledSignals: signals,
+    supportedSignals: supported, // §9 能力门槛：当前品牌真实可用的直接监控信号（可为空）
     monitoringStatus: r.monitoring_status,
     qualificationStatus: r.qualification_status,
     enrichmentStatus: r.enrichment_status,
@@ -204,6 +254,7 @@ function rowToTarget(r) {
     baselineStartedAt: r.baseline_started_at,
     baselineCompletedAt: r.baseline_completed_at,
     lastSuccessAt: r.last_success_at,
+    deactivatedAt: r.deactivated_at || null, // §5 软停用审计字段（不新增业务状态枚举）
   };
 }
 
@@ -220,7 +271,14 @@ function listWatchTargets(tenantId, projectId) {
   return rows.map(rowToTarget);
 }
 
-// 正式巡检对象：全部租户的 active 目标（调度器内部使用，非租户面）
+// 正式巡检对象：全部租户的可调度目标（整改 §2：active + degraded 都继续巡检；
+// degraded = 降级运行 ≠ 暂停，成功后由 markSuccess 恢复 active。调度器内部使用，非租户面）
+function listSchedulableTargets() {
+  return getDb().prepare("SELECT * FROM watch_targets WHERE monitoring_status IN ('active','degraded') ORDER BY created_at")
+    .all().map(rowToTarget);
+}
+
+// 严格 active 集（保留给"只看正常态"的展示场景；调度一律走 listSchedulableTargets）
 function listActiveTargets() {
   return getDb().prepare("SELECT * FROM watch_targets WHERE monitoring_status='active' ORDER BY created_at")
     .all().map(rowToTarget);
@@ -252,13 +310,14 @@ function updateWatchTarget(tenantId, watchTargetId, patch) {
   return getWatchTarget(tenantId, watchTargetId);
 }
 
+// 整改 §5：移出监控 = 软停用（monitoring_status='inactive' + deactivated_at 审计），
+// WatchTarget、MonitoringWindow、事件与历史全部保留；不新增业务状态枚举
+//（inactive 是 00 §3 冻结词表既有值）。再次加入走 createWatchTarget 恢复原对象。
 function deleteWatchTarget(tenantId, watchTargetId) {
   const db = getDb();
-  const r = db.prepare('DELETE FROM watch_targets WHERE tenant_id=? AND watch_target_id=?')
-    .run(String(tenantId || ''), String(watchTargetId || ''));
-  if (r.changes) { // 级联清窗口（目标删除后其窗口不再参与任何 coverage 判定）
-    db.prepare('DELETE FROM monitoring_windows WHERE tenant_id=? AND watch_target_id=?').run(String(tenantId), String(watchTargetId));
-  }
+  const r = db.prepare(`UPDATE watch_targets SET monitoring_status='inactive', deactivated_at=?, updated_at=?
+    WHERE tenant_id=? AND watch_target_id=? AND monitoring_status != 'inactive'`)
+    .run(nowIso(), nowIso(), String(tenantId || ''), String(watchTargetId || ''));
   return r.changes > 0;
 }
 
@@ -269,10 +328,13 @@ function markSuccess(tenantId, watchTargetId, atIso) {
   const last = t.last_success_at ? Date.parse(t.last_success_at) : 0;
   const at = Date.parse(atIso);
   const fresh = at - last > 0;
-  db.prepare(`UPDATE watch_targets SET last_success_at=?, freshness_status=?,
+  // 整改 §2：degraded = 降级运行，任一信号成功即恢复 active + fresh
+  //（paused/inactive 不在此列——它们本就不进入巡检，markSuccess 不会被调度器触发）
+  db.prepare(`UPDATE watch_targets SET last_success_at=?, freshness_status='fresh',
+    monitoring_status=CASE WHEN monitoring_status='degraded' THEN 'active' ELSE monitoring_status END,
     baseline_completed_at=COALESCE(baseline_completed_at, CASE WHEN ? THEN ? ELSE NULL END), updated_at=?
     WHERE tenant_id=? AND watch_target_id=?`)
-    .run(atIso, 'fresh', fresh && !t.baseline_completed_at ? 1 : 0, atIso, nowIso(), String(tenantId), String(watchTargetId));
+    .run(atIso, fresh && !t.baseline_completed_at ? 1 : 0, atIso, nowIso(), String(tenantId), String(watchTargetId));
 }
 
 function markDegraded(tenantId, watchTargetId) {
@@ -389,12 +451,42 @@ function latestWindowFor(tenantId, watchTargetId) {
   return r ? rowToWindow(r) : null;
 }
 
+// ---------- 单品价格快照（整改 §6：稳定商品身份比较；每身份存最近一条） ----------
+function listProductPrices(tenantId, projectId, competitorId) {
+  return getDb().prepare(`SELECT * FROM watch_price_snapshots
+    WHERE tenant_id=? AND project_id=? AND competitor_id=?`)
+    .all(String(tenantId || ''), String(projectId || ''), String(competitorId || ''))
+    .map(r => ({
+      subjectId: String(r.subject_id), currency: r.currency, specSignature: r.spec_signature || '',
+      price: r.price, display: r.display || null, title: r.title || null, at: r.at,
+    }));
+}
+
+// upsert 最近快照（调用方先 listProductPrices 取 prev，比较后再落新值）
+function upsertProductPrice(tenantId, projectId, competitorId, snap) {
+  const db = getDb();
+  const s = snap || {};
+  if (!s.subjectId || !Number.isFinite(Number(s.price)) || Number(s.price) <= 0) return false;
+  db.prepare(`INSERT INTO watch_price_snapshots
+    (snapshot_id, tenant_id, project_id, competitor_id, subject_id, currency, spec_signature, price, display, title, at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT (tenant_id, project_id, competitor_id, subject_id, currency)
+    DO UPDATE SET spec_signature=excluded.spec_signature, price=excluded.price, display=excluded.display,
+      title=excluded.title, at=excluded.at`)
+    .run(rid('wps'), String(tenantId || ''), String(projectId || ''), String(competitorId || ''),
+      String(s.subjectId), String(s.currency || 'USD').toUpperCase(), String(s.specSignature || ''),
+      Number(s.price), s.display != null ? String(s.display) : null, s.title != null ? String(s.title) : null,
+      String(s.at || nowIso()));
+  return true;
+}
+
 module.exports = {
   MONITORING_STATUSES, QUALIFICATION_STATUSES, ENRICHMENT_STATUSES, FRESHNESS_STATUSES,
   SIGNALS, FAILURE_REASONS, WINDOW_SLOTS, POLICY_VERSION, JITTER_MAX_MS, STALE_CLAIM_MS,
   REGION_TZ, validTimezone, zonedSlotUtc, localParts, tzOffsetMs,
   getDb, closeDb,
-  createWatchTarget, getWatchTarget, listWatchTargets, listActiveTargets, updateWatchTarget, deleteWatchTarget,
+  createWatchTarget, getWatchTarget, listWatchTargets, listActiveTargets, listSchedulableTargets, updateWatchTarget, deleteWatchTarget,
   markSuccess, markDegraded, refreshFreshness,
+  listProductPrices, upsertProductPrice,
   claimWindow, completeWindow, failWindow, getWindow, windowsForTargetDay, windowsForTenantDay, latestWindowFor,
 };

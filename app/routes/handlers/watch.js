@@ -80,12 +80,31 @@ async function createTarget(ctx, req, res, url, p) {
     timezone = WS.REGION_TZ[regions[0]] || 'UTC';
   }
   const market = typeof body.market === 'string' ? body.market : (regions0(state) || '');
+  // 整改 §9 能力门槛：按当前品牌当前可用的直接源计算 supportedSignals。
+  // 已实现直接源 = Shopify /products.json 公开端点（price/launch/stock 共用一次直抓，
+  // 零 LLM 零搜索）；接入其他直接源时在此扩展。不因接入搜索 API 而宣称持续监控能力
+  //（搜索是研究通道，不是持续直采通道）。一个支持信号都没有 → CAPABILITY_NOT_SUPPORTED，
+  // 不让用户加入一个必然失败的监控。
+  const shopifyCap = !!(comp.url && (comp.isShopify || /shopify/i.test(String(comp.url))));
+  const supportedSignals = shopifyCap ? ['price', 'launch', 'stock'] : [];
+  const requested = Array.isArray(body.enabledSignals) && body.enabledSignals.length
+    ? body.enabledSignals.map(s => String(s || '').trim().toLowerCase()).filter(s => WS.SIGNALS.has(s))
+    : null;
+  if (!supportedSignals.length || (requested && !requested.some(s => supportedSignals.includes(s)))) {
+    ctx.sendJSON(res, 400, {
+      error: 'CAPABILITY_NOT_SUPPORTED',
+      message: '当前品牌没有可用的直接监控源，暂不能加入持续监控（当前仅支持 Shopify 店铺的价格/上新/断货直采）。',
+    });
+    return true;
+  }
+  const enabledSignals = requested ? requested.filter(s => supportedSignals.includes(s)) : supportedSignals;
   const r = WS.createWatchTarget({
     tenantId: tid, projectId, competitorId, market, timezone,
-    enabledSignals: body.enabledSignals,
+    enabledSignals,
+    supportedSignals,
     enrichmentStatus: comp.status === 'done' ? 'complete' : 'not_started', // 映射既有 enrichment 链产出，不虚标
   });
-  ctx.sendJSON(res, r.existed ? 200 : 201, { target: targetView(r.target, WS.latestWindowFor(tid, r.target.watchTargetId)), existed: r.existed });
+  ctx.sendJSON(res, r.existed ? 200 : 201, { target: targetView(r.target, WS.latestWindowFor(tid, r.target.watchTargetId)), existed: r.existed, reactivated: !!r.reactivated });
   return true;
 }
 function regions0(state) {
@@ -131,6 +150,8 @@ async function patchTarget(ctx, req, res, url, p) {
 }
 
 // ---------- DELETE /api/watch-targets/:id（停用并移出正式巡检） ----------
+// 整改 §5：软停用（monitoring_status='inactive'），WatchTarget、窗口、事件与历史
+// 全部保留可查；再次加入同一对象由 createWatchTarget 恢复原目标并重新激活。
 async function deleteTarget(ctx, req, res, url, p) {
   const m = /^\/api\/watch-targets\/([^/]+)$/.exec(p);
   if (!m || req.method !== 'DELETE') return false;
@@ -139,7 +160,7 @@ async function deleteTarget(ctx, req, res, url, p) {
   const id = decodeURIComponent(m[1]).slice(0, 90);
   const ok = WS.deleteWatchTarget(tid, id);
   if (!ok) { ctx.sendJSON(res, 404, { error: 'WATCH_TARGET_NOT_FOUND', message: '监控对象不存在。' }); return true; }
-  ctx.sendJSON(res, 200, { ok: true });
+  ctx.sendJSON(res, 200, { ok: true, deactivated: true, message: '已移出正式巡检；历史与窗口保留，可再次加入恢复。' });
   return true;
 }
 
@@ -152,12 +173,14 @@ async function dailyDigest(ctx, req, res, url, p) {
   return true;
 }
 
-// ---------- GET /api/watch-targets/coverage（指定日的窗口明细，调试/前端提示用） ----------
+// ---------- GET /api/watch-targets/coverage（三态日报：调试/前端提示用） ----------
+// 整改 §7：buildDailyBrief() 本身就返回简报对象——此处不得再解构 { brief }
+//（那会把 undefined 发给前端）。直接返回简报，含 mode / coverage / gaps / events。
 async function coverageDay(ctx, req, res, url, p) {
   if (p !== '/api/watch-targets/coverage' || req.method !== 'GET') return false;
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可查看覆盖明细。' }); return true; }
-  const { brief } = buildDailyBrief(tid, { nowMs: Date.now(), includeWindows: true });
+  const brief = buildDailyBrief(tid, { nowMs: Date.now() });
   ctx.sendJSON(res, 200, brief);
   return true;
 }

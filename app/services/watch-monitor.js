@@ -16,16 +16,19 @@
 //
 // 与旧 sweep（research/sweep.js）的关系：sweep 是研究活跃度驱动的观测雷达
 // （近 30 天活跃项目），不承担正式监控资格；本模块只巡检用户明确「加入监控」
-// 的 WatchTarget（monitoring_status='active'），二者正交（01 §16 / 任务书 §4）。
+// 的 WatchTarget（monitoring_status='active'/'degraded'，整改 §2：degraded=降级运行
+// ≠ 暂停，继续按计划窗口复查），二者正交（01 §16 / 整改 §3：WatchMonitor 是正式
+// 监控的唯一资格边界，旧 sweep 不再调度、不发正式监控提醒、不重复抓取）。
 // ============================================================
 const fs = require('fs');
 const WS = require('./watch-store.js');
 const PH = require('../lib/price-history.js');
-const priceStore = require('../research/price-store.js');
+const WPrice = require('../lib/watch-price.js');
 const StockStore = require('../research/stock-store.js');
 const Net = require('../research/net.js');
 const Alerts = require('./alerts.js');
 const Logger = require('./logger.js');
+const M = require('../lib/metrics.js');
 const { projFile } = require('../core/state-store.js');
 
 function medianOf(nums) {
@@ -64,13 +67,16 @@ function dueWindows(target, nowMs) {
 }
 
 // ---------- 单目标单窗口执行（返回窗口级 Coverage 结果） ----------
-// deps（全部可注入，测试用替身）：fetchFn / readStateFn / priceStoreFn / priceSaveFn /
+// deps（全部可注入，测试用替身）：fetchFn / productPricesFn / productPriceSaveFn /
 //   stockLoadFn / stockSaveFn / alertsPushFn
+// 整改 §1：fetchFn 未注入时默认使用真实 Net.fetchShopifyProducts——生产巡检入口
+// 永远走真实直采，测试替身只覆盖默认函数，禁止测试全部走注入路径。
 async function executeWindow(target, windowId, deps, nowMs) {
   const now = nowMs || Date.now();
   const tid = target.tenantId, pid = target.projectId;
-  const priceStoreFn = deps.priceStoreFn || priceStore.load;
-  const priceSaveFn = deps.priceSaveFn || priceStore.save;
+  const fetchFn = deps.fetchFn || Net.fetchShopifyProducts;
+  const productPricesFn = deps.productPricesFn || WS.listProductPrices;
+  const productPriceSaveFn = deps.productPriceSaveFn || WS.upsertProductPrice;
   const stockLoadFn = deps.stockLoadFn || StockStore.load;
   const stockSaveFn = deps.stockSaveFn || StockStore.save;
   const alertsPushFn = deps.alertsPushFn || Alerts.push;
@@ -100,7 +106,7 @@ async function executeWindow(target, windowId, deps, nowMs) {
     for (const s of signals) attempt(s, false, 'not_supported');
   } else {
     let res = null;
-    try { res = await deps.fetchFn(comp.url, { trigger: 'monitor', tenantId: tid }); }
+    try { res = await fetchFn(comp.url, { trigger: 'monitor', tenantId: tid }); }
     catch (e) { res = { ok: false, error: String((e && e.message) || e) }; }
     const failReasonOf = (r) => {
       if (r && r.error === 'parse_failed') return 'parse_failed';
@@ -114,38 +120,47 @@ async function executeWindow(target, windowId, deps, nowMs) {
       if (res && res.partialScan) partialScan = true;
     } else {
       partialScan = !!res.truncated || !!res.partialScan;
-      const onSale = res.items.filter(x => x && typeof x.repPrice === 'number' && x.repPrice > 0 && !x.soldOut);
+      const onSale = res.items.filter(x => x && x.id != null && typeof x.repPrice === 'number' && x.repPrice > 0 && !x.soldOut);
       const nowIsoS = new Date(now).toISOString();
-      // price：直采变体代表价中位（verified 级公开价）→ 快照 diff → 仅变化才成事件（无 LLM）
+      const currency = String(res.currency || comp.currency || 'USD').toUpperCase();
+      // price（整改 §6）：按稳定商品身份逐品比较——同商品 id、同市场（WatchTarget 圈定）、
+      // 同币种、同规格签名（变体数代理）才允许涨跌事件；新增/删除其他商品不影响原商品
+      // 的比较（逐品独立）；目录中位数只作独立 Metric，绝不冒充单品 price-change。
       if (signals.includes('price')) {
-        const price = onSale.length ? medianOf(onSale.map(x => x.repPrice)) : null;
-        if (price == null) {
-          attempt('price', false, 'fetch_failed');
-        } else {
-          try {
-            let list = priceStoreFn(tid, pid);
-            const r2 = PH.applySnapshot(list, {
-              competitorId: comp.id, price,
-              display: String(price), currency: res.currency || comp.currency || 'USD',
-              url: res.url || comp.url || '', at: nowIsoS, basis: 'verified',
-            });
-            priceSaveFn(tid, pid, r2.list);
+        try {
+          const prevList = productPricesFn(tid, pid, comp.id) || [];
+          const byKey = new Map(prevList.map(p => [String(p.subjectId) + '|' + String(p.currency).toUpperCase(), p]));
+          for (const it of onSale) {
+            const prev = byKey.get(String(it.id) + '|' + currency) || null;
+            const entry = {
+              subjectId: String(it.id), currency,
+              specSignature: WPrice.specSignatureOf(it),
+              price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
+            };
+            const r2 = WPrice.applyProductSnapshot(prev, entry);
             if (r2.event && r2.event.kind === 'changed') {
               eventsVerified++;
               try {
                 alertsPushFn(tid, {
                   type: 'price-change', projectId: pid,
-                  competitorId: comp.id, competitorName: comp.name,
-                  text: PH.describeChange(r2.event, () => ''),
-                  old: r2.event.old != null ? r2.event.old : null, new: r2.event.price,
+                  competitorId: comp.id, competitorName: comp.name, subjectId: r2.event.subjectId,
+                  title: r2.event.title,
+                  text: (r2.event.title ? r2.event.title + '：' : '') + PH.describeChange(r2.event, () => ''),
+                  old: r2.event.old, new: r2.event.new,
                   deltaPct: r2.event.deltaPct != null ? r2.event.deltaPct : null,
-                  currency: r2.event.currency, sourceUrl: r2.event.url || null, basis: 'verified',
+                  currency: r2.event.currency, sourceUrl: res.url || comp.url || null, basis: 'verified',
                 });
               } catch (e) { /* 推送失败不影响窗口落账 */ }
             }
-            attempt('price', true);
-          } catch (e) { attempt('price', false, 'fetch_failed'); }
-        }
+            try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
+          }
+          attempt('price', true);
+        } catch (e) { attempt('price', false, 'fetch_failed'); }
+        // 目录中位数 → 独立 Metric（§6：只作指标记录，不产单品事件）
+        try {
+          const med = medianOf(onSale.map(x => x.repPrice));
+          if (med != null) M.logEvent({ changeType: 'watch_catalog_median_price', competitorId: comp.id, to: String(med), source: res.url || comp.url || null, confidence: 'high', tenantId: tid });
+        } catch (e) { /* 非致命 */ }
       }
       // launch / stock：同一份全量 products.json（canonical 合并：一次抓取喂多个信号）
       if (signals.includes('launch') || signals.includes('stock')) {
@@ -173,11 +188,20 @@ async function executeWindow(target, windowId, deps, nowMs) {
           }
           if (signals.includes('launch')) {
             if ((cur.productIds || []).length && newIds.length) {
+              // 整改 §8：有发布时间佐证的数量 = withPub.length；区分「Vantage 首次观察到」
+              // 与「来源证明的上市」——不能因为一款商品有 publishedAt 就把全部新 ID 标成已核实
               const withPub = res.items.filter(x => x.id != null && newIdSet.has(x.id) && x.publishedAt);
               if (withPub.length) {
                 eventsVerified++;
+                const observedOnly = newIds.length - withPub.length;
                 try {
-                  alertsPushFn(tid, { type: 'product-launch', projectId: pid, competitorId: comp.id, competitorName: comp.name, text: `${comp.name} 上新 ${newIds.length} 款`, count: newIds.length, sourceUrl: comp.url || null, basis: 'verified' });
+                  alertsPushFn(tid, {
+                    type: 'product-launch', projectId: pid, competitorId: comp.id, competitorName: comp.name,
+                    text: `${comp.name} 上新 ${withPub.length} 款（发布时间佐证）`
+                      + (observedOnly > 0 ? `；另有 ${observedOnly} 款为 Vantage 首次观察到，暂无发布时间佐证，不计入已核实上新` : ''),
+                    count: withPub.length, observedCount: newIds.length,
+                    sourceUrl: comp.url || null, basis: 'verified',
+                  });
                 } catch (e) {}
               }
             }
@@ -205,7 +229,9 @@ async function runDueWindows(opts) {
   const o = opts || {};
   const nowMs = o.nowMs || Date.now();
   const deps = o.deps || {};
-  const targets = o.targets || WS.listActiveTargets();
+  // 整改 §2：active + degraded 都进入巡检集合（degraded=降级运行≠暂停）；
+  // paused/inactive 才停止巡检
+  const targets = o.targets || WS.listSchedulableTargets();
   const out = { targets: targets.length, windows: [], skipped: 0 };
   for (const target of targets) {
     for (const due of dueWindows(target, nowMs)) {
