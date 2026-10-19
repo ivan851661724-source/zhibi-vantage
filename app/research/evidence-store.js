@@ -268,7 +268,7 @@ function recordEvidence(input) {
     config_version: input.config_version == null ? null : String(input.config_version),
     provenance: { snapshots: provenance },
     idempotency_key: idempotencyKey,
-    note: input.note || null,
+    note: input.note ? require('../lib/url-redact.js').redactUrlText(input.note) : null,
   };
 
   const dir = evidenceDirOf(tenantId);

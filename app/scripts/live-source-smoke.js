@@ -95,14 +95,23 @@ async function smokeTikTok() {
     let token = null;
     try { const j = JSON.parse(tok.buffer.toString('utf8')); token = j.access_token || (j.data && j.data.access_token) || null; } catch (e) { /* parse */ }
     if (!token) { record('tiktok', 'AUTH_REJECTED', 'oauth 响应无 access_token（权限未开通）'); return; }
-    // token 就绪 → 商业内容研究端点最小请求（token 在受控请求头，不进 URL）
-    const url = 'https://open.tiktokapis.com/v2/research/adlib/commercial_content/ads/search/';
-    const body = JSON.stringify({ keyword: 'smoke_test', page: 1, limit: 1 });
+    // P0-2 整改 r3：官方 Query Ads 契约（Authorization: Bearer + 官方 body/fields）
+    const TT_FIELDS = 'ad.id,ad.first_shown_date,ad.last_shown_date,ad.status,advertiser.business_name';
+    const url = 'https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=' + encodeURIComponent(TT_FIELDS);
+    const ymd = (d) => '' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0');
+    const body = JSON.stringify({ filters: { ad_published_date_range: { min: ymd(new Date(Date.now() - 30 * 86400000)), max: ymd(new Date(Date.now() - 86400000)) } }, search_term: 'coffee', max_count: 1 });
     const res = await Net.safeRequestOnce(url, {
       timeoutMs: 20000, method: 'POST',
-      headers: { 'access-token': token, 'Content-Type': 'application/json' }, body,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body,
     });
-    if (res.status === 200) record('tiktok', 'SUCCESS', 'status=200（公开记录可查询；token 未泄漏到 URL/输出）');
+    if (res.status === 200) {
+      // HTTP 200 不等于成功：必须 error.code === 'ok' 且 data.ads 为数组（P0-4）
+      let biz = null, adsCount = null;
+      try { const j = JSON.parse(res.buffer.toString('utf8')); biz = j.error && j.error.code; adsCount = Array.isArray(j.data && j.data.ads) ? j.data.ads.length : null; } catch (e) { /* parse */ }
+      if (String(biz).toLowerCase() === 'ok' && adsCount != null) record('tiktok', 'SUCCESS', 'http=200 error.code=ok ads=' + adsCount + '（公开广告记录可查询；token 未进 URL/输出）');
+      else if (/token|scope|permission|authoriz/i.test(String(biz))) record('tiktok', 'AUTH_REJECTED', 'http=200 业务码=' + String(biz) + '（研究权限未开通）');
+      else record('tiktok', 'UNAVAILABLE', 'http=200 但业务码=' + String(biz) + '（不可视为成功）');
+    }
     else if (res.status === 401 || res.status === 403) record('tiktok', 'AUTH_REJECTED', 'api status=' + res.status + '（研究权限未开通）');
     else if (res.status === 429) record('tiktok', 'QUOTA_EXHAUSTED', 'api status=429');
     else record('tiktok', 'UNAVAILABLE', 'api status=' + res.status);

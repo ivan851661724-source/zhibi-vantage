@@ -107,22 +107,26 @@ const NORM_CTX = { competitor: BRAND };
     assert.strictEqual(out.summary.providerRecordId, 'task_123', 'provider record ID 保存');
   });
 
-  await t('W2 解析：tiktok normalize 输出 ad_creatives（花费/ROI 恒不可观测）', async () => {
+  await t('W2 解析：tiktok normalize 输出 ad_creatives（r3：official_disclosure + 覆盖范围；花费/ROI 恒不可观测）', async () => {
     const a = Adapters.getAdapter('tiktok');
     const raw = {
       ok: true,
-      creatives: [{ id: 'ad1', title: 'Promo video', startDate: '2026-09-15', advertiser: 'WaveBrand Store', region: 'US', creativeUrl: 'https://example.com/creative.mp4', reach: 900 }],
-      snapshotIds: [], providerRecordId: 'req_abc', partialScan: false,
-      sourceUrl: 'https://business-api.tiktok.com/open_api/v1.3/research/adlib/ad/search/',
+      creatives: [{ id: 'ad1', firstShownDate: '20250115', lastShownDate: '20250120', status: 'active', advertiser: 'WaveBrand Store', creativeUrl: 'https://example.com/creative.mp4', reachLabel: '11K' }],
+      snapshotIds: [], providerRecordId: 'sid_abc', partialScan: false,
+      periodStart: '20250101', periodEnd: '20250301', countryScope: 'ALL（官方支持国家范围）',
+      sourceUrl: 'https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=ad.id',
     };
     const out = a.normalize(raw, NORM_CTX);
     assert.strictEqual(out.summary.kind, 'ad_creatives');
-    assert.strictEqual(out.summary.measurementMethod, 'licensed_estimate');
+    // P0-3 整改 r3：平台公开披露，非数据服务估算
+    assert.strictEqual(out.summary.measurementMethod, 'official_disclosure');
+    assert.ok(/30 国/.test(out.summary.coverageNote || ''), '覆盖范围说明（不写未观察到广告）');
     const all = JSON.stringify(out);
     for (const banned of ['spend', 'cost', 'roi', 'conversion', 'cpc', 'cpm']) {
       assert.ok(!all.toLowerCase().includes(banned), '不得出现花费/转化字段：' + banned);
     }
     assert.strictEqual(out.observations[0].price, null, '广告观察无价格语义');
+    assert.strictEqual(out.observations[0].reach, '11K', 'reach 用官方区间标签而非数值推算');
   });
 
   await t('W2 解析：reviews normalize 输出 reviews_digest（样本量/来源数/时间范围明示）', async () => {

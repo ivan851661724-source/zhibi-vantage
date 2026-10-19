@@ -18,6 +18,7 @@ const { Buffer } = require('buffer');
 const Cache = require('../services/cache.js');
 const als = require('../core/als.js');
 const Snapshot = require('./source-snapshot.js');
+const UrlRedact = require('../lib/url-redact.js');
 const FetchGate = require('../services/fetch-gate.js');
 
 // 租户解析（P0-2，PR#2 评审）：显式参数 > ALS > null。fetch-page 缓存键按租户隔离——
@@ -36,7 +37,7 @@ const COLLECTOR_VERSION = Snapshot.COLLECTOR_VERSION;
 
 // 修正 9 兼容规则：快照落盘失败不得破坏 legacy 调研路径，但必须是可见运营错误（error 级，非静默）
 function loggerError(entry, e, url) {
-  try { require('../services/logger.js').error('source_snapshot_error', { entry, url: url || null, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
+  try { require('../services/logger.js').error('source_snapshot_error', { entry, url: url ? UrlRedact.redactUrlText(url) : null, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
 }
 
 function domainOf(url) {
@@ -103,7 +104,7 @@ async function fetchPage(url, timeoutMs, opts) {
   // 旁路记录失败观察（00 §38：fetch_failed ≠ no_change）；业务返回值原样
   const recFail = (sourceStatus, errorCode, httpStatus, finalUrl, hops) => {
     try {
-      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: finalUrl || null, redirect_hops: hops || 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: UrlRedact.redactUrl(url), final_url: UrlRedact.redactUrl(finalUrl) || null, redirect_hops: hops || 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
       return s.recorded ? s.meta.snapshot_id : undefined;
     } catch (e) { loggerError('fetchPage', e, url); return undefined; }
   };
@@ -151,7 +152,7 @@ async function fetchPage(url, timeoutMs, opts) {
     let sid;
     let prov = { recorded: false };
     try {
-      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: current, redirect_hops: hops, http_status: res.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: resCt, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: UrlRedact.redactUrl(url), final_url: UrlRedact.redactUrl(current), redirect_hops: hops, http_status: res.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: resCt, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
       if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
       else prov = s;
     } catch (e) { loggerError('fetchPage', e, url); }

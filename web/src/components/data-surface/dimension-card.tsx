@@ -83,8 +83,10 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
     return (
       <div className="ds-card-sum">
         公开广告素材 <b className="num">{s.creativeCount}</b> 条
-        <span className="ds-mm-tag" title="数据服务估算：仅接口实际返回的公开字段">数据服务估算</span>
-        <span className="ds-mm-note">广告花费 / 获客成本 / ROI / 转化率当前公开来源无法直接观测</span>
+        <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
+        {s.periodStart && s.periodEnd ? <> · 投放窗口 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-note">覆盖范围受 TikTok 官方支持国家限制（30 国，不含美国）；未覆盖国家不代表没有广告</span>
+        <span className="ds-mm-note">广告花费 / 获客成本 / ROI / 转化率 / GMV 当前公开来源无法直接观测</span>
       </div>
     );
   }

@@ -57,13 +57,15 @@ export interface TrendSeriesSummary {
   partialScan: boolean;
   partialScanReason?: string | null;
 }
-/** 广告活动：公开广告素材（花费/ROI/转化率不可观测） */
+/** 广告活动：平台公开披露（official_disclosure；花费/ROI/转化率/GMV 不可观测；覆盖范围受官方支持国家限制） */
 export interface AdCreativesSummary {
   kind: 'ad_creatives';
   creativeCount: number;
-  measurementMethod: 'licensed_estimate';
+  measurementMethod: 'official_disclosure';
   periodStart: string | null;
   periodEnd: string | null;
+  countryScope?: string | null;
+  coverageNote?: string | null;
   providerRecordId: string | null;
   methodologyVersion: string | null;
   partialScan: boolean;

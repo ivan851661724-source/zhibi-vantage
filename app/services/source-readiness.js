@@ -14,6 +14,7 @@
 // - 用户侧文案只有四种（任务书 r2 §P0-2）；技术细节仅管理员健康接口可见（不显示密钥值）。
 const SurfaceStore = require('./surface-store.js');
 const Registry = require('./capability-registry.js');
+const UrlRedact = require('../lib/url-redact.js');
 
 const READINESS_STATES = Object.freeze([
   'not_configured', 'ready_to_verify', 'operational',
@@ -111,14 +112,17 @@ function getReadiness(capabilityCode) {
     return { state: 'operational', userText: '', provider: cap.provider, configKeys: [], configKeysPresent: {} };
   }
   const ok = lastSuccess(capabilityCode);
-  if (ok) {
+  const fail = lastFailure(capabilityCode);
+  // 运行态按「最近一次真实尝试」判定：失败晚于成功 → 反映失败分类（凭据失效/权限变更等）。
+  // 仅在最近一次成功之后无失败时才是 operational。
+  const failIsNewer = !!(fail && (!ok || String(fail.at || '') > String(ok.created_at || '')));
+  if (ok && !failIsNewer) {
     return {
       state: 'operational', userText: '',
       lastVerifiedAt: ok.created_at, provider: ok.provider,
       configKeys: cfg.keys, configKeysPresent: cfg.present,
     };
   }
-  const fail = lastFailure(capabilityCode);
   if (fail) {
     const state = fail.failureClass === 'auth_rejected' ? 'auth_rejected'
       : fail.failureClass === 'quota_exhausted' || fail.failureClass === 'rate_limited' ? 'quota_exhausted'
@@ -134,7 +138,9 @@ function getReadiness(capabilityCode) {
   };
 }
 
-// 记录真实尝试结果（只存脱敏 URL 与分类，绝不存密钥/token）
+// 记录真实尝试结果（只存脱敏 URL 与分类，绝不存密钥/token）。
+// P0-1 整改 r3：sourceUrl 在本函数内**强制**走共享脱敏模块——调用方传入
+// 未脱敏 URL（如 ?access_token=...）也不会落库。
 function recordVerification({ capability, provider, status, failureClass, sourceUrl, tenantId }) {
   ensureTable();
   const db = SurfaceStore.getDb();
@@ -142,7 +148,7 @@ function recordVerification({ capability, provider, status, failureClass, source
     id: rid('pv'), capability: String(capability || ''), provider: String(provider || ''),
     status: status === 'success' ? 'success' : 'failed',
     failureClass: status === 'success' ? null : String(failureClass || 'unavailable'),
-    sourceUrl: sourceUrl ? String(sourceUrl).slice(0, 500) : null,
+    sourceUrl: sourceUrl ? String(UrlRedact.redactUrl(sourceUrl)).slice(0, 500) : null,
     tenantId: tenantId || null,
     createdAt: new Date().toISOString(),
   };

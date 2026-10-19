@@ -31,6 +31,8 @@
 const Net = require('../research/net.js');
 const EvidenceStore = require('../research/evidence-store.js');
 const Snapshot = require('../research/source-snapshot.js');
+const UrlRedact = require('../lib/url-redact.js');
+const ProviderResponse = require('../lib/provider-response.js');
 const Registry = require('./capability-registry.js');
 const SurfaceStore = require('./surface-store.js');
 const fs = require('fs');
@@ -524,6 +526,12 @@ function failAttempt(ctx, res, extra) {
   return { deduped: false, attempt: done, retryable: cls.retryable };
 }
 
+// P0-4 整改 r3：provider 结构判定失败 → 真实失败分类（HTTP 200 + 业务错误绝不进成功链）
+function failFromProviderCheck(ctx, chk) {
+  const status = chk.errorClass === 'auth_rejected' ? 403 : chk.errorClass === 'quota_exhausted' ? 429 : 502;
+  return failAttempt(ctx, { ok: false, error: chk.errorClass, status }, { errorUserText: ProviderResponse.USER_TEXT[chk.errorClass] || '数据服务暂不可用，请稍后再试。' });
+}
+
 // ============================================================
 // Shopify catalog adapter（products.json 多页 + cart.js 币种）
 // ============================================================
@@ -798,6 +806,16 @@ const shopifyCollectionsAdapter = {
 const YT_ADAPTER_VERSION = 'youtube-adapter-1';
 const DFS_ADAPTER_VERSION = 'dataforseo-adapter-1';
 const TT_ADAPTER_VERSION = 'tiktok-adapter-1';
+// P0-2 整改 r3：TikTok Commercial Content API 官方常量（2026-10-19 核实文档）
+// Query Ads: POST https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=<白名单>
+// Authorization: Bearer <client access token>（client key/secret 只用于 /v2/oauth/token/）
+const TT_AD_ENDPOINT = 'https://open.tiktokapis.com/v2/research/adlib/ad/query/';
+// 官方 fields 白名单（Query Ads 文档逐字）：ad.id/ad.first_shown_date/ad.last_shown_date/ad.status/
+// ad.status_statement/ad.videos/ad.image_urls/ad.reach/advertiser.business_id/advertiser.business_name/advertiser.paid_for_by
+const TT_AD_FIELDS = 'ad.id,ad.first_shown_date,ad.last_shown_date,ad.status,ad.videos,ad.image_urls,ad.reach,advertiser.business_id,advertiser.business_name,advertiser.paid_for_by';
+// 官方 Supported Countries（文档页核实）：EU 27 + EEA 补充 3 + GB/CH，共 30 国——不含美国
+const TT_SUPPORTED_COUNTRIES = Object.freeze(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','NO','IS','LI','GB','CH']);
+
 const REV_ADAPTER_VERSION = 'reviews-adapter-1';
 
 // 失败文案（Wave 1 定制：配置缺失是系统状态，不是来源拒绝；04 §20 产品化）
@@ -807,22 +825,13 @@ const WAVE1_FAILURE_TEXT = Object.freeze({
   quota_exhausted: '数据服务配额已用尽，稍后重试或调整配额。',
 });
 
-// 凭据参数脱敏（P0 整改 r2）：默认敏感键表兜底——不依赖调用方传参；
-// 键名大小写不敏感。所有进入快照/错误/日志的 URL 必须统一经过本函数。
-const SENSITIVE_QUERY_KEYS = Object.freeze([
-  'key', 'api_key', 'apikey', 'access_token', 'token', 'client_secret',
-  'signature', 'secret', 'password',
-]);
+// 凭据参数脱敏（P0-1 整改 r3）：委托独立共享模块 app/lib/url-redact.js（零循环依赖）。
+// 所有持久化边界（Snapshot source_url/final_url、fetchApiJson finalUrl、
+// provider_verifications.source_url、Evidence/report/admin/错误对象、重定向 URL）
+// 都必须经过同一套脱敏函数。
+const SENSITIVE_QUERY_KEYS = UrlRedact.SENSITIVE_QUERY_KEYS;
 function redactSecretParams(u, secretParams) {
-  try {
-    const uu = new URL(u);
-    const lower = new Set(SENSITIVE_QUERY_KEYS.map(k => k.toLowerCase()));
-    for (const extra of (secretParams || [])) lower.add(String(extra).toLowerCase());
-    for (const k of [...uu.searchParams.keys()]) {
-      if (lower.has(k.toLowerCase())) uu.searchParams.set(k, '[REDACTED]');
-    }
-    return uu.href;
-  } catch (e) { return u; }
+  return UrlRedact.redactUrl(u, secretParams);
 }
 
 // 凭据化 API JSON 抓取（共享 helper）：SSRF 校验 → safeRequestOnce → 脱敏快照 → JSON。
@@ -987,6 +996,7 @@ const youtubeAdapter = {
       secretParams: ['key'], trigger,
     });
     if (!find.ok) return failAttempt(ctx, find, { errorUserText: find.errorUserText });
+    { const chk = ProviderResponse.youtubeOk(find.json); if (!chk.ok) return failFromProviderCheck(ctx, chk); }
     if (find.snapshotId) snapshotIds.push(find.snapshotId);
     const candItems = (find.json && find.json.items) || [];
     // 2) 可解释的归属校验：匹配依据记录；不确定 → identity 保持 unresolved（不升级）
@@ -1015,12 +1025,14 @@ const youtubeAdapter = {
       tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
     });
     if (!chan.ok) return failAttempt(ctx, chan, { errorUserText: chan.errorUserText });
+    { const chk = ProviderResponse.youtubeOk(chan.json); if (!chk.ok) return failFromProviderCheck(ctx, chk); }
     if (chan.snapshotId) snapshotIds.push(chan.snapshotId);
     const vidsSearch = await fetchApiJson({
       url: API + '/search?part=snippet&type=video&order=date&maxResults=10&channelId=' + encodeURIComponent(String(channelId || '')) + '&key=' + encodeURIComponent(key),
       tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
     });
     if (!vidsSearch.ok) return failAttempt(ctx, vidsSearch, { errorUserText: vidsSearch.errorUserText });
+    { const chk = ProviderResponse.youtubeOk(vidsSearch.json); if (!chk.ok) return failFromProviderCheck(ctx, chk); }
     if (vidsSearch.snapshotId) snapshotIds.push(vidsSearch.snapshotId);
     const vidIds = ((vidsSearch.json && vidsSearch.json.items) || []).map(v => v.id && v.id.videoId).filter(Boolean).slice(0, 10);
     let stats = { items: [] };
@@ -1030,6 +1042,7 @@ const youtubeAdapter = {
         tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
       });
       if (!det.ok) return failAttempt(ctx, det, { errorUserText: det.errorUserText });
+    { const chk = ProviderResponse.youtubeOk(det.json); if (!chk.ok) return failFromProviderCheck(ctx, chk); }
       if (det.snapshotId) snapshotIds.push(det.snapshotId);
       stats = det.json || { items: [] };
     }
@@ -1051,7 +1064,8 @@ const youtubeAdapter = {
         tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
       });
       if (ct.ok && ct.snapshotId) snapshotIds.push(ct.snapshotId);
-      if (ct.ok && ct.json && Array.isArray(ct.json.items)) {
+      const ctChk = ct.ok ? ProviderResponse.youtubeOk(ct.json) : { ok: false };
+      if (ct.ok && ctChk.ok && Array.isArray(ct.json.items)) {
         comments = ct.json.items.map(i => {
           const top = i.snippet && i.snippet.topLevelComment && i.snippet.topLevelComment.snippet;
           return { text: (top && top.textDisplay) || '', videoId: vidIds[0], sourceUrl: vidIds[0] ? 'https://www.youtube.com/watch?v=' + vidIds[0] : null };
@@ -1187,6 +1201,7 @@ const dataforseoAdapter = {
       tenantId: ctx.tenantId, capability: 'dataforseo_trends', provider: 'dataforseo_labs_trends', trigger,
     });
     if (!r.ok) return failAttempt(ctx, r, { errorUserText: r.errorUserText });
+    { const chk = ProviderResponse.dataforseoOk(r.json); if (!chk.ok) return failFromProviderCheck(ctx, chk); }
     // 只采信服务实际返回的字段：trend points（时间/值/地区）——结构按官方契约容错解析
     const tasks = (r.json && r.json.tasks) || [];
     const t0 = tasks[0] || {};
@@ -1328,22 +1343,27 @@ const tiktokAdapter = {
     };
   },
 
-  // 广告素材观察（仅接口实际返回字段；花费/获客成本/ROI/转化率绝不出现）
+  // 广告素材观察（P0-3 整改 r3：平台公开披露 official_disclosure）。
+  // 只映射官方响应真实字段：ad.{id,first_shown_date,last_shown_date,status,videos,image_urls,reach}、
+  // advertiser.{business_id,business_name,paid_for_by}；ad_name/reach 数字/download_url 等不存在字段一律不预设。
   normalize(raw, ctx) {
     const res = raw || {};
     const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
     const creatives = (Array.isArray(res.creatives) ? res.creatives : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(c => ({
       id: String(c.id || ''),
-      title: String(c.title || '').slice(0, 120),
+      title: String(c.advertiser || '').slice(0, 80),
       price: null, currency: null, // 🔴 广告花费不可观测，恒 null（00 §17 冻结）
-      available: true,
-      publishedAt: c.startDate || null,
+      available: c.status === 'active',
+      publishedAt: c.firstShownDate || null,
       advertiser: c.advertiser || null,
       region: c.region || null,
       creativeUrl: c.creativeUrl || null,
-      reach: c.reach != null ? c.reach : null, // 仅接口实际给出的公开触达字段
+      reach: c.reachLabel || null, // 官方 reach.unique_user_seen 区间标签（"11K"），非数值推算
+      lastShownDate: c.lastShownDate || null,
+      status: c.status || null,
     }));
     const partial = !!res.partialScan;
+    const countryScope = res.countryScope || 'ALL';
     return {
       capability: 'tiktok_commercial_content', dimension: 'ad_campaigns',
       outcome: partial ? 'partial' : 'success',
@@ -1351,8 +1371,10 @@ const tiktokAdapter = {
       summary: {
         kind: 'ad_creatives',
         creativeCount: creatives.length,
-        measurementMethod: 'licensed_estimate',
+        measurementMethod: 'official_disclosure', // 平台公开披露，非数据服务估算
         periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
+        countryScope,
+        coverageNote: 'TikTok Commercial Content API 仅覆盖官方支持国家（EU 27 + NO/IS/LI + GB/CH，共 30 国）；未覆盖国家不代表没有广告。',
         providerRecordId: res.providerRecordId || null,
         methodologyVersion: TT_ADAPTER_VERSION,
         partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
@@ -1360,16 +1382,16 @@ const tiktokAdapter = {
       snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
       currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
       identityStatus: 'unresolved',
-      evidenceSource: 'tiktok', evidenceProvider: 'tiktok_business_api',
-      claimField: 'ads.public_creatives', claimScope: 'licensed_ad_content_observation',
+      evidenceSource: 'tiktok', evidenceProvider: 'tiktok_research_api',
+      claimField: 'ads.public_creatives', claimScope: 'official_commercial_content_disclosure',
       entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
       entityRef: { kind: 'ad_creatives', keyword: ctx.competitor ? (ctx.competitor.name || null) : null },
       extractedValue: {
         summaryKind: 'ad_creatives', creativeCount: creatives.length,
-        measurementMethod: 'licensed_estimate', partialScan: partial,
+        measurementMethod: 'official_disclosure', partialScan: partial, countryScope,
       },
       parserVersion: TT_ADAPTER_VERSION,
-      note: 'TikTok commercial content research API (per-response snapshots; client secret never persisted)',
+      note: 'TikTok Commercial Content API（平台公开披露）｜覆盖范围受官方支持国家限制：' + TT_SUPPORTED_COUNTRIES.join('/') + '；client key/secret/access token 均不落快照',
       sourceUrl: res.sourceUrl || null,
     };
   },
@@ -1390,40 +1412,90 @@ const tiktokAdapter = {
     if (!clientKey || !clientSecret) {
       return failAttempt(ctx, { ok: false, error: 'CONFIG_MISSING' }, { errorUserText: '数据服务暂不可用，请稍后再试。' });
     }
-    // P0-3 整改 r2：先走官方 OAuth client_credentials 换取 access token；
-    // client key/secret 只用于本步骤。token 换取失败（权限不足/配额/不可达）
-    // 如实分类落账（failAttempt → readiness），绝不伪装「未观察到广告」。
+    // P0-3 整改 r2：官方 OAuth client_credentials 换 access token（client key/secret 只用于本步）
     const tk = await getTikTokAccessToken(clientKey, clientSecret);
     if (!tk.ok) {
       return failAttempt(ctx, { ok: false, error: tk.error, status: tk.status }, { errorUserText: tk.errorUserText });
     }
-    // 官方商业内容库检索（Research API；token 仅在受控请求头中，不进 URL/快照）。
-    const body = JSON.stringify({ keyword: String(comp.name || '').trim(), page: 1, limit: 10 });
-    const r = await fetchApiJson({
-      url: 'https://open.tiktokapis.com/v2/research/adlib/commercial_content/ads/search/',
-      method: 'POST',
-      headers: { 'access-token': tk.token, 'Content-Type': 'application/json' }, body,
-      secretParams: ['access_token'],
-      tenantId: ctx.tenantId, capability: 'tiktok_commercial_content', provider: 'tiktok_research_api', trigger,
+    // P0-2 整改 r3：官方 Query Ads 契约（2026-10-19 核实 developers.tiktok.com/doc/commercial-content-api-query-ads）
+    //   POST /v2/research/adlib/ad/query/?fields=<白名单>
+    //   Authorization: Bearer <token>；Content-Type: application/json
+    //   body: { filters: { ad_published_date_range: { min, max } }, search_term, max_count, search_id? }
+    // 规范：min 必须晚于 2022-10-01（YYYYMMDD）。
+    const pad = (n) => String(n).padStart(2, '0');
+    const ymd = (d) => '' + d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate());
+    const nowD = new Date(Date.now() - 86400000); // 上一日（官方数据有滞后）
+    const startD = new Date(Math.max(nowD.getTime() - 90 * 86400000, Date.UTC(2022, 9, 2))); // 2022-10-02 起
+    const periodStart = ymd(startD);
+    const periodEnd = ymd(nowD);
+    const searchTerm = String(comp.name || '').trim().slice(0, 50);
+    if (!searchTerm) {
+      return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌缺少可用于广告查询的名称。' });
+    }
+    const snapshotIds = [];
+    async function queryPage(searchId) {
+      const bodyObj = {
+        filters: { ad_published_date_range: { min: periodStart, max: periodEnd } },
+        search_term: searchTerm,
+        max_count: 20,
+      };
+      if (searchId) bodyObj.search_id = searchId;
+      return fetchApiJson({
+        url: TT_AD_ENDPOINT + '?fields=' + encodeURIComponent(TT_AD_FIELDS),
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + tk.token, 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyObj),
+        secretParams: ['access_token', 'token'],
+        tenantId: ctx.tenantId, capability: 'tiktok_commercial_content', provider: 'tiktok_research_api', trigger,
+      });
+    }
+    const r1 = await queryPage(null);
+    if (!r1.ok) return failAttempt(ctx, r1, { errorUserText: r1.errorUserText });
+    if (r1.snapshotId) snapshotIds.push(r1.snapshotId);
+    // P0-4 整改 r3：HTTP 200 + 业务错误对象绝不进成功链（error.code 必须 'ok' 且 data.ads 为数组）
+    const chk1 = ProviderResponse.tiktokOk(r1.json);
+    if (!chk1.ok) return failFromProviderCheck(ctx, chk1);
+    let rawAds = chk1.ads.slice();
+    let searchId = chk1.searchId;
+    let hasMore = chk1.hasMore;
+    // 分页：最多再取 1 页（search_id 续查同一搜索缓存）；失败不致命但如实标 partial
+    let pagingPartial = false;
+    if (hasMore && searchId) {
+      const r2 = await queryPage(searchId);
+      if (r2.ok) {
+        const chk2 = ProviderResponse.tiktokOk(r2.json);
+        if (chk2.ok) { rawAds = rawAds.concat(chk2.ads); searchId = chk2.searchId || searchId; hasMore = chk2.hasMore; if (r2.snapshotId) snapshotIds.push(r2.snapshotId); }
+        else pagingPartial = true;
+      } else pagingPartial = true;
+    }
+    // 官方真实响应字段映射（不预设 ad_name/download_url 等不存在字段）
+    const creatives = rawAds.map((item, i) => {
+      const ad = (item && item.ad) || {};
+      const adv = (item && item.advertiser) || {};
+      const vids = Array.isArray(ad.videos) ? ad.videos : [];
+      const imgs = Array.isArray(ad.image_urls) ? ad.image_urls : [];
+      const reach = ad.reach && typeof ad.reach === 'object' ? ad.reach : null;
+      return {
+        id: ad.id != null ? String(ad.id) : String(i),
+        firstShownDate: ad.first_shown_date != null ? String(ad.first_shown_date) : null,
+        lastShownDate: ad.last_shown_date != null ? String(ad.last_shown_date) : null,
+        status: ad.status != null ? String(ad.status) : null,
+        advertiser: adv.business_name != null ? String(adv.business_name) : null,
+        businessId: adv.business_id != null ? String(adv.business_id) : null,
+        paidForBy: adv.paid_for_by != null ? String(adv.paid_for_by) : null,
+        creativeUrl: imgs[0] || (vids[0] && vids[0].url) || null,
+        videoUrls: vids.map(v => v && v.url).filter(Boolean).slice(0, 3),
+        reachLabel: reach && reach.unique_user_seen != null ? String(reach.unique_user_seen) : null,
+        region: null, // 单次查询未按国家拆分；countryScope 记录在摘要
+      };
     });
-    if (!r.ok) return failAttempt(ctx, r, { errorUserText: r.errorUserText });
-    const data = (r.json && r.json.data) || {};
-    const list = (data.ads || data.ad_list || data.list || []);
-    const creatives = (Array.isArray(list) ? list : []).map((a, i) => ({
-      id: a.ad_id || a.id || String(i),
-      title: a.ad_name || (a.video && (a.video.title || a.video.cover)) || null,
-      startDate: a.first_delivery_date || a.start_date || null,
-      advertiser: a.advertiser_name || a.advertiser || null,
-      region: a.country_code || a.region || null,
-      creativeUrl: (a.video && (a.video.download_url || a.video.url)) || (a.landing_page && a.landing_page[0]) || null,
-      reach: a.reach != null ? Number(a.reach) : null,
-    }));
     const res = {
-      ok: true, creatives, snapshotIds: r.snapshotId ? [r.snapshotId] : [],
-      periodStart: null, periodEnd: null,
-      providerRecordId: (r.json && r.json.request_id) ? String(r.json.request_id) : null,
-      partialScan: false,
-      sourceUrl: 'https://business-api.tiktok.com/open_api/v1.3/research/adlib/ad/search/',
+      ok: true, creatives, snapshotIds,
+      periodStart, periodEnd,
+      countryScope: 'ALL（官方支持国家范围）',
+      providerRecordId: searchId ? String(searchId) : null,
+      partialScan: pagingPartial, partialScanReason: pagingPartial ? '后续分页请求失败，仅保留首页结果' : null,
+      sourceUrl: TT_AD_ENDPOINT,
     };
     const out = this.normalize(res, ctx);
     if (suppress) return { providerOk: true, ident, raw: res, out };
@@ -1441,7 +1513,6 @@ const tiktokAdapter = {
   },
 };
 
-// 公开评论页（复用系统搜索链发现 + FetchGate/robots/SSRF 全合规抓取 + 页面抽取）
 const reviewsAdapter = {
   code: 'reviews',
   displayName: '口碑与评论（公开页面）',

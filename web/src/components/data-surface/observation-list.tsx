@@ -50,15 +50,18 @@ function ObsRow({ o, dimension }: { o: SurfaceObservation; dimension: string }) 
     );
   }
   if (dimension === 'ad_campaigns') {
+    const reachLabel = (o as { reach?: string | number | null }).reach;
+    const lastShown = (o as { lastShownDate?: string | null }).lastShownDate;
     return (
       <li className="ds-obs-item">
         <span className="nm" title={o.title}>{o.title}</span>
         <span className="val">
-          {o.publishedAt ? <span className="ds-obs-pub">{day(o.publishedAt)} 起投</span> : null}
+          {o.publishedAt ? <span className="ds-obs-pub">{o.publishedAt} 起投</span> : null}
+          {lastShown ? <span className="ds-obs-pub"> · 至 {lastShown}</span> : null}
           {o.advertiser ? <> · {o.advertiser}</> : null}
-          {o.region ? <> · {o.region}</> : null}
+          {reachLabel ? <> · 公开触达 {reachLabel}</> : null}
           {o.creativeUrl ? <a className="ds-obs-link" href={o.creativeUrl} target="_blank" rel="noreferrer noopener">素材 ↗</a> : null}
-          <span className="ds-mm-tag">数据服务估算</span>
+          <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
         </span>
       </li>
     );
