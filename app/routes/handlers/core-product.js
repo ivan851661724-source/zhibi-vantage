@@ -60,7 +60,13 @@ async function brandDetail(ctx, req, res, url, p) {
   const brandId = String(p.split('/')[3] || '');
   const brand = brandInTenant(tid, brandId);
   if (!brand) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
-  const view = BrandSvc.getBrandView(tid, brand.brandId);
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  // 🔴 项目边界：品牌必须已关联该项目；竞品数据按该项目链接读取（同一品牌多项目各读各的）
+  if (!BrandStore.getLink(tid, brand.brandId, rp.projectId)) {
+    ctx.sendJSON(res, 404, { error: 'BRAND_NOT_IN_PROJECT', message: '该品牌未关联到当前项目。' }); return true;
+  }
+  const view = BrandSvc.getBrandView(tid, brand.brandId, rp.projectId);
   ctx.sendJSON(res, 200, view || { brandId: brand.brandId });
   return true;
 }
@@ -71,20 +77,23 @@ async function brandTimeline(ctx, req, res, url, p) {
   const brandId = String(p.split('/')[3] || '');
   const brand = brandInTenant(tid, brandId);
   if (!brand) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
-  const links = BrandStore.linksForBrand(tid, brand.brandId);
-  const projectId = links.length ? links[0].projectId : null;
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const link = BrandStore.getLink(tid, brand.brandId, rp.projectId);
+  if (!link) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_IN_PROJECT', message: '该品牌未关联到当前项目。' }); return true; }
   let comp = null;
-  if (projectId && brand.competitorRef) {
-    const st = BrandSvc.loadProjectState(tid, projectId);
-    comp = BrandSvc.findCompetitor(st, brand.competitorRef);
+  if (link.competitorRef) {
+    const st = BrandSvc.loadProjectState(tid, rp.projectId);
+    comp = BrandSvc.findCompetitor(st, link.competitorRef);
   }
-  if (projectId) BrandSvc.rebuildTimeline(tid, brand.brandId, projectId, comp);
+  BrandSvc.rebuildTimeline(tid, brand.brandId, rp.projectId, comp);
   const kind = q(url, 'kind'); const nature = q(url, 'nature');
   const from = q(url, 'from'); const to = q(url, 'to');
   const limit = Math.max(1, Math.min(Number(q(url, 'limit')) || 50, 200));
   const events = BrandSvc.timelineView(tid, brand.brandId, { kind, nature, from, to, limit });
   ctx.sendJSON(res, 200, {
     brandId: brand.brandId,
+    projectId: rp.projectId,
     firstObservedAt: BrandSvc.firstObservedAt(tid, brand.brandId),
     note: '无历史存档接入：只展示 Vantage 开始观察之后的记录，不暗示拥有更早历史。',
     events,
@@ -98,15 +107,17 @@ async function brandCoverage(ctx, req, res, url, p) {
   const brandId = String(p.split('/')[3] || '');
   const brand = brandInTenant(tid, brandId);
   if (!brand) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
-  const links = BrandStore.linksForBrand(tid, brand.brandId);
-  const projectId = links.length ? links[0].projectId : null;
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const link = BrandStore.getLink(tid, brand.brandId, rp.projectId);
+  if (!link) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_IN_PROJECT', message: '该品牌未关联到当前项目。' }); return true; }
   let comp = null;
-  if (projectId && brand.competitorRef) {
-    const st = BrandSvc.loadProjectState(tid, projectId);
-    comp = BrandSvc.findCompetitor(st, brand.competitorRef);
+  if (link.competitorRef) {
+    const st = BrandSvc.loadProjectState(tid, rp.projectId);
+    comp = BrandSvc.findCompetitor(st, link.competitorRef);
   }
-  const cov = BrandSvc.buildCoverage(tid, projectId, comp || {});
-  ctx.sendJSON(res, 200, { brandId: brand.brandId, coverage: cov });
+  const cov = BrandSvc.buildCoverage(tid, rp.projectId, comp || {});
+  ctx.sendJSON(res, 200, { brandId: brand.brandId, projectId: rp.projectId, coverage: cov });
   return true;
 }
 
@@ -160,20 +171,28 @@ async function reportsCreate(ctx, req, res, url) {
   let body = {};
   try {
     const raw = await ctx.readBody(req);
-    const txt = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw || '');
-    body = txt ? JSON.parse(txt) : {};
-    if (!body || typeof body !== 'object') body = {};
+    // ctx.readBody 可能返回：已解析对象（server.js readBody 内部 JSON.parse）/ Buffer / 原始字符串——三种形态都兼容
+    let parsed = raw;
+    if (Buffer.isBuffer(raw)) { try { parsed = JSON.parse(raw.toString('utf8')); } catch (e) { parsed = null; } }
+    else if (typeof raw === 'string') { try { parsed = raw ? JSON.parse(raw) : {}; } catch (e) { parsed = null; } }
+    body = (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {};
   } catch (e) { body = {}; }
   const rp = resolveProject(ctx, tid, body.projectId || q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const brandIds = Array.isArray(body.brandIds) ? body.brandIds.map(String).slice(0, 50) : [];
-  // 品牌归属校验（跨租户 404）
+  // 品牌归属校验（跨租户 404；跨项目/未同步由服务层抛 ScopeError → 400）
   for (const bid of brandIds) {
     if (!brandInTenant(tid, bid)) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
   }
-  const req2 = ReportSvc.requestReport(tid, rp.projectId, {
-    brandIds, from: body.from || null, to: body.to || null, sections: Array.isArray(body.sections) ? body.sections.slice(0, 10) : undefined,
-  }, null);
+  let req2;
+  try {
+    req2 = ReportSvc.requestReport(tid, rp.projectId, {
+      brandIds, from: body.from || null, to: body.to || null, sections: Array.isArray(body.sections) ? body.sections.slice(0, 10) : undefined,
+    }, null);
+  } catch (e) {
+    if (e && e.status === 400) { ctx.sendJSON(res, 400, { error: e.code || 'INVALID_SCOPE', message: e.message }); return true; }
+    throw e;
+  }
   if (!req2) { ctx.sendJSON(res, 404, { error: 'PROJECT_STATE_NOT_FOUND', message: '项目档案不可用。' }); return true; }
   ctx.sendJSON(res, 202, {
     reportId: req2.report.reportId, jobId: req2.jobId, status: 'queued', version: req2.report.version,

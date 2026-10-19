@@ -122,3 +122,12 @@
 - SC-03 定义「要有哪些竞争数据能力、如何验收 GA」；SC-04 定义「已接入能力如何组织成用户可用的主闭环」。
 - 本分支只完成**已批准的采集基础设施 + 读模型骨架**，不宣称 SC-03 中未接入 provider 已具备真实覆盖能力。
 - 后续接入新 provider 时：先在 Registry 登记能力并通过 SC-03 的 POC/GA 验收，再由本读模型消费（维度状态自动从「未接入」转为真实状态）。
+
+## 13. 评审轮 2 修订（事实一致性，`review/core-product-framework-r2`）
+
+语义确有变化处才修订本节；宪法与 SC-03 零改动。
+
+1. **报告执行只吃冻结包（P0）**：`executeJob` 只读 `report.factPack + report.scope`，禁止读取项目实时状态；`research/report.js` 新增 `buildReportFromPack(pack)` 输入适配层——报告原料（facts / whitespace 机会材料 / voiceOpp / dimensionCoverage / positioning / evidenceDist）在用户触发时一次性冻结进 pack。正文、结构化回退、引用、覆盖、缺口、机会与冻结包同源；每条事实对应已保存 citation（含来源 URL）。
+2. **报告范围真实生效（P1）**：`brandIds` 必须已关联当前项目（否则 400 `BRAND_NOT_IN_PROJECT`）；`from/to` 过滤带时间字段的事实/事件/机会项，无法判定时间的事实不命中、如实列入「未进入本报告」清单；`sections` 决定最终输出章节（可选：overview/problems/opportunities/judgment/facts/gaps），未选择的不生成。附录（证据编号对照）作为引用溯源始终保留。
+3. **品牌按项目读取（P1）**：`competitor_ref/market/category/relation` 的项目级值以 `brand_project_links` 为准；全局 `brand_records.competitor_ref` 只保留首见值、不再被其他项目同步覆盖。品牌详情/时间线/覆盖面 API 显式要求 `projectId` 并校验链接存在，同一品牌挂多项目时各读各的竞品数据。
+4. **核实状态与重试诚实（P1）**：无 Evidence/Snapshot 引用的时间线/情报项不得标「已核实」（价格变化事件、报告生成事件降级「待核实」）；`failed` 覆盖态只表示「最近采集失败且无任何历史成功数据」，「保留旧数据」仅在有上次成功数据（ok/partial/stale + 最近尝试失败）的 notes 中出现；报告任务异常后回 `pending` 真实自动重试（默认上限 3，`ZB_REPORT_MAX_RETRY`），耗尽 → `dead` 终态 + 报告 `failed`（前端重新生成），无虚假 retry 语义。

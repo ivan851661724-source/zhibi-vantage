@@ -13,7 +13,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+// 自动重试上限（真实重试语义：回 pending 可再次领取；耗尽 → dead 终态）
+const REPORT_JOB_MAX_RETRY = Math.max(1, Number(process.env.ZB_REPORT_MAX_RETRY) || 3);
 
 function dataDir() {
   return String(process.env.ZB_DATA_DIR || path.join(__dirname, '..', 'data'));
@@ -109,6 +111,8 @@ function getDb() {
     created_at TEXT NOT NULL
   )`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_rc_report ON report_citations(tenant_id, report_id)');
+  // v2 迁移：引用来源 URL（事实无 Evidence/Snapshot 链时，引用自带可核验来源，不伪造证据 id）
+  try { db.exec('ALTER TABLE report_citations ADD COLUMN source_url TEXT'); } catch (e) {}
   db.exec(`CREATE TABLE IF NOT EXISTS report_jobs (
     job_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -142,13 +146,15 @@ function upsertBrand(input) {
   if (domain) existing = db.prepare('SELECT * FROM brand_records WHERE tenant_id=? AND official_domain=?').get(tid, domain);
   if (!existing && ref) existing = db.prepare('SELECT * FROM brand_records WHERE tenant_id=? AND competitor_ref=?').get(tid, String(ref));
   if (existing) {
+    // 🔴 竞品数据边界：competitor_ref 是【项目级】字段（brand_project_links 为准），
+    // 全局记录只在首次创建时记录初见值，更新时不得被其他项目同步覆盖。
     db.prepare(`UPDATE brand_records SET canonical_name=?, official_domain=?, market=?, category=?, relation=?, competitor_ref=?, updated_at=?
       WHERE brand_id=?`)
       .run(input.canonicalName || existing.canonical_name, domain || existing.official_domain,
         input.market != null ? input.market : existing.market,
         input.category != null ? input.category : existing.category,
         input.relation != null ? input.relation : existing.relation,
-        ref || existing.competitor_ref, now, existing.brand_id);
+        existing.competitor_ref || ref, now, existing.brand_id);
     return { brand: getBrand(tid, existing.brand_id), existed: true };
   }
   const id = rid('br');
@@ -211,6 +217,27 @@ function linksForBrand(tenantId, brandId) {
   return getDb().prepare('SELECT * FROM brand_project_links WHERE tenant_id=? AND brand_id=?')
     .all(String(tenantId || ''), String(brandId || ''))
     .map(r => ({ linkId: r.link_id, projectId: r.project_id, market: r.market, category: r.category, relation: r.relation, competitorRef: r.competitor_ref }));
+}
+// 单链接读取：品牌是否关联到指定项目（项目边界校验的唯一事实源）
+function getLink(tenantId, brandId, projectId) {
+  const r = getDb().prepare('SELECT * FROM brand_project_links WHERE tenant_id=? AND brand_id=? AND project_id=?')
+    .get(String(tenantId || ''), String(brandId || ''), String(projectId || ''));
+  return r ? { linkId: r.link_id, projectId: r.project_id, market: r.market, category: r.category, relation: r.relation, competitorRef: r.competitor_ref } : null;
+}
+// 项目视角的品牌列表：项目级字段（market/category/relation/competitor_ref）以链接为准，全局记录只兜底
+function listBrandLinksForProject(tenantId, projectId) {
+  return getDb().prepare(`SELECT b.*, l.link_id AS l_link_id, l.project_id AS l_project, l.market AS l_market, l.category AS l_category, l.relation AS l_relation, l.competitor_ref AS l_ref
+      FROM brand_project_links l INNER JOIN brand_records b ON b.brand_id=l.brand_id AND b.tenant_id=l.tenant_id
+      WHERE l.tenant_id=? AND l.project_id=? ORDER BY b.canonical_name ASC`)
+    .all(String(tenantId || ''), String(projectId || ''))
+    .map(r => ({
+      brandId: r.brand_id, canonicalName: r.canonical_name, officialDomain: r.official_domain,
+      market: r.l_market != null ? r.l_market : r.market,
+      category: r.l_category != null ? r.l_category : r.category,
+      relation: r.l_relation != null ? r.l_relation : r.relation,
+      competitorRef: r.l_ref || r.competitor_ref,
+      createdAt: r.created_at, updatedAt: r.updated_at, linkId: r.l_link_id, projectId: r.l_project,
+    }));
 }
 
 // ---------------- Brand Timeline Index ----------------
@@ -317,11 +344,12 @@ function rowToReport(r) {
 function addCitation(input) {
   const db = getDb();
   const id = rid('rc');
-  db.prepare(`INSERT INTO report_citations (citation_id, report_id, tenant_id, section, fact_id, label, evidence_ids, snapshot_ids, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?)`)
+  db.prepare(`INSERT INTO report_citations (citation_id, report_id, tenant_id, section, fact_id, label, evidence_ids, snapshot_ids, source_url, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`)
     .run(id, String(input.reportId || ''), String(input.tenantId || ''), input.section || null,
       input.factId || null, input.label || null,
-      JSON.stringify(input.evidenceIds || []), JSON.stringify(input.snapshotIds || []), nowIso());
+      JSON.stringify(input.evidenceIds || []), JSON.stringify(input.snapshotIds || []),
+      input.sourceUrl || null, nowIso());
   return id;
 }
 function listCitations(tenantId, reportId) {
@@ -330,6 +358,7 @@ function listCitations(tenantId, reportId) {
     .map(r => ({
       citationId: r.citation_id, section: r.section, factId: r.fact_id, label: r.label,
       evidenceIds: parseJson(r.evidence_ids) || [], snapshotIds: parseJson(r.snapshot_ids) || [],
+      sourceUrl: r.source_url || null,
     }));
 }
 
@@ -363,13 +392,18 @@ function finishReportJob(jobId, token, status, errorText) {
   getDb().prepare('UPDATE report_jobs SET status=?, claim_token=NULL, claim_expires_at=NULL, last_error=?, done_at=? WHERE job_id=? AND claim_token=?')
     .run(String(status), errorText || null, nowIso(), String(jobId), String(token));
 }
+// 真实重试语义：异常后回 pending（可再次领取），retry 计数 +1；受 REPORT_JOB_MAX_RETRY 约束
+function requeueReportJob(jobId, token, retry, errorText) {
+  return getDb().prepare("UPDATE report_jobs SET status='pending', retry=?, claim_token=NULL, claim_expires_at=NULL, last_error=? WHERE job_id=? AND claim_token=? AND status='running'")
+    .run(Number(retry) || 0, errorText || null, String(jobId), String(token)).changes > 0;
+}
 function reclaimExpiredReportJobs(nowMs) {
   const db = getDb();
   const now = nowMs || Date.now();
   const rows = db.prepare("SELECT * FROM report_jobs WHERE status='running' AND claim_expires_at < ?").all(now);
   for (const r of rows) {
     const next = Number(r.retry || 0) + 1;
-    if (next > 3) {
+    if (next > REPORT_JOB_MAX_RETRY) {
       db.prepare("UPDATE report_jobs SET status='dead', claim_token=NULL, claim_expires_at=NULL, last_error='lease expired (retry exhausted)', done_at=? WHERE job_id=?")
         .run(nowIso(), r.job_id);
       // 诚实终止：报告落 failed，不留永久 running
@@ -378,7 +412,7 @@ function reclaimExpiredReportJobs(nowMs) {
       db.prepare("UPDATE report_jobs SET status='pending', retry=?, claim_token=NULL, claim_expires_at=NULL WHERE job_id=?").run(next, r.job_id);
     }
   }
-  return { requeued: rows.filter(r => Number(r.retry || 0) + 1 <= 3).length, dead: rows.filter(r => Number(r.retry || 0) + 1 > 3).length };
+  return { requeued: rows.filter(r => Number(r.retry || 0) + 1 <= REPORT_JOB_MAX_RETRY).length, dead: rows.filter(r => Number(r.retry || 0) + 1 > REPORT_JOB_MAX_RETRY).length };
 }
 function listReportJobs(tenantId, status) {
   const db = getDb();
@@ -394,11 +428,11 @@ function parseJson(s) {
 }
 
 module.exports = {
-  SCHEMA_VERSION, TIMELINE_KINDS, TIMELINE_NATURES, REPORT_JOB_TTL_MS,
+  SCHEMA_VERSION, TIMELINE_KINDS, TIMELINE_NATURES, REPORT_JOB_TTL_MS, REPORT_JOB_MAX_RETRY,
   getDb, closeDb, rid,
   upsertBrand, getBrand, listBrands,
-  linkProject, brandIdForCompetitor, linksForBrand,
+  linkProject, brandIdForCompetitor, linksForBrand, getLink, listBrandLinksForProject,
   appendTimeline, listTimeline,
   createReport, updateReport, getReport, listReports, addCitation, listCitations,
-  enqueueReportJob, claimReportJob, heartbeatReportJob, finishReportJob, reclaimExpiredReportJobs, listReportJobs,
+  enqueueReportJob, claimReportJob, heartbeatReportJob, finishReportJob, requeueReportJob, reclaimExpiredReportJobs, listReportJobs,
 };

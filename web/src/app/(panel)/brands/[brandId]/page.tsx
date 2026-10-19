@@ -1,30 +1,42 @@
 'use client';
 // 品牌详情（SC-04 统一档案）：概览 / 商品与价格 / 竞争动态时间线 / 数据覆盖与来源
 // （Data Surface 在此作为「数据覆盖与来源」区域，不单独暴露成技术面板）/ 情报 / 相关报告。
-import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+// 🔴 项目边界：所有读取显式携带 projectId（品牌未关联该项目时后端 404）。
+import { Suspense, useEffect, useState } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { fetchBrand, priceText, type BrandDetail } from '@/lib/core-api';
 import { CoveragePanel, IntelList, TimelineList } from '@/components/brand/coverage-panel';
 import { ReportPanel } from '@/components/brand/report-panel';
 import { DataSurfaceOverview } from '@/components/data-surface/data-surface-overview';
 
 export default function BrandDetailPage() {
+  return (
+    <Suspense fallback={<p className="hint">加载品牌档案…</p>}>
+      <BrandDetailInner />
+    </Suspense>
+  );
+}
+
+function BrandDetailInner() {
   const params = useParams<{ brandId: string }>();
+  const searchParams = useSearchParams();
   const brandId = String(params?.brandId || '');
+  const projectId = String(searchParams?.get('projectId') || '');
   const router = useRouter();
   const [d, setD] = useState<BrandDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!brandId) return;
+    if (!brandId || !projectId) return;
     let alive = true;
     const ctrl = new AbortController();
-    fetchBrand(brandId, ctrl.signal)
+    fetchBrand(brandId, { projectId, signal: ctrl.signal })
       .then(r => { if (alive) { setD(r); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
-  }, [brandId]);
+  }, [brandId, projectId]);
 
+  if (!projectId) return <p className="core-err">缺少项目参数：请从竞品库进入品牌详情。</p>;
   if (err) return <p className="core-err">{err}</p>;
   if (!d) return <p className="hint">加载品牌档案…</p>;
 
@@ -87,7 +99,7 @@ export default function BrandDetailPage() {
 
       <section>
         <h3>相关报告</h3>
-        <ReportPanel projectId={d.links[0]?.projectId || ''} brandIds={[b.brandId]}
+        <ReportPanel projectId={projectId} brandIds={[b.brandId]}
           onOpen={(id) => router.push(`/report/${id}`)} />
       </section>
     </div>

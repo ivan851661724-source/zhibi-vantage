@@ -26,6 +26,7 @@ const db = require('../services/db.js');
 const BrandStore = require('../services/brand-store.js');
 const BrandSvc = require('../services/brand-service.js');
 const ReportSvc = require('../services/report-service.js');
+const Report = require('../research/report.js');
 const Registry = require('../services/capability-registry.js');
 const SurfaceStore = require('../services/surface-store.js');
 const Snapshot = require('../research/source-snapshot.js');
@@ -128,8 +129,8 @@ function pageBody(ids) {
     const bid = BrandStore.brandIdForCompetitor(TID_A, PID_A, 'compA1');
     const tl = BrandSvc.timelineView(TID_A, bid, {});
     assert.ok(tl.some(e => e.kind === 'monitor'), '时间线有采集记录');
-    // 品牌详情
-    const detail = BrandSvc.getBrandView(TID_A, bid);
+    // 品牌详情（评审轮 2：显式 projectId 边界）
+    const detail = BrandSvc.getBrandView(TID_A, bid, PID_A);
     assert.ok(detail.products.observations.length >= 3, '详情含商品观察');
     assert.strictEqual(detail.products.summary && detail.products.summary.currency, 'USD', '币种贯通');
     assert.ok(detail.products.evidenceRefs.length >= 1, '证据引用贯通');
@@ -259,7 +260,7 @@ function pageBody(ids) {
     assert.strictEqual(ReportSvc.getReportView(TID_B, reps[0].reportId), null);
     // 证据与快照隔离
     const bid = BrandStore.brandIdForCompetitor(TID_A, PID_A, 'compA1');
-    const detail = BrandSvc.getBrandView(TID_A, bid);
+    const detail = BrandSvc.getBrandView(TID_A, bid, PID_A);
     const evIds = (detail.intelligence || []).flatMap(i => (i.evidence || []).map(e => e.evidenceId));
     assert.ok(evIds.length >= 1, '有 Evidence 可校验');
     for (const id of evIds) assert.strictEqual(EvidenceStore.getEvidenceById(TID_B, id), null, '跨租户 Evidence 不可读');
@@ -281,6 +282,213 @@ function pageBody(ids) {
         assert.strictEqual(c.adapter, null, c.code + ' 未接入不得声明 adapter');
         assert.strictEqual(c.provider, null, c.code + ' 未接入不得声明 provider');
       }
+    }
+  });
+
+  // ===== 评审轮 2（事实一致性）=====
+  await t('C9 报告冻结（P0）：执行只吃创建时事实包；执行前的数据变化（F2）绝不出现', async () => {
+    // 冻结前：compA1 带可冻结事实（价格/卖点）
+    const st0 = BrandSvc.loadProjectState(TID_A, PID_A);
+    const a0 = st0.competitors.find(c => c.id === 'compA1');
+    a0.pricePoints = [10, 20];
+    a0.sellingPoints = ['冻结期卖点 Alpha-Seed'];
+    saveState(st0);
+    await new Promise(r => setTimeout(r, 150));
+    const req = ReportSvc.requestReport(TID_A, PID_A, {}, null);
+    assert.ok(req, '报告创建');
+    const frozen = BrandStore.getReport(TID_A, req.report.reportId);
+    assert.ok(frozen.factPack.facts.some(f => /Alpha-Seed/.test(f.text || '')), '冻结包含 F1 卖点事实');
+    assert.ok(frozen.factPack.facts.some(f => /AlphaBrand/.test(f.text || '') && /单品价/.test(f.text || '')), '冻结包含 F1 价格事实');
+    // 执行前：实时数据改出 F2（改价格 + 换卖点 + 新增品牌）
+    const st2 = BrandSvc.loadProjectState(TID_A, PID_A);
+    const a1 = st2.competitors.find(c => c.id === 'compA1');
+    a1.pricePoints = [999];
+    a1.sellingPoints = ['执行期新卖点 Zebra-F2'];
+    st2.competitors.push({ id: 'compF2', name: 'F2Brand', status: 'done', url: 'https://f2.example.com', isShopify: true, sellingPoints: ['F2 独家卖点'], pricePoints: [888] });
+    saveState(st2);
+    await new Promise(r => setTimeout(r, 150));
+    // 执行（无 LLM key → 结构化回退；同样必须来自冻结包）
+    const job = BrandStore.claimReportJob('r2-worker');
+    assert.ok(job && job.reportId === req.report.reportId, '领取本次任务');
+    const res = await ReportSvc.executeJob(job);
+    assert.strictEqual(res.status, 'done', '执行完成');
+    const r1 = BrandStore.getReport(TID_A, req.report.reportId);
+    assert.strictEqual(r1.status, 'success', '报告成功');
+    assert.ok(r1.markdown.includes('Alpha-Seed'), '正文含冻结期事实 F1');
+    assert.ok(!/Zebra-F2|F2Brand|F2 独家卖点/.test(r1.markdown), '正文绝不出现执行期 F2');
+    assert.ok(!/999|888/.test(r1.markdown), '正文不出现执行期修改后的价格');
+    // 引用与冻结包事实一一对应，且不含执行期数据
+    const view = ReportSvc.getReportView(TID_A, req.report.reportId);
+    const factIds = new Set(frozen.factPack.facts.map(f => f.id));
+    assert.ok(view.citations.length >= 2, '引用已落库');
+    for (const c of view.citations) {
+      assert.ok(factIds.has(c.factId), 'citation 必须是冻结包事实：' + c.factId);
+      assert.ok(!/Zebra-F2|F2 独家卖点/.test(c.label || ''), '引用不含执行期数据');
+    }
+  });
+
+  await t('C10 报告范围（P1）：品牌/时间/章节三项范围真实生效', async () => {
+    // ① 跨项目品牌 → 明确参数错误（400 BRAND_NOT_IN_PROJECT）
+    await mkProject(TID_A, 'projCoreA2', [{ id: 'compAX', name: 'AlphaBrand', status: 'done', url: 'https://alpha.example.com', isShopify: true }, { id: 'compQ', name: 'OnlyA2Brand', status: 'done', url: 'https://only-a2.example.com', isShopify: true }]);
+    BrandSvc.syncProjectBrands(TID_A, 'projCoreA2');
+    const bidA2 = BrandStore.brandIdForCompetitor(TID_A, 'projCoreA2', 'compAX');
+    assert.ok(bidA2, '同域名品牌在第二项目有链接');
+    const bidQ = BrandStore.brandIdForCompetitor(TID_A, 'projCoreA2', 'compQ');
+    assert.ok(bidQ && bidQ !== bidA2, 'OnlyA2 品牌独立存在');
+    let threw = null;
+    try { ReportSvc.requestReport(TID_A, PID_A, { brandIds: [bidQ] }, null); } catch (e) { threw = e; }
+    assert.ok(threw && threw.status === 400 && threw.code === 'BRAND_NOT_IN_PROJECT', '只挂在其他项目的品牌 → 400');
+    threw = null;
+    try { ReportSvc.requestReport(TID_A, PID_A, { from: 'not-a-date' }, null); } catch (e) { threw = e; }
+    assert.ok(threw && threw.status === 400 && threw.code === 'INVALID_TIME_RANGE', '非法时间格式 → 400');
+    threw = null;
+    try { ReportSvc.requestReport(TID_A, PID_A, { sections: ['nope'] }, null); } catch (e) { threw = e; }
+    assert.ok(threw && threw.status === 400 && threw.code === 'INVALID_SECTION', '未知章节 → 400');
+    // ② brandIds 子集：冻结包事实全部属于所选品牌
+    const bidA1 = BrandStore.brandIdForCompetitor(TID_A, PID_A, 'compA1');
+    const reqB = ReportSvc.requestReport(TID_A, PID_A, { brandIds: [bidA1] }, null);
+    const packB = BrandStore.getReport(TID_A, reqB.report.reportId).factPack;
+    assert.ok(packB.facts.length >= 1, '有事实');
+    assert.ok(packB.facts.every(f => /AlphaBrand/.test(f.text || '')), '事实全部属于所选品牌');
+    assert.deepStrictEqual(packB.brandIds, [bidA1]);
+    // 先把 reqB 执行掉（保持任务队列干净）
+    const jobB = BrandStore.claimReportJob('r2-scope-b');
+    assert.ok(jobB && jobB.reportId === reqB.report.reportId, '领取 reqB');
+    await ReportSvc.executeJob(jobB);
+    // ③ from/to：带时间字段的事实按窗口过滤；无法判定时间 → 不命中并如实登记
+    const st = BrandSvc.loadProjectState(TID_A, PID_A);
+    const a1 = st.competitors.find(c => c.id === 'compA1');
+    a1.recentMoves = [
+      { desc: '九月上架新品线', when: '2026-09-10', basis: 'verified' },
+      { desc: '十月降价清库存', when: '2026-10-05', basis: 'verified' },
+    ];
+    saveState(st);
+    await new Promise(r => setTimeout(r, 150));
+    const reqT = ReportSvc.requestReport(TID_A, PID_A, { brandIds: [bidA1], from: '2026-10-01', to: '2026-10-31' }, null);
+    const packT = BrandStore.getReport(TID_A, reqT.report.reportId).factPack;
+    assert.ok(packT.facts.some(f => /十月降价清库存/.test(f.text || '')), '窗口内事实保留');
+    assert.ok(!packT.facts.some(f => /九月上架新品线/.test(f.text || '')), '窗口外事实排除');
+    assert.ok(packT.timeUnresolved.some(u => /九月/.test(u.text || '') && /不在所选范围/.test(u.reason)), '窗口外如实登记');
+    assert.ok(packT.timeUnresolved.some(u => /无法判定时间/.test(u.reason)), '无法判定时间的事实不伪造命中');
+    const jobT = BrandStore.claimReportJob('r2-scope-t');
+    assert.ok(jobT && jobT.reportId === reqT.report.reportId, '领取 reqT');
+    const resT = await ReportSvc.executeJob(jobT);
+    assert.strictEqual(resT.status, 'done');
+    const repT = BrandStore.getReport(TID_A, reqT.report.reportId);
+    // 「未进入本报告的事实」清单之前的正文（事实清单段）只含窗口内事实；
+    // 窗口外事实出现在如实登记的排除清单里是**正确**行为
+    const exIdx = repT.markdown.indexOf('未进入本报告的事实');
+    assert.ok(exIdx > 0, '存在未命中清单');
+    const mainPart = repT.markdown.slice(0, exIdx);
+    assert.ok(mainPart.includes('十月降价清库存'), '正文事实清单含窗口内事实');
+    assert.ok(!/九月上架新品线/.test(mainPart), '事实清单不含窗口外事实');
+    assert.ok(repT.markdown.slice(exIdx).includes('九月上架新品线'), '排除清单如实登记窗口外事实');
+    // ④ sections：只选 gaps → 只有资料缺口章节，不生成事实清单/机会
+    const reqS = ReportSvc.requestReport(TID_A, PID_A, { sections: ['gaps'] }, null);
+    const jobS = BrandStore.claimReportJob('r2-sec');
+    assert.ok(jobS && jobS.reportId === reqS.report.reportId, '领取 reqS');
+    const resS = await ReportSvc.executeJob(jobS);
+    assert.strictEqual(resS.status, 'done');
+    const repS = BrandStore.getReport(TID_A, reqS.report.reportId);
+    assert.ok(/资料缺口/.test(repS.markdown), '选定章节生成');
+    assert.ok(!/## 事实清单/.test(repS.markdown), '未选章节不生成（事实清单）');
+    assert.ok(!/机会与限制/.test(repS.markdown), '未选章节不生成（机会）');
+  });
+
+  await t('C11 品牌按项目读取（P1）：同域名品牌挂两项目各读各的数据；全局 ref 不被覆盖', async () => {
+    // projCoreA2（C10 创建）：compAX 与 compA1 同域名 → 同一品牌档案、两条项目链接
+    const stA2 = BrandSvc.loadProjectState(TID_A, 'projCoreA2');
+    const ax = stA2.competitors.find(c => c.id === 'compAX');
+    ax.pricePoints = [777];
+    ax.sellingPoints = ['A2 项目专属卖点'];
+    saveState(stA2);
+    await new Promise(r => setTimeout(r, 150));
+    BrandSvc.syncProjectBrands(TID_A, 'projCoreA2', stA2);
+    const bid = BrandStore.brandIdForCompetitor(TID_A, PID_A, 'compA1');
+    assert.ok(bid, '品牌档案存在');
+    assert.strictEqual(bid, BrandStore.brandIdForCompetitor(TID_A, 'projCoreA2', 'compAX'), '同域名 → 同一品牌档案');
+    // 全局 competitor_ref 保留首见值，不被第二个项目同步覆盖
+    assert.strictEqual(BrandStore.getBrand(TID_A, bid).competitorRef, 'compA1', '全局 ref 不被覆盖');
+    // 列表视图：各项目读各的竞品
+    const vA = BrandSvc.listBrandViews(TID_A, PID_A).find(b => b.brandId === bid);
+    const vAX = BrandSvc.listBrandViews(TID_A, 'projCoreA2').find(b => b.brandId === bid);
+    assert.strictEqual(vA.competitorId, 'compA1', '项目 A 读 compA1');
+    assert.strictEqual(vAX.competitorId, 'compAX', '项目 A2 读 compAX');
+    // 详情：显式 projectId 边界 + 数据不串项目
+    const dA = BrandSvc.getBrandView(TID_A, bid, PID_A);
+    const dAX = BrandSvc.getBrandView(TID_A, bid, 'projCoreA2');
+    assert.strictEqual(dA.brand.competitorId, 'compA1');
+    assert.strictEqual(dAX.brand.competitorId, 'compAX');
+    assert.ok(dA.products.observations.length >= 3, '项目 A 详情含 compA1 采集商品');
+    assert.strictEqual(dAX.products.observations.length, 0, '项目 A2 无 compAX 采集 → 空（不借用 A 的数据）');
+    // 边界：未关联项目 / 跨租户 → null（上层 404）
+    assert.strictEqual(BrandSvc.getBrandView(TID_A, bid, 'projCoreB'), null, '未关联项目 → null');
+    assert.strictEqual(BrandSvc.getBrandView(TID_B, bid, PID_B), null, '跨租户 → null');
+  });
+
+  await t('C12 诚实状态与真实重试（P1）：无证据不标已核实；首败不称保留旧数据；重试真实有界', async () => {
+    const bid = BrandStore.brandIdForCompetitor(TID_A, PID_A, 'compA1');
+    // ① 时间线：无 Evidence 引用的事件（价格变化）不得标「已核实」
+    BrandSvc.rebuildTimeline(TID_A, bid, PID_A, BrandSvc.findCompetitor(BrandSvc.loadProjectState(TID_A, PID_A), 'compA1'));
+    for (const e of BrandSvc.timelineView(TID_A, bid, {})) {
+      if (e.kind === 'price') assert.notStrictEqual(e.status, 'verified', '价格事件无引用 → 待核实');
+    }
+    // ② 首次采集失败（无任何历史成功）→ 不声称「保留旧数据」
+    const mkF = SurfaceStore.createAttempt({ tenantId: TID_A, projectId: PID_A, competitorId: 'compF2', capability: 'shopify_catalog', dimension: 'website_products', trigger: 'manual', idempotencyKey: 'c12-fail1' });
+    SurfaceStore.completeAttempt(TID_A, mkF.attempt.attemptId, { status: 'failed', sourceStatus: 'unavailable', observations: [], snapshotIds: [], evidenceIds: [] });
+    const covF = BrandSvc.buildCoverage(TID_A, PID_A, BrandSvc.findCompetitor(BrandSvc.loadProjectState(TID_A, PID_A), 'compF2'));
+    const wpF = covF.dimensions.find(d => d.code === 'website_products');
+    assert.strictEqual(wpF.state, 'failed', '首败状态：' + wpF.state);
+    assert.strictEqual(wpF.stateText, '最近采集失败，尚无可展示数据');
+    assert.ok(!/保留旧数据/.test(JSON.stringify(covF)), '首败不得声称保留旧数据');
+    // ③ 有历史成功数据 + 最近失败 → 仍展示旧数据状态 + notes 明示「保留旧数据」
+    const mkF2 = SurfaceStore.createAttempt({ tenantId: TID_A, projectId: PID_A, competitorId: 'compA1', capability: 'shopify_catalog', dimension: 'website_products', trigger: 'manual', idempotencyKey: 'c12-fail2' });
+    SurfaceStore.completeAttempt(TID_A, mkF2.attempt.attemptId, { status: 'failed', sourceStatus: 'unavailable', observations: [], snapshotIds: [], evidenceIds: [] });
+    const covA = BrandSvc.buildCoverage(TID_A, PID_A, BrandSvc.findCompetitor(BrandSvc.loadProjectState(TID_A, PID_A), 'compA1'));
+    const wpA = covA.dimensions.find(d => d.code === 'website_products');
+    assert.ok(['ok', 'stale'].includes(wpA.state), '有历史成功 → 旧数据状态：' + wpA.state);
+    assert.ok(wpA.notes.some(n => /最近一次更新失败，当前展示上次成功数据/.test(n)), '有旧数据才允许保留旧数据表述');
+    // 时间线补入新失败 attempt 后：失败采集无 Evidence → 待核实
+    BrandSvc.rebuildTimeline(TID_A, bid, PID_A, BrandSvc.findCompetitor(BrandSvc.loadProjectState(TID_A, PID_A), 'compA1'));
+    const tlFail = BrandSvc.timelineView(TID_A, bid, {}).find(e => e.refId === mkF2.attempt.attemptId);
+    assert.ok(tlFail && tlFail.status === 'pending', '失败采集无证据 → 待核实');
+    // ④ 真实重试：注入异常 → 回 pending 可再领取；耗尽 → dead + 报告 failed；恢复后重新生成成功
+    const orig = Report.buildReportFromPack;
+    Report.buildReportFromPack = async () => { throw new Error('injected boom'); };
+    try {
+      const reqR = ReportSvc.requestReport(TID_A, PID_A, {}, null);
+      const repId = reqR.report.reportId;
+      let jobR = BrandStore.claimReportJob('r2-retry');
+      assert.ok(jobR && jobR.reportId === repId, '领取本次任务');
+      const r1 = await ReportSvc.executeJob(jobR);
+      assert.strictEqual(r1.status, 'failed', '执行失败');
+      let row = BrandStore.getDb().prepare('SELECT * FROM report_jobs WHERE job_id=?').get(jobR.jobId);
+      assert.strictEqual(row.status, 'pending', '异常后回 pending（真实可再领取）');
+      assert.strictEqual(row.retry, 1, 'retry 计数 +1');
+      assert.strictEqual(BrandStore.getReport(TID_A, repId).status, 'queued', '重试中报告为 queued（未虚假终态）');
+      for (let i = 0; i < 3; i++) {
+        jobR = BrandStore.claimReportJob('r2-retry');
+        assert.ok(jobR, '第 ' + (i + 2) + ' 次可领取');
+        await ReportSvc.executeJob(jobR);
+        row = BrandStore.getDb().prepare('SELECT * FROM report_jobs WHERE job_id=?').get(jobR.jobId);
+      }
+      assert.strictEqual(row.status, 'dead', '重试耗尽 → dead 终态');
+      const failed = BrandStore.getReport(TID_A, repId);
+      assert.strictEqual(failed.status, 'failed', '报告终态 failed');
+      assert.ok(/重新生成/.test(failed.errorText || ''), '失败文案引导重新生成');
+      Report.buildReportFromPack = orig; // 先恢复，再验证重新生成
+      // 恢复后重新生成 → 成功
+      const reqOK = ReportSvc.requestReport(TID_A, PID_A, {}, null);
+      const jobOK = BrandStore.claimReportJob('r2-ok');
+      assert.ok(jobOK && jobOK.reportId === reqOK.report.reportId, '领取重新生成任务');
+      const rOK = await ReportSvc.executeJob(jobOK);
+      assert.strictEqual(rOK.status, 'done', '恢复后生成成功');
+      assert.strictEqual(BrandStore.getReport(TID_A, reqOK.report.reportId).status, 'success');
+    } catch (e) {
+      Report.buildReportFromPack = orig;
+      throw e;
+    } finally {
+      Report.buildReportFromPack = orig;
     }
   });
 

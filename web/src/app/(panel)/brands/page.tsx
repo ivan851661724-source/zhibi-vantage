@@ -51,7 +51,7 @@ function BrandsInner() {
           {items.map(b => (
             <li key={b.brandId}>
               <div className="core-brand-head">
-                <Link href={`/brands/${b.brandId}`}>{b.name}</Link>
+                <Link href={`/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`}>{b.name}</Link>
                 <span className="core-brand-domain">{b.officialDomain || '官网未核实'}</span>
                 {b.market ? <span>{b.market}</span> : null}
                 {b.category ? <span>{b.category}</span> : null}

@@ -120,6 +120,7 @@ export interface ReportCitation {
   section: string | null;
   factId: string | null;
   label: string | null;
+  sourceUrl?: string | null;
   evidenceIds: string[];
   snapshotIds: string[];
 }
@@ -164,20 +165,23 @@ export function fetchBrands(projectId: string, signal?: AbortSignal) {
   return apiGet<{ projectId: string; brands: BrandListItem[]; count: number }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
-export function fetchBrand(brandId: string, signal?: AbortSignal) {
-  return apiGet<BrandDetail>(`/api/brands/${encodeURIComponent(brandId)}`, signal);
+export function fetchBrand(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
+  const q = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : '';
+  return apiGet<BrandDetail>(`/api/brands/${encodeURIComponent(brandId)}${q}`, opts.signal);
 }
-export function fetchBrandTimeline(brandId: string, opts: { kind?: string; from?: string; to?: string; limit?: number } = {}, signal?: AbortSignal) {
+export function fetchBrandTimeline(brandId: string, opts: { projectId?: string; kind?: string; from?: string; to?: string; limit?: number; signal?: AbortSignal } = {}, signal?: AbortSignal) {
   const q = new URLSearchParams();
+  if (opts.projectId) q.set('projectId', opts.projectId);
   if (opts.kind) q.set('kind', opts.kind);
   if (opts.from) q.set('from', opts.from);
   if (opts.to) q.set('to', opts.to);
   q.set('limit', String(opts.limit || 50));
-  return apiGet<{ brandId: string; firstObservedAt: string | null; note: string; events: TimelineEvent[] }>(
-    `/api/brands/${encodeURIComponent(brandId)}/timeline?${q.toString()}`, signal);
+  return apiGet<{ brandId: string; projectId?: string; firstObservedAt: string | null; note: string; events: TimelineEvent[] }>(
+    `/api/brands/${encodeURIComponent(brandId)}/timeline?${q.toString()}`, signal || opts.signal);
 }
-export function fetchBrandCoverage(brandId: string, signal?: AbortSignal) {
-  return apiGet<{ brandId: string; coverage: Coverage }>(`/api/brands/${encodeURIComponent(brandId)}/coverage`, signal);
+export function fetchBrandCoverage(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
+  const q = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : '';
+  return apiGet<{ brandId: string; projectId?: string; coverage: Coverage }>(`/api/brands/${encodeURIComponent(brandId)}/coverage${q}`, opts.signal);
 }
 export function fetchIntelligence(params: { projectId: string; brandId?: string; type?: string; from?: string; to?: string }, signal?: AbortSignal) {
   const q = new URLSearchParams({ projectId: params.projectId });
@@ -194,7 +198,7 @@ export function fetchOpportunities(projectId: string, signal?: AbortSignal) {
 export function fetchReports(projectId: string, signal?: AbortSignal) {
   return apiGet<{ projectId: string; reports: ReportListItem[] }>(`/api/reports?projectId=${encodeURIComponent(projectId)}`, signal);
 }
-export function createReport(body: { projectId: string; brandIds?: string[]; from?: string | null; to?: string | null }) {
+export function createReport(body: { projectId: string; brandIds?: string[]; from?: string | null; to?: string | null; sections?: string[] }) {
   return apiPost<{ reportId: string; jobId: string; status: string; version: number; message: string }>('/api/reports', body);
 }
 export function fetchReport(reportId: string, signal?: AbortSignal) {
@@ -208,7 +212,7 @@ export const COVER_STATE_TEXT: Record<string, string> = {
   empty: '已采集但无可提炼结果',
   stale: '数据过期',
   loading: '采集中',
-  failed: '最近采集失败但保留旧数据',
+  failed: '最近采集失败，尚无可展示数据',
   unsupported: '未接入',
   unknown: '尚未采集',
 };
