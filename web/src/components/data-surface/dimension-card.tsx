@@ -127,10 +127,11 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
 }
 
 export function DimensionCard({
-  dim, competitorId, busy, onRefresh, onOpenEvidence,
+  dim, competitorId, projectId, busy, onRefresh, onOpenEvidence,
 }: {
   dim: SurfaceDimension;
   competitorId: string;
+  projectId?: string;
   busy: boolean;
   onRefresh: (capability: string) => void;
   onOpenEvidence: (refs: SurfaceEvidenceRef[]) => void;
@@ -209,7 +210,7 @@ export function DimensionCard({
           </button>
         ) : null}
       </div>
-      {showObs ? <ObservationList competitorId={competitorId} dimension={dim.code} /> : null}
+      {showObs ? <ObservationList competitorId={competitorId} projectId={projectId} dimension={dim.code} /> : null}
     </div>
   );
 }

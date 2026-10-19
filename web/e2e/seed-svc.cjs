@@ -25,9 +25,13 @@ const db = require(path.join(BACKEND, 'app/services/db.js'));
 const BrandStore = require(path.join(BACKEND, 'app/services/brand-store.js'));
 const BrandSvc = require(path.join(BACKEND, 'app/services/brand-service.js'));
 const SurfaceStore = require(path.join(BACKEND, 'app/services/surface-store.js'));
+const Adapters = require(path.join(BACKEND, 'app/services/source-adapter.js'));
 const Snapshot = require(path.join(BACKEND, 'app/research/source-snapshot.js'));
 const EvidenceStore = require(path.join(BACKEND, 'app/research/evidence-store.js'));
 const { saveState, projFile } = require(path.join(BACKEND, 'app/core/state-store.js'));
+
+// TikTok 广告查询端点（与生产 adapter 同一常量；仅作快照 source_url，不含任何凭据）
+const TT_ENDPOINT = 'https://open.tiktokapis.com/v2/research/adlib/ad/query/';
 
 // 项目内唯一标识：PID 去掉 'proj' 前缀（含 'e2a'/'e2b' 段 + 时间戳，跨项目必不同）
 const UTAG = PID.replace(/^proj/, '');
@@ -57,13 +61,95 @@ function recordCatalogEvidence(tid, host, snapIds, observedAt) {
   });
 }
 
+// TikTok 广告摘要（R4.15 浏览器验证用 · 受控测试记录）
+// 🔴 纪律：这不是真实 provider 响应，也不代表 TikTok 已接通。
+//   · 原始响应体带 _e2e_fixture 标记，快照里可查来源；
+//   · 摘要 / 观察 / Evidence 全部经生产 adapter.normalize 生成（同一套字段映射与覆盖判定，
+//     不手写 coverageNote、不手写 32 国）；
+//   · Attempt / Snapshot / Evidence 走生产真值链写入，页面通过真实 HTTP API 读取。
+function seedTiktokAds({ tid, competitorId, brandName, host, market, creative }) {
+  const adsBody = {
+    _e2e_fixture: 'controlled e2e test record; NOT a real provider response',
+    data: {
+      ads: [{
+        ad: {
+          id: creative.id,
+          first_shown_date: creative.firstShownDate || null,
+          last_shown_date: creative.lastShownDate || null,
+          status: creative.status || 'active',
+          ...(creative.statusStatement ? { status_statement: creative.statusStatement } : {}),
+          videos: [], image_urls: [],
+          reach: { unique_user_seen: creative.reach || '10K' },
+        },
+        advertiser: { business_id: 9000000000001, business_name: brandName, paid_for_by: brandName },
+      }],
+      has_more: false,
+      search_id: 'e2e-' + UTAG + '-sid',
+    },
+    error: { code: 'ok', http_status_code: 200, message: '' },
+  };
+  const snap = mkSnapshot(tid, TT_ENDPOINT + '?fields=ad.id', JSON.stringify(adsBody), {
+    capability: 'tiktok_commercial_content', provider: 'tiktok_research_api',
+    contentType: 'application/json',
+  });
+  const out = Adapters.getAdapter('tiktok').normalize({
+    creatives: [{
+      id: String(creative.id),
+      firstShownDate: creative.firstShownDate || null,
+      lastShownDate: creative.lastShownDate || null,
+      status: creative.status || 'active',
+      statusStatement: creative.statusStatement || null,
+      advertiser: brandName,
+      businessId: '9000000000001',
+      paidForBy: brandName,
+      creativeUrl: null,
+      videoUrls: [],
+      reachLabel: creative.reach || '10K',
+      region: null,
+    }],
+    snapshotIds: [snap.snapshot_id],
+    periodStart: '20250101', periodEnd: '20250331',
+    countryScope: 'ALL（官方支持国家范围）',
+    brandMarket: market, // 'us' / 'de' —— 覆盖判定由 adapter 内的唯一事实源派生
+    providerRecordId: 'e2e-' + UTAG + '-sid',
+    partialScan: false,
+    sourceUrl: TT_ENDPOINT,
+  }, { competitor: { name: brandName, url: 'https://' + host } });
+
+  const ev = EvidenceStore.recordEvidence({
+    tenantId: tid, projectRef: PID, brandHint: host,
+    source: out.evidenceSource, provider: out.evidenceProvider,
+    source_snapshot_ids: [snap.snapshot_id],
+    claim: { field: out.claimField, scope: out.claimScope },
+    entity_key: out.entityKey, entity_ref: out.entityRef,
+    extracted_value: out.extractedValue,
+    unit: null, currency: null, market: null, evidence_status: 'verified',
+    parser_version: out.parserVersion, extractor_version: out.parserVersion,
+    observed_at: snap.observed_at,
+    note: 'e2e seed（受控测试记录，非真实 provider 响应）',
+  });
+  const at = SurfaceStore.createAttempt({
+    tenantId: tid, projectId: PID, competitorId, capability: 'tiktok_commercial_content',
+    dimension: 'ad_campaigns', trigger: 'manual', idempotencyKey: 'e2e-' + UTAG + '-ads-' + market + '-' + Date.now(),
+    nowMs: Date.now(),
+  });
+  SurfaceStore.completeAttempt(tid, at.attempt.attemptId, {
+    status: out.outcome === 'partial' ? 'partial' : 'success', sourceStatus: out.outcome === 'partial' ? 'partial' : 'success',
+    observations: out.observations,
+    snapshotIds: [snap.snapshot_id], evidenceIds: [ev.meta.evidence_id],
+    summary: out.summary,
+    endedAt: new Date().toISOString(),
+  });
+  return { attemptId: at.attempt.attemptId, snapshotId: snap.snapshot_id, coverageState: out.summary.coverageState, brandMarket: out.summary.brandMarket };
+}
+
 (async () => {
   // state 文件（真实 state-store 异步落盘 → 内容级轮询等待）
   const full = FLAVOR !== 'minimal';
   const competitors = full ? [
     { id: 'compU1_' + UTAG, name: 'PuppetLab', status: 'done', url: 'https://puppetlab.example.com', isShopify: true, pricePoints: [19, 29], sellingPoints: ['可换脸', 'petite 尺寸'] },
     { id: 'compU2_' + UTAG, name: 'DollForge', status: 'done', url: 'https://dollforge.example.com', isShopify: true, pricePoints: [39], sellingPoints: ['定制涂装'] },
-    { id: 'compU3_' + UTAG, name: 'ToyHive', status: 'done', url: 'https://toyhive.example.com', isShopify: true, pricePoints: [49], sellingPoints: ['毛绒联名'] },
+    { id: 'compU3_' + UTAG, name: 'ToyHive', status: 'done', url: 'https://toyhive.example.com', isShopify: true, pricePoints: [49], sellingPoints: ['毛绒联名'], market: 'de' },
   ] : [
     { id: 'compB1_' + UTAG, name: 'AromaHouse', status: 'done', url: 'https://aromahouse.example.com', isShopify: true, pricePoints: [25, 45], sellingPoints: ['大豆蜡', '礼盒装'] },
   ];
@@ -109,6 +195,23 @@ function recordCatalogEvidence(tid, host, snapIds, observedAt) {
     endedAt: new Date().toISOString(),
   });
 
+  // TikTok 广告摘要（R4.15 浏览器验证；仅 full 项目 = 项目 A）
+  //   · US 品牌（PuppetLab，intent.regions=[us]）→ coverageState=out_of_coverage
+  //   · 德国品牌（ToyHive，market=de）→ covered，且带 status_statement（用于验证"有值才展示"）
+  let adsUs = null, adsDe = null, bidDe = null;
+  if (full) {
+    adsUs = seedTiktokAds({
+      tid: TID, competitorId: okComp, brandName: 'PuppetLab', host, market: 'us',
+      creative: { id: 'e2e-ad-us-1', firstShownDate: '20250102', lastShownDate: '20250118', status: 'active', reach: '12K' },
+    });
+    const deComp = 'compU3_' + UTAG;
+    bidDe = BrandStore.brandIdForCompetitor(TID, PID, deComp);
+    adsDe = seedTiktokAds({
+      tid: TID, competitorId: deComp, brandName: 'ToyHive', host: 'toyhive.example.com', market: 'de',
+      creative: { id: 'e2e-ad-de-1', firstShownDate: '20250201', lastShownDate: '20250228', status: 'inactive', statusStatement: 'Ad is no longer active.', reach: '9K' },
+    });
+  }
+
   let bidPart = null;
   if (full) {
     // partial 品牌（部分完成 + 无证据）
@@ -132,6 +235,10 @@ function recordCatalogEvidence(tid, host, snapIds, observedAt) {
 
   const intel = BrandSvc.listIntelligence(TID, { projectId: PID });
   console.log('[seed-svc] done: okBrand=' + bidOk + (bidPart ? ' partBrand=' + bidPart : '') + ' intel=' + intel.length);
-  console.log('[seed-svc] BIDS ' + JSON.stringify({ ok: bidOk, part: bidPart }));
+  console.log('[seed-svc] BIDS ' + JSON.stringify({ ok: bidOk, part: bidPart, de: bidDe }));
+  console.log('[seed-svc] ADS ' + JSON.stringify({
+    us: adsUs ? { brand: bidOk, coverageState: adsUs.coverageState, brandMarket: adsUs.brandMarket, attemptId: adsUs.attemptId } : null,
+    de: adsDe ? { brand: bidDe, coverageState: adsDe.coverageState, brandMarket: adsDe.brandMarket, attemptId: adsDe.attemptId } : null,
+  }));
   process.exit(0);
 })().catch(e => { console.error('[seed-svc] FATAL', e && e.stack || e); process.exit(1); });

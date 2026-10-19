@@ -107,7 +107,17 @@ function buildCoverage(tenantId, projectId, competitor) {
     // 只显示四种口径之一（此处=数据服务暂不可用）；凭据等技术细节仅管理员
     // 健康接口可见（GET /api/admin/data-surface/capabilities），不进用户投影。
     const pending = caps.filter(c => c.maturity === 'pending_config');
-    if (!ga.length && pending.length) {
+    // R4.15：maturity 未升级但已有真实可用尝试（success/partial）的能力，按「已采到数据」参与聚合——
+    // 否则顶部覆盖面板会与下方数据面卡片自相矛盾（卡片有数据、面板说"暂不可用"）。
+    const pendingActive = (!ga.length && compId)
+      ? pending.filter(c => {
+        try {
+          return SurfaceStore.listAttempts(tenantId, projectId, compId, c.code, 10)
+            .some(a => a.status === 'success' || a.status === 'partial');
+        } catch (e) { return false; }
+      })
+      : [];
+    if (!ga.length && pending.length && !pendingActive.length) {
       dims.push({
         code: d.code, displayName: d.displayName, state: 'pending_config', stateText: '数据服务暂不可用',
         capabilities: pending.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity, measurementMethod: c.measurementMethod || null })),
@@ -116,7 +126,7 @@ function buildCoverage(tenantId, projectId, competitor) {
       });
       continue;
     }
-    if (!ga.length) {
+    if (!ga.length && !pendingActive.length) {
       dims.push({
         code: d.code, displayName: d.displayName, state: 'unsupported', stateText: '未接入',
         capabilities: caps.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity, limitations: c.limitations })),
@@ -125,8 +135,10 @@ function buildCoverage(tenantId, projectId, competitor) {
       });
       continue;
     }
+    // 参与本维度聚合的能力：ga + 已采到数据的 pending
+    const capsForAgg = ga.concat(pendingActive);
     if (!compId) {
-      dims.push({ code: d.code, displayName: d.displayName, state: 'unknown', stateText: '尚未采集', capabilities: ga.map(c => ({ code: c.code, displayName: c.displayName })), lastObservedAt: null, reason: 'no_competitor' });
+      dims.push({ code: d.code, displayName: d.displayName, state: 'unknown', stateText: '尚未采集', capabilities: capsForAgg.map(c => ({ code: c.code, displayName: c.displayName })), lastObservedAt: null, reason: 'no_competitor' });
       continue;
     }
     let best = null; best = null;
@@ -140,7 +152,7 @@ function buildCoverage(tenantId, projectId, competitor) {
     // 该维度下所有已接入能力都**没有任何 attempt** 时，一律「尚未采集」。
     let hasAttempt = false;
     let latestFailed = false;
-    for (const c of ga) {
+    for (const c of capsForAgg) {
       const a = SurfaceStore.latestAttempt(tenantId, projectId, compId, c.code);
       if (a) {
         hasAttempt = true;
@@ -168,7 +180,7 @@ function buildCoverage(tenantId, projectId, competitor) {
     dims.push({
       code: d.code, displayName: d.displayName,
       state: finalState, stateText: COVER_STATE_TEXT[finalState] || '尚未采集',
-      capabilities: ga.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity })),
+      capabilities: capsForAgg.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity })),
       lastObservedAt,
       notes,
       reason: finalState === 'unsupported' ? 'not_supported_for_object' : (hasAttempt ? null : 'not_collected_yet'),

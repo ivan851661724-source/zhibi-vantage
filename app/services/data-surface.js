@@ -27,6 +27,29 @@ const Snapshot = require('../research/source-snapshot.js');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 与 watch-store 同口径：running 超时视为崩溃残留（投影层只读标记）
 
+// R4.15：能力是否已有「可展示的真实尝试」（success / partial）。
+// 用途：maturity 仍为 pending_config 的能力一旦真的采到数据，数据必须可见——
+// 否则真实采集结果会被 readiness 占位状态挡住（用户看不到已采到的数据）。
+function hasUsableAttempt(tenantId, projectId, competitorId, capability) {
+  try {
+    return SurfaceStore.listAttempts(tenantId, projectId, competitorId, capability, 10)
+      .some(a => a.status === 'success' || a.status === 'partial');
+  } catch (e) { return false; }
+}
+
+// 可渲染能力集合：ga 能力，或 pending_config 且已有可用尝试。
+// not_integrated 永不渲染（未接入不构造数据）。
+function renderableCaps(allCaps, scope) {
+  const ctx = scope || {};
+  return allCaps.filter(c => {
+    if (c.maturity === 'ga') return true;
+    if (c.maturity === 'pending_config') {
+      return hasUsableAttempt(ctx.tenantId, ctx.projectId, ctx.competitorId, c.code);
+    }
+    return false;
+  });
+}
+
 // 单能力投影（SC-02 §7 规则 + 整改轮三拆状态）
 // 返回 { surfaceState, latestAttempt, latestUsable, isRefreshing, gaps[] , ... }
 function deriveCapabilityState({ tenantId, projectId, competitorId, capability, brandCtx, nowMs }) {
@@ -34,7 +57,11 @@ function deriveCapabilityState({ tenantId, projectId, competitorId, capability, 
   const now = nowMs || Date.now();
   if (!cap) return { surfaceState: 'unsupported', reasonCode: 'capability_undefined', reasonText: '能力尚未定义', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
   if (cap.maturity !== 'ga') {
-    return { surfaceState: 'unsupported', reasonCode: 'source_not_integrated', reasonText: '数据源尚未接入，暂时无法采集该维度', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
+    // R4.15：maturity 未升级但已有可用尝试 → 继续按数据推导（数据可见优先于占位）；
+    // 无可用尝试时保持原语义（pending_config / not_integrated 占位，不构造数据）。
+    if (!hasUsableAttempt(tenantId, projectId, competitorId, cap.code)) {
+      return { surfaceState: 'unsupported', reasonCode: 'source_not_integrated', reasonText: '数据源尚未接入，暂时无法采集该维度', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
+    }
   }
   const chain = Adapters.resolveAdapterChain(cap.code);
   if (!chain.ok || !chain.chain.length) {
@@ -208,7 +235,8 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
 
   const dims = Registry.listDimensions().map(d => {
     const allCaps = Registry.capabilitiesByDimension(d.code);
-    const caps = allCaps.filter(c => c.maturity === 'ga');
+    // R4.15：已采到真实数据的能力必须渲染（含 maturity=pending_config 的已成功采集）
+    const caps = renderableCaps(allCaps, { tenantId, projectId, competitorId });
     if (!caps.length) {
       const placeholder = allCaps[0] || null;
       // P0-2 整改 r2：pending_config 维度用户侧口径收敛——「数据服务暂不可用」；
@@ -302,7 +330,9 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
 function buildDimensionDetail({ tenantId, projectId, competitorId, dimension, offset, limit, comp }) {
   const off = Math.max(0, Number(offset) || 0);
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
-  const gaCaps = Registry.capabilitiesByDimension(dimension).filter(c => c.maturity === 'ga');
+  const allCaps = Registry.capabilitiesByDimension(dimension);
+  // R4.15：与总览同口径——ga 能力 + 已有可用尝试的 pending_config 能力
+  const gaCaps = renderableCaps(allCaps, { tenantId, projectId, competitorId });
   const caps = gaCaps.map(cap => {
     const derived = deriveCapabilityState({
       tenantId, projectId, competitorId, capability: cap.code,

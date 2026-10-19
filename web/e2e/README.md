@@ -15,6 +15,32 @@
 | S7 情报库 brandId 清理（r3 规则 1） | `/intel?projectId=A&brandId=<A品牌>` 筛选生效（展示该品牌情报）→ 顶部选择器切到 B → URL **清除 brandId** → 页面展示 B 的真实数据或真实空状态，无「当前筛选没有结果」假空、无 A 项目情报内容 |
 | S8 情报库噪音修复（r4.10） | `/intel?projectId=A`：主列表无「XX：未接入」卡片（未接入维度是项目级覆盖状态，不是情报事件）；真实采集项（成功/部分完成）保留；底部「数据覆盖与建设中维度」折叠区域恰 4 项、每维度恰一次、统一文案「尚未接入，当前不生成数据、估算或结论。」、无时间戳/来源链接/Evidence/「待核实」/「资料不足」/svg 图表 |
 
+## 用例清单（tiktok-coverage-r5.cjs · TikTok 覆盖范围浏览器级验证）
+
+专用场景：验证「populated `ad_creatives` 摘要」在真实浏览器里的呈现（不只是 adapter summary）。
+
+| 场景 | 断言要点 |
+|---|---|
+| T1 美国品牌（覆盖外） | 广告活动卡显示「该公开来源当前无覆盖」，注明「当前 N 国」「不含美国」；不显示「公开广告素材 0 条」 |
+| T2 零值/结论式文案 | 页面无「0 条广告」「未观察到广告」、无结论式「没有广告」（`不代表…没有广告` 的否定说明不算）、无虚构趋势 |
+| T3 素材与结论边界 | 覆盖外品牌仍有素材时：标注来源「平台公开披露」+ 覆盖限制，不表述为「美国市场投放」结论；同时校验 overview API 的 `coverageState / coverageCountryCount / brandMarket` |
+| T4 德国品牌（覆盖内） | 正常显示「公开广告素材 1 条」；展示字段仅限已落库的官方字段；无花费/CPM/转化/GMV |
+| T5 status_statement | 缺失（US 素材）不渲染状态说明行；有值（DE 素材）才展示 |
+| T6 泄漏 | 页面可见文本无 client key/secret 名、Bearer、环境变量名、内部路径、调用栈、token 形态（只扫 `innerText`，避免把 Next RSC 载荷算进来） |
+
+### 数据来源与诚实性约定
+
+- `seed.cjs` → `seed-svc.cjs` 经**生产真值链**写入：`Snapshot.record` → `EvidenceStore.recordEvidence` → `SurfaceStore.createAttempt / completeAttempt`；summary 与观察由生产 `tiktok` adapter 的 `normalize()` 生成（覆盖判定读 `lib/tiktok-adlib.js`，不手写国数）。
+- 原始响应体带 `"_e2e_fixture": "controlled e2e test record; NOT a real provider response"` 标记，快照里可审计。
+- **这不是真实 TikTok provider 调用**，也不代表广告源已接通；页面读取走真实后端 HTTP（`/api/data-surface/overview`、`/api/data-surface/dimension`）。
+- 数据面链路：US 品牌（intent.regions=[us]）→ `out_of_coverage`；德国品牌（`market: 'de'`）→ `covered`，并带 `status_statement`。
+
+```bash
+node tiktok-coverage-r5.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json
+```
+
+成功输出：`[tiktok-r5] ALL PASS（T1-T6，截图目录 ...）`。
+
 ## 运行前提
 
 1. Node ≥ 22（需内置 `node:sqlite`）。

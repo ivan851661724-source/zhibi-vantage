@@ -139,7 +139,7 @@ function BrandDetailInner() {
         <section className="core-sec">
           <h3>数据覆盖与来源</h3>
           <CoveragePanel coverage={d.coverage} />
-          {b.competitorId ? <DataSurfaceOverview competitorId={b.competitorId} /> : null}
+          {b.competitorId ? <DataSurfaceOverview competitorId={b.competitorId} projectId={projectId} /> : null}
           <BuildingDims dimensions={d.coverage.dimensions} />
         </section>
       )}

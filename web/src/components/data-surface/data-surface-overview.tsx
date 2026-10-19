@@ -13,12 +13,15 @@ import { DimensionCard } from './dimension-card';
 import { EvidenceDrawer } from './evidence-drawer';
 import type { DataSurfaceOverview, SurfaceEvidenceRef, SurfaceIdentity } from './types';
 
-export function DataSurfaceOverview({ competitorId }: { competitorId: string }) {
+export function DataSurfaceOverview({ competitorId, projectId }: { competitorId: string; projectId?: string }) {
   const [data, setData] = useState<DataSurfaceOverview | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [evRefs, setEvRefs] = useState<SurfaceEvidenceRef[] | null>(null);
   const aliveRef = useRef(true);
+  // R4.15：数据面请求必须显式带 projectId——向后端「当前项目」状态兜底在
+  // 多项目租户下会解析到别的项目（404 COMPETITOR_NOT_FOUND 或读错品牌）。
+  const pidQ = projectId ? '&projectId=' + encodeURIComponent(projectId) : '';
   // 竞态防护①：请求序号——只有最新序号的响应允许写入 state
   const seqRef = useRef(0);
   // 竞态防护②：进行中的 AbortController——切品牌/卸载时取消旧请求
@@ -29,7 +32,7 @@ export function DataSurfaceOverview({ competitorId }: { competitorId: string }) 
     if (abortRef.current) { try { abortRef.current.abort(); } catch (e) { /* 已结束 */ } }
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    return apiGet<DataSurfaceOverview>('/api/data-surface/overview?competitorId=' + encodeURIComponent(competitorId), ctrl.signal)
+    return apiGet<DataSurfaceOverview>('/api/data-surface/overview?competitorId=' + encodeURIComponent(competitorId) + pidQ, ctrl.signal)
       .then((d) => {
         if (aliveRef.current && seq === seqRef.current) { setData(d); setLoadErr(null); }
         return d;
@@ -39,7 +42,7 @@ export function DataSurfaceOverview({ competitorId }: { competitorId: string }) 
         if (aliveRef.current && seq === seqRef.current) setLoadErr(e instanceof Error ? e.message : String(e));
         return null;
       });
-  }, [competitorId]);
+  }, [competitorId, pidQ]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -60,6 +63,7 @@ export function DataSurfaceOverview({ competitorId }: { competitorId: string }) 
       const r = await apiPost<{ attempt?: { status?: string }; deduped?: boolean; message?: string }>('/api/data-surface/refresh', {
         competitorId,
         capability: capability || 'shopify_catalog',
+        ...(projectId ? { projectId } : {}),
       });
       if (r && r.deduped) toast(r.message || '已有一次相同采集在进行或刚完成，已复用该次结果（不重复产生费用）。');
       else toast('已开始采集，完成后自动更新。');
@@ -108,6 +112,7 @@ export function DataSurfaceOverview({ competitorId }: { competitorId: string }) 
             key={d.code}
             dim={d}
             competitorId={competitorId}
+            projectId={projectId}
             busy={busy}
             onRefresh={(cap) => void refresh(cap)}
             onOpenEvidence={(refs) => setEvRefs(refs)}

@@ -52,15 +52,18 @@ function ObsRow({ o, dimension }: { o: SurfaceObservation; dimension: string }) 
   if (dimension === 'ad_campaigns') {
     const reachLabel = (o as { reach?: string | number | null }).reach;
     const lastShown = (o as { lastShownDate?: string | null }).lastShownDate;
+    // R4.15：每个字段独立 span（.val 是 flex + gap）——不再用裸文本「 · 」拼接：
+    // 裸文本节点在 flex 里会被拆行，截图里出现只有「·」的空行（看起来像空字段）。
+    // 同时：status_statement 缺失时不渲染任何占位节点。
     return (
       <li className="ds-obs-item">
         <span className="nm" title={o.title}>{o.title}</span>
         <span className="val">
           {o.publishedAt ? <span className="ds-obs-pub">{o.publishedAt} 起投</span> : null}
-          {lastShown ? <span className="ds-obs-pub"> · 至 {lastShown}</span> : null}
-          {o.advertiser ? <> · {o.advertiser}</> : null}
-          {reachLabel ? <> · 公开触达 {reachLabel}</> : null}
-          {o.statusStatement ? <span className="ds-obs-snippet">{o.statusStatement}</span> : null}
+          {lastShown ? <span className="ds-obs-pub">至 {lastShown}</span> : null}
+          {o.advertiser ? <span className="ds-obs-pub">{o.advertiser}</span> : null}
+          {reachLabel ? <span className="ds-obs-pub">公开触达 {reachLabel}</span> : null}
+          {o.statusStatement ? <span className="ds-obs-snippet" title={o.statusStatement}>{o.statusStatement}</span> : null}
           {o.creativeUrl ? <a className="ds-obs-link" href={o.creativeUrl} target="_blank" rel="noreferrer noopener">素材 ↗</a> : null}
           <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
         </span>
@@ -122,7 +125,7 @@ function DetailSummary({ summary }: { summary: SurfaceSummary | null }) {
   return null;
 }
 
-export function ObservationList({ competitorId, dimension }: { competitorId: string; dimension: string }) {
+export function ObservationList({ competitorId, projectId, dimension }: { competitorId: string; projectId?: string; dimension: string }) {
   const [detail, setDetail] = useState<DimensionDetail | null>(null);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -138,8 +141,9 @@ export function ObservationList({ competitorId, dimension }: { competitorId: str
     abortRef.current = ctrl;
     setLoading(true);
     setErr(null);
+    const pidQ = projectId ? '&projectId=' + encodeURIComponent(projectId) : '';
     apiGet<DimensionDetail>(
-      `/api/data-surface/dimension?competitorId=${encodeURIComponent(competitorId)}&dimension=${encodeURIComponent(dimension)}&offset=${off}&limit=${limit}`,
+      `/api/data-surface/dimension?competitorId=${encodeURIComponent(competitorId)}${pidQ}&dimension=${encodeURIComponent(dimension)}&offset=${off}&limit=${limit}`,
       ctrl.signal,
     )
       .then((d) => { if (seq === seqRef.current) { setDetail(d); setLoading(false); } })
@@ -147,7 +151,7 @@ export function ObservationList({ competitorId, dimension }: { competitorId: str
         if (e && e.name === 'AbortError') return;
         if (seq === seqRef.current) { setErr(e instanceof Error ? e.message : String(e)); setLoading(false); }
       });
-  }, [competitorId, dimension]);
+  }, [competitorId, projectId, dimension]);
 
   useEffect(() => { load(offset); return () => { if (abortRef.current) { try { abortRef.current.abort(); } catch (e) {} } }; }, [load, offset]);
 

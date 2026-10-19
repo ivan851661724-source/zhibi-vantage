@@ -1376,7 +1376,9 @@ const tiktokAdapter = {
     const countryScope = res.countryScope || 'ALL';
     const coverage = TikTokAdLib.marketCoverage(res.brandMarket);
     const coverageState = res.coverageState || coverage.coverageState;
-    const brandMarket = res.brandMarket || coverage.brandMarket;
+    // 市场标识一律用归一后的 ISO2（调用方传 'us'/'美国' 也统一成 'US'）；
+    // 归一不出来（区域词/空值）→ null，不把原文当国家写进投影。
+    const brandMarket = coverage.brandMarket;
     return {
       capability: 'tiktok_commercial_content', dimension: 'ad_campaigns',
       outcome: partial ? 'partial' : 'success',
