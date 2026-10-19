@@ -135,9 +135,9 @@ function createMonitoringProjection({ store }) {
             provenance.evidence_status!==evidence.evidence_status||provenance.parser_version!==parserVersion||provenance.extractor_version!==extractorVersion)return false;
           let catalogSource=null,cartSource=null;
           const verified=fact.source_snapshot_ids.every(id=>{
-          const s=snapshot(id), catalog=s?.provider===target.source.provider, cart=s?.provider==='shopify_cart_json';
+          const s=snapshot(id), catalog=s?.provider===target.source.provider, cart=s?.provider==='shopify_cart_js_json';
           const pathname=catalog?'/products.json':'/cart.js';
-          if(!s||!(catalog||cart)||s.capability!=='product_catalog'||!['success','partial'].includes(s.source_status)||!Number.isInteger(s.http_status)||s.http_status<200||s.http_status>=300||
+          if(!s||!(catalog||cart)||s.capability!==(catalog?'product_catalog':'storefront_currency')||!['success','partial'].includes(s.source_status)||!Number.isInteger(s.http_status)||s.http_status<200||s.http_status>=300||
             !endpoint(s.source_url,pathname)||(s.final_url&&!endpoint(s.final_url,pathname))||(catalog&&s.observed_at!==fact.observed_at))return false;
           const bytes=raw(s);if(!bytes)return false;
           if(catalog){

@@ -257,7 +257,8 @@ function persistShopifyPriceEvidence(state, comp, shopify, anchorDomain) {
           try {
             const PriceMetric = require('./price-metric.js');
             metricResult = PriceMetric.recordPriceMetric({ tenantId: state.tenantId || undefined,
-              factIds: recordedFactIds, snapshotIds, currencySnapshotId: shopify.currencySnapshotId || undefined });
+              factIds: recordedFactIds, snapshotIds, currencySnapshotId: shopify.currencySnapshotId || undefined,
+              partialScan: shopify.partialScan === true, partialScanReason: shopify.partialScanReason || null });
             if (metricResult.recorded) comp.priceMetric = PriceMetric.metricSummary(metricResult.meta);
           } catch (me) {
             require('../services/logger.js').error('price_metric_error', { competitor: comp.id, error: String((me && me.message) || me).slice(0, 200) });

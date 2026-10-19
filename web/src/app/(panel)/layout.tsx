@@ -3,14 +3,15 @@
 // 复刻 index.html：side-nav（logo + DAILY OPS/INTELLIGENCE/SYSTEM 三组导航 + 用户区）+ topbar。
 // 徽章：navRivals = competitors.length（对齐 app.js updateWbBadges L1665-1666）；
 //       navPending = 未决策材料数（三动作 localStorage 记录属 Phase 2 工作台，暂以材料总数展示）。
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { clearToken, getToken } from '@/lib/api';
 import { ZhibiStateProvider, useZhibiState } from '@/hooks/use-zhibi-state';
 import { wbLoad } from '@/lib/wb';
 import { isDemoMode } from '@/lib/demo';
 import { AlertsCenter } from '@/components/alerts-center';
+import { ProjectPicker } from '@/components/core-ui';
 
 const NAV_GROUPS: {
   sec: string;
@@ -38,6 +39,13 @@ const NAV_GROUPS: {
   {
     sec: 'INTELLIGENCE · 情报',
     items: [
+      {
+        href: '/brands',
+        label: '竞品库',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h16M4 12h16M4 17h10" strokeLinecap="round" /><circle cx="19" cy="17" r="2" /></svg>
+        ),
+      },
       {
         href: '/intel',
         label: '情报库',
@@ -93,6 +101,7 @@ const NAV_GROUPS: {
 const PANEL_TITLES: Record<string, string> = {
   '/': '工作台',
   '/radar': '竞品雷达',
+  '/brands': '竞品库',
   '/intel': '情报库',
   '/opportunity': '机会视图',
   '/report': '调研报告',
@@ -102,26 +111,26 @@ const PANEL_TITLES: Record<string, string> = {
   '/demo': '产品演示',
 };
 
-function SideNav() {
-  const pathname = usePathname();
-  const { state } = useZhibiState();
-  // 待批 badge（对齐 app.js updateWbBadges L1658-1667：未决策材料数）
-  const [pending, setPending] = useState(0);
-  useEffect(() => {
-    const d = wbLoad();
-    setPending(((state && state.materials) || []).filter((m) => !d[m.id]).length);
-  }, [state]);
-  const rivals = (state && state.competitors && state.competitors.length) || 0;
+// r2 修复：四个核心情报入口（竞品库/情报库/机会视图/调研报告）在当前 URL
+// 存在 projectId 时携带同一 projectId——侧栏、顶部选择器、页面数据三者一致；
+// 没有 projectId 时保持原始链接，不制造空参数。
+const CORE_PID_HREFS = new Set(['/brands', '/intel', '/opportunity', '/report']);
 
+function NavGroups({ projectId, pending, rivals }: { projectId: string | null; pending: number; rivals: number }) {
+  const pathname = usePathname();
+  const withPid = (href: string) => {
+    if (projectId && CORE_PID_HREFS.has(href)) return `${href}?projectId=${encodeURIComponent(projectId)}`;
+    return href;
+  };
   return (
-    <nav className="side-nav" id="sideNav">
+    <>
       {NAV_GROUPS.map((g) => (
         <div key={g.sec}>
           <div className="nav-sec">{g.sec}</div>
           {g.items.map((it) => {
             const active = pathname === it.href;
             return (
-              <Link key={it.href} href={it.href} className={'nav-item' + (active ? ' active' : '')}>
+              <Link key={it.href} href={withPid(it.href)} className={'nav-item' + (active ? ' active' : '')}>
                 {it.icon}
                 <span>{it.label}</span>
                 {it.href === '/' && (
@@ -135,12 +144,38 @@ function SideNav() {
           })}
         </div>
       ))}
+    </>
+  );
+}
+
+function SideNav() {
+  const { state } = useZhibiState();
+  // 待批 badge（对齐 app.js updateWbBadges L1658-1667：未决策材料数）
+  const [pending, setPending] = useState(0);
+  useEffect(() => {
+    const d = wbLoad();
+    setPending(((state && state.materials) || []).filter((m) => !d[m.id]).length);
+  }, [state]);
+  const rivals = (state && state.competitors && state.competitors.length) || 0;
+
+  return (
+    <nav className="side-nav" id="sideNav">
+      {/* useSearchParams 需要 Suspense 边界；回退渲染无参导航（水合后立即带参） */}
+      <Suspense fallback={<NavGroups projectId={null} pending={pending} rivals={rivals} />}>
+        <SideNavLinks pending={pending} rivals={rivals} />
+      </Suspense>
       <div className="side-foot">
         <div className="plan-pill"><span className="dot"></span><span id="planStatus">雷达运行中</span></div>
         <UserRow />
       </div>
     </nav>
   );
+}
+
+function SideNavLinks({ pending, rivals }: { pending: number; rivals: number }) {
+  const searchParams = useSearchParams();
+  const projectId = searchParams.get('projectId') || '';
+  return <NavGroups projectId={projectId || null} pending={pending} rivals={rivals} />;
 }
 
 function UserRow() {
@@ -180,6 +215,10 @@ function TopBar() {
       </div>
       <div className="tb-title">
         {track ? <span className="tb-track"><span className="track-pill">{track}</span></span> : null}
+        {/* SC-04 UI 框架轮：全局项目选择入口（r2：URL projectId 优先，切换保留非项目参数） */}
+        <Suspense fallback={<span className="hint">项目…</span>}>
+          <ProjectPicker />
+        </Suspense>
       </div>
       <div className="tb-right">
         {/* 演示态隐藏换赛道（避免误触 onboarding → 401 踢出演示） */}

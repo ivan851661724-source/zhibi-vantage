@@ -23,7 +23,7 @@ function snap(products, overrides = {}) {
     projectRef: 'p1', source_url: 'https://example.com/products.json?page=1', source_status: 'success',
     fetched_at: WHEN, observed_at: WHEN, bodyBytes: Buffer.from(JSON.stringify({ products })), ...overrides }).meta;
 }
-function cart(overrides = {}) { return snap([], { provider: 'shopify_cart_json', source_url: 'https://example.com/cart.js', bodyBytes: Buffer.from('{"currency":"USD"}'), ...overrides }); }
+function cart(overrides = {}) { return snap([], { provider: 'shopify_cart_js_json', capability: 'storefront_currency', source_url: 'https://example.com/cart.js', bodyBytes: Buffer.from('{"currency":"USD"}'), ...overrides }); }
 function batch(products, opts = {}) {
   const s = snap(products, opts.snapshot), c = opts.noCurrency ? null : cart(opts.currency);
   const r = Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: s.snapshot_id, currencySnapshotId: c?.snapshot_id, projectRef: s.tenant.project_ref });

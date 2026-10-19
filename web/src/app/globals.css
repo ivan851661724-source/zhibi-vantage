@@ -2763,3 +2763,233 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .watch-gap{font-size:11px;color:#a35a00;background:#fdf4e6;border-radius:6px;padding:4px 8px;margin-top:6px}
 .watch-actions{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
 .watch-err{font-size:11px;color:#a33}
+
+/* ===== 数据面五维总览（data-surface，SC-02） ===== */
+.ds-wrap{margin:14px 0}
+.ds-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.ds-title{font-weight:600;font-size:14px}
+.ds-ident{font-size:11px;color:var(--ink3)}
+.ds-poll-hint{font-size:11px;color:var(--warn)}
+.ds-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+.ds-card{border:1px solid var(--line1);border-radius:10px;padding:10px;background:var(--card);display:flex;flex-direction:column;gap:6px}
+.ds-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ds-card-name{font-weight:600;font-size:13px}
+.ds-card-sum{font-size:12px;color:var(--ink2)}
+.ds-card-note{font-size:11px;color:var(--ink3);margin:0}
+.ds-note-fail{color:var(--crisis)}
+.ds-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid;white-space:nowrap}
+.ds-badge-icon{font-weight:700}
+.ds-ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
+.ds-loading{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.ds-failed{color:var(--crisis);background:var(--crisis-bg);border-color:var(--crisis-line)}
+.ds-empty{color:var(--ink3);background:var(--bg2);border-color:var(--line1)}
+.ds-partial{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
+.ds-stale{color:#a35a00;background:#fdf4e6;border-color:#ebd3a7}
+.ds-unsupported{color:var(--ink4);background:transparent;border-color:var(--line1)}
+.ds-fresh{font-size:11px;color:var(--ink3)}
+.ds-fresh-ok{color:var(--ok)}
+.ds-fresh-stale{color:#a35a00}
+.ds-fresh-unk{color:var(--ink3)}
+.ds-gaps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.ds-gaps li{font-size:11px;color:#a35a00}
+.ds-evids{display:flex;gap:8px}
+.ds-card-acts{display:flex;gap:8px;flex-wrap:wrap}
+.ds-obs{border-top:1px dashed var(--line1);padding-top:6px}
+.ds-obs-sum{font-size:11px;color:var(--ink3);margin-bottom:4px}
+.ds-obs-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;max-height:240px;overflow:auto}
+.ds-obs-item{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.ds-obs-item .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.ds-obs-item .val{display:flex;gap:6px;align-items:center}
+.ds-obs-noprice{font-size:11px;color:var(--ink3)}
+.ds-obs-soldout{font-size:11px;color:var(--crisis)}
+.ds-obs-pager{display:flex;align-items:center;gap:8px;margin-top:6px}
+.ds-drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-end;justify-content:flex-end;z-index:60}
+.ds-drawer{background:var(--card);width:min(420px,92vw);max-height:80vh;overflow:auto;border-radius:12px 0 0 12px;padding:14px;border:1px solid var(--line1)}
+.ds-drawer-head{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:8px}
+.ds-drawer-body{display:flex;flex-direction:column;gap:6px}
+.ds-ev-row{display:flex;gap:10px;font-size:12px}
+.ds-ev-row .k{color:var(--ink3);min-width:64px}
+.ds-ev-row .num{word-break:break-all}
+.ds-ev-snaps{border-top:1px dashed var(--line1);padding-top:6px;display:flex;flex-direction:column;gap:6px}
+.ds-ev-snap{display:flex;gap:10px;font-size:12px;flex-wrap:wrap}
+.ds-ev-snap .k{color:var(--ink3);min-width:64px}
+
+/* ---------- Data Surface 整改轮新增（2026-10-18） ---------- */
+.ds-refreshing-tag{font-size:11px;color:var(--ink3);display:inline-flex;align-items:center;gap:3px;margin-left:6px}
+.ds-ident{display:inline-flex;flex-wrap:wrap;gap:2px 10px}
+.ds-ident-item{white-space:nowrap}
+.ds-agg-block{border-left:2px solid var(--line1);padding-left:8px;margin-top:4px}
+.ds-agg-cap{display:block;font-size:10px;color:var(--ink3);margin-bottom:1px}
+.ds-card-sum-unknown{color:var(--ink3)}
+.ds-note-warn{color:#a35a00}
+.ds-ev-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.ds-ev-tab{font-size:11px;padding:2px 8px;border:1px solid var(--line1);border-radius:10px;background:transparent;color:var(--ink3);cursor:pointer}
+.ds-ev-tab.on{border-color:var(--accent,#1d9e75);color:var(--accent,#1d9e75)}
+.ds-ev-snap-id{font-size:11px;color:var(--ink3);word-break:break-all}
+.ds-obs-cap{border-top:1px dashed var(--line1);padding-top:6px;margin-top:6px}
+.ds-obs-cap:first-child{border-top:none;padding-top:0;margin-top:0}
+.ds-obs-failnote{font-size:11px;color:#a35a00;margin:0 0 4px}
+.ds-obs-pub{font-size:11px;color:var(--ink3)}
+
+/* ---------- 核心产品主闭环（SC-04，2026-10-18） ---------- */
+.core-brands h2, .core-brand-detail h2, .core-page h2{margin:0 0 8px}
+.core-brand-list,.core-products,.core-tl ul,.core-intel,.core-dim-list,.core-report-list,.core-report-cit,.core-report-gaps,.core-opp-items,.core-opp-limits{list-style:none;margin:0;padding:0}
+.core-brand-list>li{border:1px solid var(--line1);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.core-brand-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.core-brand-head a{font-weight:600}
+.core-brand-domain,.core-brand-rel{color:var(--ink3);font-size:12px}
+.core-brand-cov{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--ink3);margin-top:4px}
+.core-brand-change{font-size:12px;margin:4px 0 0}
+.core-brand-gaps{display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--ink3);margin-top:4px}
+.core-brand-gaps li{display:flex;gap:4px}
+.core-dim-list>li{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;padding:6px 0;border-bottom:1px dashed var(--line1)}
+.core-dim-name{font-weight:600;min-width:120px}
+.core-dim-state{font-size:12px;padding:1px 6px;border-radius:10px;border:1px solid var(--line1)}
+.core-dim-unsupported .core-dim-state{color:var(--ink3)}
+.core-dim-at,.core-dim-note{font-size:11px;color:var(--ink3)}
+.core-products>li{display:flex;gap:12px;padding:4px 0;border-bottom:1px dashed var(--line1);font-size:13px}
+.core-tl ul>li{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--line1)}
+.core-tl-at{color:var(--ink3)}
+.core-tl-nature,.core-tl-kind{font-size:11px;color:var(--ink3);border:1px solid var(--line1);border-radius:8px;padding:0 6px}
+.core-intel>li{border:1px solid var(--line1);border-radius:8px;padding:8px 10px;margin-bottom:6px}
+.core-intel-head{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.core-intel-title{font-weight:600}
+.core-intel-nature,.core-intel-status,.core-intel-type{font-size:11px;color:var(--ink3);border:1px solid var(--line1);border-radius:8px;padding:0 6px}
+.core-intel-detail{font-size:12px;color:var(--ink3);margin:4px 0}
+.core-intel-acts{display:flex;gap:8px;align-items:center;margin-top:4px}
+.core-intel-noev{font-size:11px;color:var(--ink3)}
+.core-intel-ev{margin-top:6px;font-size:11px;color:var(--ink3);display:flex;flex-direction:column;gap:2px}
+.core-intel-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.core-report-acts{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.core-report-list>li,.core-report-cit>li{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--line1)}
+.core-report-status{font-size:11px;border:1px solid var(--line1);border-radius:8px;padding:0 6px}
+.core-report-md{white-space:pre-wrap;background:var(--bg2);border:1px solid var(--line1);border-radius:8px;padding:12px;font-size:13px;line-height:1.7;max-height:640px;overflow:auto}
+.core-report-meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--ink3);margin-bottom:6px}
+.core-err{color:#b3261e;font-size:12px}
+.core-opp-basis,.core-intel-section,.core-reports-section,.core-tl,.core-cov{border-top:1px solid var(--line1);margin-top:12px;padding-top:10px}
+.core-opp-caveat{font-size:11px;color:var(--ink3)}
+.core-opp-limits li{font-size:11px;color:var(--ink3)}
+
+/* ============================================================
+   SC-04 UI 框架轮（review/core-product-ui-framework）追加样式
+   延续既有视觉系统：青绿主色、细边框卡片、克制徽章；不做视觉重构。
+   ============================================================ */
+
+/* ---------- 顶部项目选择器 ---------- */
+.proj-picker{position:relative;display:inline-block;font-size:12px;margin-left:10px}
+.proj-picker summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line1);border-radius:999px;padding:4px 12px;color:var(--ink2);background:var(--bg2);max-width:280px}
+.proj-picker summary::-webkit-details-marker{display:none}
+.proj-picker summary:hover{border-color:var(--brand);color:var(--brand-hi)}
+.proj-picker-label{color:var(--ink3)}
+.proj-picker-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+.proj-picker-count{font-size:10.5px;color:var(--ink3);border:1px solid var(--line1);border-radius:8px;padding:0 5px}
+.proj-picker-menu{position:absolute;z-index:60;top:calc(100% + 6px);left:0;min-width:260px;max-width:340px;max-height:320px;overflow:auto;margin:0;padding:6px;list-style:none;background:var(--bg1,#fff);border:1px solid var(--line1);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.10)}
+.proj-picker-menu li{margin:0}
+.proj-picker-menu button{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;border:none;background:transparent;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--ink)}
+.proj-picker-menu button:hover{background:var(--bg2)}
+.proj-picker-menu button.on{background:rgba(29,158,117,.10);color:var(--brand)}
+.proj-picker-meta{font-size:11px;color:var(--ink3)}
+.proj-picker-empty{padding:10px;font-size:12px;color:var(--ink3)}
+
+/* ---------- 统一空状态 ---------- */
+.core-empty{border:1px dashed var(--line1);border-radius:10px;padding:26px 18px;text-align:center;margin:14px 0}
+.core-empty-title{font-weight:600;font-size:14px}
+.core-empty-sub{font-size:12px;color:var(--ink3);margin-top:6px;line-height:1.7}
+.core-empty-act{margin-top:10px}
+
+/* ---------- 竞品库：筛选与卡片 ---------- */
+.core-brand-filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 10px}
+.core-brand-filters input[type=search]{min-width:200px}
+.core-brand-filters input,.core-brand-filters select{border:1px solid var(--line1);border-radius:8px;padding:6px 10px;font-size:13px;background:var(--bg1,#fff);color:var(--ink)}
+.core-brand-count{font-size:12px;color:var(--ink3);margin-left:auto}
+.core-brand-card{display:flex;flex-direction:column;gap:4px}
+.core-brand-foot{display:flex;justify-content:flex-end;margin-top:4px}
+.core-brand-open{border:1px solid var(--brand);color:var(--brand)}
+.core-brand-nodynamic{color:var(--ink3)}
+.core-cover-badge{font-size:11px;border-radius:10px;padding:1px 8px;border:1px solid var(--line1);font-weight:600}
+.core-cover-hasData{color:var(--brand);border-color:var(--brand);background:rgba(29,158,117,.08)}
+.core-cover-partial{color:#8a6a1f;border-color:#d9c08a;background:rgba(217,192,138,.12)}
+.core-cover-collecting{color:#1f6fb2;border-color:#8fb8e0;background:rgba(31,111,178,.08)}
+.core-cover-failed{color:#b3261e;border-color:#e0a3a0;background:rgba(179,38,30,.06)}
+.core-cover-notCollected,.core-cover-notIntegrated{color:var(--ink3);border-color:var(--line1)}
+
+/* ---------- 品牌详情 Tabs ---------- */
+.core-tabs{display:flex;gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--line1);margin:10px 0 12px;overflow-x:auto}
+.core-tab{border:none;background:transparent;padding:8px 14px;font-size:13px;color:var(--ink2);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+.core-tab:hover{color:var(--brand-hi)}
+.core-tab.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
+.core-sec{padding:4px 0 8px}
+.core-sec h3{margin:6px 0 8px}
+.core-sec ul{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.9}
+
+/* ---------- 时间线状态与证据 ---------- */
+.core-tl-item{padding:4px 0;border-bottom:1px dashed var(--line1);display:flex;flex-direction:column;gap:3px}
+.core-tl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.core-tl-status{font-size:11px;border-radius:8px;padding:0 6px;border:1px solid var(--line1)}
+.core-tl-status-ok{color:var(--brand);border-color:var(--brand)}
+.core-tl-status-warn{color:#8a6a1f;border-color:#d9c08a}
+.core-tl-status-bad{color:var(--ink3);border-color:var(--line1)}
+.core-tl-detail{font-size:12px;color:var(--ink3)}
+.core-tl-acts{display:flex;gap:8px}
+.core-tl-ev{margin:2px 0 4px;font-size:11px;color:var(--ink3);display:flex;flex-direction:column;gap:2px;list-style:none;padding-left:8px}
+
+/* ---------- 情报收件箱 ---------- */
+.core-inbox-sum{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 2px}
+.core-sum-item{font-size:12px;color:var(--ink3);border:1px solid var(--line1);border-radius:8px;padding:3px 10px}
+.core-sum-item b{font-size:14px;margin-left:2px}
+.core-sum-ok{color:var(--brand);border-color:var(--brand)}
+.core-sum-warn{color:#8a6a1f;border-color:#d9c08a}
+.core-filter-sep{font-size:12px;color:var(--ink3)}
+.core-inbox-poor{font-size:12px;color:#8a6a1f;background:rgba(217,192,138,.10);border:1px solid #d9c08a;border-radius:8px;padding:8px 10px}
+
+/* ---------- 建设中维度区域 ---------- */
+.core-building{border:1px dashed var(--line1);border-radius:10px;padding:10px 12px;margin-top:10px}
+.core-building-head{font-weight:600;font-size:13px;margin-bottom:4px}
+.core-building-list{list-style:none;margin:6px 0 0;padding:0}
+.core-building-list>li{display:flex;gap:10px;flex-wrap:wrap;align-items:baseline;padding:5px 0;border-bottom:1px dashed var(--line1);font-size:12px}
+.core-building-list>li:last-child{border-bottom:none}
+.core-building-name{font-weight:600;min-width:110px}
+.core-building-state{font-size:11px;color:var(--ink3);border:1px solid var(--line1);border-radius:8px;padding:0 6px}
+.core-building-meta{font-size:11px;color:var(--ink3)}
+
+/* ---------- 机会视图数据基础 ---------- */
+.core-opp-theme{font-weight:600}
+.core-opp-basisline,.core-opp-items .core-opp-link{font-size:12px}
+.core-opp-link{color:var(--brand)}
+.core-opp-insufficient{border:1px solid #d9c08a;background:rgba(217,192,138,.08);border-radius:10px;padding:10px 12px;margin-top:8px}
+.core-opp-insufficient-title{font-weight:600;color:#8a6a1f;margin:0 0 4px}
+.core-opp-building{margin-top:8px}
+
+/* ---------- 报告：生成表单 / 范围 / 结构化标记 ---------- */
+.core-report-form{border:1px solid var(--line1);border-radius:10px;padding:12px;margin:8px 0}
+.core-form-row{display:flex;gap:10px;margin-bottom:10px;align-items:flex-start}
+.core-form-k{font-size:13px;font-weight:600;min-width:70px;padding-top:6px}
+.core-form-v{flex:1;font-size:13px}
+.core-form-inline{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.core-form-inline input[type=date]{border:1px solid var(--line1);border-radius:8px;padding:4px 8px;font-size:12.5px}
+.core-check-list{list-style:none;margin:0 0 4px;padding:0;display:flex;flex-direction:column;gap:4px}
+.core-check-inline{flex-direction:row;flex-wrap:wrap;gap:10px}
+.core-check-list label{display:inline-flex;gap:5px;align-items:center;font-size:13px;cursor:pointer}
+.core-report-scope{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--ink3);margin:4px 0 8px}
+.core-report-structured{font-size:12px;color:#8a6a1f;background:rgba(217,192,138,.10);border:1px solid #d9c08a;border-radius:8px;padding:8px 10px;margin:6px 0}
+.core-report-retry{color:#8a6a1f;font-size:11px}
+.core-report-md-render{white-space:normal;background:transparent;border:none;padding:0;max-height:none}
+.core-cite-link{color:var(--brand);font-size:11px}
+.core-report-status.core-report-retrying{color:#8a6a1f;border-color:#d9c08a}
+
+/* ---------- 移动端与窄屏 ---------- */
+@media (max-width: 820px){
+  .proj-picker summary{max-width:150px}
+  .proj-picker-name{max-width:80px}
+  .core-brand-count{margin-left:0;width:100%}
+  .core-form-row{flex-direction:column;gap:4px}
+  .core-form-k{padding-top:0}
+  .core-tabs{gap:0}
+  .core-tab{padding:8px 10px;font-size:12.5px}
+  .core-inbox-sum{gap:6px}
+}
+
+/* r4.10：情报库底部建设中维度折叠区域（项目级、去重、无事件字段） */
+.core-building-fold{margin-top:16px}
+.core-building-fold>summary{cursor:pointer;font-weight:600;font-size:13px;user-select:none}
+.core-building-msg{color:var(--txt2, #666)}

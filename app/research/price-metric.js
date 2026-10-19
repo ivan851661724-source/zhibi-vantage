@@ -93,10 +93,16 @@ function recordPriceMetric(input = {}) {
   if (!collectionIds.length) return fail('no_collection_snapshots');
   const collection = [], pages = new Map(), rawProducts = new Map(), collectionIssues = [];
   let scope = null, partial = false;
-  const checkScope = (s, expectedPath) => {
+  // 合流：SC-02 r3 后页级快照只记页事实（success），扫描级 partial 由调用方经
+  // scanMeta 显式传入——枚举不完整不得谎报完整覆盖（05 §5.2 冻结术语）。
+  if (input.partialScan === true) {
+    partial = true;
+    if (input.partialScanReason) collectionIssues.push({ snapshot_id: null, source_status: null, reason: input.partialScanReason, empty: false });
+  }
+  const checkScope = (s, expectedPath, expectedCapability) => {
     if (tenant(s) !== tenantId) return 'snapshot_tenant_mismatch';
     const host = sourceHost(s, expectedPath);
-    if (!host || !s.fetched_at || s.capability !== 'product_catalog') return 'snapshot_scope_invalid';
+    if (!host || !s.fetched_at || s.capability !== (expectedCapability || 'product_catalog')) return 'snapshot_scope_invalid';
     const current = { domain: host, fetched_at: s.fetched_at, project_ref: project(s) };
     if (scope && !equal(scope, current)) return 'snapshot_scope_mismatch';
     scope = current; return null;
@@ -137,9 +143,9 @@ function recordPriceMetric(input = {}) {
   if (input.currencySnapshotId) {
     currencySnapshot = Snapshot.getById(tenantId, input.currencySnapshotId);
     if (!currencySnapshot) return fail('currency_snapshot_not_found');
-    const error = checkScope(currencySnapshot, '/cart.js');
+    const error = checkScope(currencySnapshot, '/cart.js', 'storefront_currency');
     if (error) return fail(error);
-    if (currencySnapshot.provider !== 'shopify_cart_json') return fail('currency_snapshot_source_mismatch');
+    if (currencySnapshot.provider !== 'shopify_cart_js_json' || currencySnapshot.capability !== 'storefront_currency') return fail('currency_snapshot_source_mismatch');
     if (currencySnapshot.source_status === 'success') {
       const c = replay(currencySnapshot);
       if (!c.error && typeof c.json?.currency === 'string' && /^[A-Za-z]{3}$/.test(c.json.currency)) {
@@ -182,7 +188,7 @@ function recordPriceMetric(input = {}) {
         if (!s) return fail('support_snapshot_not_found');
         if (tenant(s) !== tenantId) return fail('snapshot_tenant_mismatch');
         const isCurrency = sid === input.currencySnapshotId;
-        const scopeError = checkScope(s, isCurrency ? '/cart.js' : '/products.json');
+        const scopeError = checkScope(s, isCurrency ? '/cart.js' : '/products.json', isCurrency ? 'storefront_currency' : undefined);
         if (scopeError) return fail(scopeError);
         if (isCurrency) {
           if (!sourceCurrency || f.currency !== sourceCurrency) return fail('currency_provenance_mismatch');

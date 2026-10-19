@@ -11,7 +11,6 @@ delete process.env.MT_STORE_PATH; delete process.env.OBS_DB_PATH;
 process.env.MT_STORE_PATH = path.join(TMP, 'tenants.json');
 process.env.OBS_DB_PATH = path.join(TMP, 'observability.db');
 process.env.CACHE_ENABLED = '0';
-const originalFetch = global.fetch;
 const originalLookup = dns.promises.lookup;
 const originalTimeout = global.setTimeout;
 dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
@@ -31,13 +30,31 @@ const product = id => ({ id, title: 'Product ' + id, variants: [{ id: id * 10, p
 const firstPage = JSON.stringify({ products: Array.from({ length: 250 }, (_, i) => i === 0 ? product(1) : { id: i + 1, title: 'No public price ' + i, variants: [] }) });
 const secondPage = '{ "products": [' + JSON.stringify(product(251)) + '] }\n';
 let route;
-global.fetch = async (input) => {
-  const url = new URL(String(input));
-  if (url.pathname === '/cart.js') return new Response('{"currency":"USD"}');
-  assert.equal(url.hostname, 'example.com');
-  assert.equal(url.pathname, '/products.json');
-  return route(Number(url.searchParams.get('page')));
+// SC-02 r3：net.js 经 safeRequest（node:https 直连）抓取，打桩从 global.fetch 下沉到 https.request。
+// route(page) 返回 { status?, body? }；error/Error 抛出该页网络异常。
+const httpsMod = require('node:https');
+const { EventEmitter } = require('events');
+const routeStub = function (opts, cb) {
+  const req = new EventEmitter();
+  req.setTimeout = () => {}; req.destroy = () => {};
+  req.end = () => {
+    const url = new URL('https://' + (opts.hostname || opts.host) + (opts.path || '/'));
+    let r;
+    if (url.pathname === '/cart.js') r = { body: '{"currency":"USD"}' };
+    else {
+      assert.equal(url.hostname, 'example.com');
+      assert.equal(url.pathname, '/products.json');
+      r = route(Number(url.searchParams.get('page')));
+    }
+    if (r && r.error) { process.nextTick(() => req.emit('error', r.error)); return; }
+    const res = new EventEmitter();
+    res.statusCode = r && r.status != null ? r.status : 200;
+    res.headers = { 'content-type': 'application/json' };
+    process.nextTick(() => { cb(res); if (r && r.body != null) res.emit('data', Buffer.from(r.body)); res.emit('end'); });
+  };
+  return req;
 };
+httpsMod.request = routeStub;
 let passed = 0, failed = 0;
 async function t(name, fn) {
   try { await fn(); passed++; console.log('ok - ' + name); }
@@ -61,16 +78,16 @@ async function t(name, fn) {
     assert.equal(comp.priceMetric.metric_id, metricId, 'duplicate Facts still participate in Metric retry');
   });
   await t('251款两页均保留原始字节与SC-01，单snapshotId兼容首页', async () => {
-    route = page => new Response(page === 1 ? firstPage : secondPage);
+    route = page => ({ body: page === 1 ? firstPage : secondPage });
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA, projectRef: 'p1' });
     assert.equal(out.total, 251);
     assert.equal(out.partialScan, false);
     assert.equal(out.partialScanReason, null);
-    assert.equal(out.snapshotIds?.length, 2, '每个实际响应都能回放');
+    assert.equal(out.snapshotIds?.length, 2, '每个成功页都能回放');
     assert.equal(out.snapshotId, out.snapshotIds[0]);
     for (const [i, sid] of out.snapshotIds.entries()) {
       const meta = Snapshot.getById(TA, sid);
-      assert.equal(meta.partial_scan, false);
+      assert.equal(meta.partial_scan, null, '页级快照不声明扫描级枚举状态（扫描级在返回值/summary）');
       assert.equal(meta.source_status, 'success');
       assert.equal(new URL(meta.source_url).searchParams.get('page'), String(i + 1));
       assert.equal(meta.collector_version, 'net-1');
@@ -101,71 +118,66 @@ async function t(name, fn) {
     assert.equal(Fact.findFactsBySnapshot(TA, out.snapshotIds[1]).length, 1);
   });
   await t('后续页403保留成功页证据并标partial_scan，不当完整覆盖', async () => {
-    route = page => page === 1 ? new Response(firstPage) : new Response('blocked', { status: 403 });
+    route = page => page === 1 ? { body: firstPage } : { status: 403, body: 'blocked' };
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
     assert.equal(out.total, 250);
     assert.equal(out.partialScan, true);
     assert.equal(out.partialScanReason, 'products_json_page_2_http_403');
-    assert.equal(out.snapshotIds?.length, 2);
+    assert.deepEqual(out.failedPage, { page: 2, reason: 'products_json_page_2_http_403' });
+    assert.equal(out.snapshotIds?.length, 1, 'SC-02 r3：后续页失败不落页快照，结构化 failedPage 承载');
     const meta = Snapshot.getById(TA, out.snapshotId);
-    assert.equal(meta.source_status, 'partial');
-    assert.equal(meta.partial_scan, true);
-    assert.equal(meta.partial_scan_reason, 'products_json_page_2_http_403');
+    assert.equal(meta.source_status, 'success', '页级快照=页事实；扫描级 partial 在返回值/summary/Metric');
     assert.equal(Snapshot.readRawPayload(meta).toString(), firstPage);
-    const failure = Snapshot.getById(TA, out.snapshotIds[1]);
-    assert.equal(failure.source_url, 'https://example.com/products.json?limit=250&page=2');
-    assert.equal(failure.http_status, 403);
-    assert.equal(failure.source_status, 'blocked');
-    assert.equal(Snapshot.readRawPayload(failure).toString(), 'blocked');
+    assert.equal(out.currency, 'USD', 'cart 正常时币种仍可追溯');
     const comp = { id: 'partial', name: 'Partial' };
     Enrich.persistShopifyPriceEvidence({ tenantId: TA }, comp, out, 'example.com');
     assert.equal(comp.shopifyPartialScan, true);
     assert.equal(comp.shopifyPartialScanReason, 'products_json_page_2_http_403');
-    assert.equal(comp.evidenceExtract.unavailable, true);
-    const unavailable = Evidence.findEvidenceBySnapshot(TA, out.snapshotIds[1]);
-    assert.equal(unavailable.length, 1);
-    assert.equal(unavailable[0].evidence_status, 'unavailable');
-    assert.equal(unavailable[0].extracted_value, null);
-    assert.equal(Fact.findFactsBySnapshot(TA, out.snapshotIds[1]).length, 0);
-    assert.equal(comp.priceMetric.partial_scan, true);
-    assert.equal(Metric.getMetricById(TA, comp.priceMetric.metric_id).collection_snapshot_ids.length, 2);
+    assert.equal(comp.evidenceExtract.unavailable, false, '成功页证据不受失败页影响');
+    const ev = Evidence.findEvidenceBySnapshot(TA, out.snapshotIds[0]);
+    assert.equal(ev.length, 1);
+    assert.equal(ev[0].evidence_status, 'verified');
+    assert.equal(Fact.findFactsBySnapshot(TA, out.snapshotIds[0]).length, 1);
+    assert.equal(comp.priceMetric.partial_scan, true, '扫描级 partial 经 scanMeta 传入 Metric，不谎报完整覆盖');
+    assert.equal(Metric.getMetricById(TA, comp.priceMetric.metric_id).collection_snapshot_ids.length, 1);
     Enrich.persistShopifyPriceEvidence({ tenantId: TA }, comp, { partialScan: false, partialScanReason: null }, 'example.com');
     assert.equal(comp.shopifyPartialScan, false, '重研不能残留上一轮partial标记');
     assert.equal(comp.shopifyPartialScanReason, null);
     assert.equal(comp.priceMetric, null, 'no new snapshots clears previous Metric reference');
   });
-  await t('后续页JSON损坏仍保留已接收raw，成功页可产Fact，坏页不造数', async () => {
+  await t('后续页JSON损坏保留成功页raw与Fact，失败页结构化不造数', async () => {
     const broken = '{ "products": [ invalid JSON';
-    route = page => new Response(page === 1 ? firstPage : broken);
+    route = page => page === 1 ? { body: firstPage } : { body: broken };
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TB });
     assert.equal(out.total, 250);
-    assert.equal(out.snapshotIds?.length, 2);
+    assert.equal(out.snapshotIds?.length, 1);
+    assert.equal(out.partialScan, true);
+    assert.equal(out.partialScanReason, 'products_json_page_2_parse_failed');
+    assert.deepEqual(out.failedPage, { page: 2, reason: 'products_json_page_2_parse_failed' });
     const success = Snapshot.getById(TB, out.snapshotId);
-    assert.equal(success.partial_scan, true);
-    const failure = Snapshot.getById(TB, out.snapshotIds[1]);
-    assert.equal(failure.source_status, 'parse_failed');
-    assert.equal(Snapshot.readRawPayload(failure).toString(), broken);
-    assert.ok(failure.observed_at, '已接收的内容确实被观察');
+    assert.equal(success.source_status, 'success');
+    assert.equal(Snapshot.readRawPayload(success).toString(), firstPage);
     const comp = { id: 'bad-json', name: 'Bad JSON' };
     Enrich.persistShopifyPriceEvidence({ tenantId: TB }, comp, out, 'example.com');
-    assert.equal(comp.evidenceExtract.unavailable, true);
+    assert.equal(comp.evidenceExtract.unavailable, false);
     assert.equal(comp.factExtract.fact_count, 1, '仅成功页有可派生价格');
-    assert.equal(Fact.findFactsBySnapshot(TB, out.snapshotIds[1]).length, 0);
   });
   await t('四页预算耗尽每页都有raw且整轮维持partial_scan', async () => {
-    route = page => new Response(JSON.stringify({ products: Array.from({ length: 250 }, (_, i) => product(page * 1000 + i)) }));
+    route = page => ({ body: JSON.stringify({ products: Array.from({ length: 250 }, (_, i) => product(page * 1000 + i)) }) });
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
     assert.equal(out.total, 1000);
+    assert.equal(out.truncated, true);
+    assert.equal(out.partialScan, true);
+    assert.equal(out.partialScanReason, 'products_json_pagination_budget_250x4_exhausted');
     assert.equal(out.snapshotIds?.length, 4);
     for (const sid of out.snapshotIds) {
       const meta = Snapshot.getById(TA, sid);
-      assert.equal(meta.partial_scan, true);
-      assert.equal(meta.partial_scan_reason, 'products_json_pagination_budget_250x4_exhausted');
+      assert.equal(meta.source_status, 'success');
       assert.ok(Snapshot.readRawPayload(meta));
     }
   });
   await t('首页失败保留单snapshotId与unavailable Evidence而不造Fact', async () => {
-    route = () => new Response('blocked', { status: 403 });
+    route = () => ({ status: 403, body: 'blocked' });
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
     assert.equal(out.ok, false);
     assert.deepEqual(out.snapshotIds, [out.snapshotId]);
@@ -176,47 +188,71 @@ async function t(name, fn) {
     assert.equal(comp.factExtract.fact_count, 0);
     assert.equal(comp.priceMetric, null, 'all-source failure clears old Metric reference');
   });
-  await t('首页与后续页403/429/500分别保留真实raw/status/页URL和失败Evidence', async () => {
+  await t('首页失败落元数据快照；后续页失败结构化failedPage且成功页证据完整', async () => {
     for (const pageNumber of [1, 2]) {
       for (const [status, sourceStatus] of [[403, 'blocked'], [429, 'rate_limited'], [500, 'unavailable']]) {
         const tid = `tenant:t1-http-${pageNumber}-${status}`;
         const body = `HTTP ${status} on page ${pageNumber}\n`;
-        route = page => page === pageNumber ? new Response(body, { status }) : new Response(firstPage);
+        route = page => page === pageNumber ? { status, body } : { body: firstPage };
         const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: tid });
-        assert.equal(out.snapshotIds.length, pageNumber);
-        assert.equal(out.snapshotId, out.snapshotIds[0]);
-        const failedId = out.snapshotIds[pageNumber - 1];
-        const meta = Snapshot.getById(tid, failedId);
-        assert.equal(meta.source_url, `https://example.com/products.json?limit=250&page=${pageNumber}`);
-        assert.equal(meta.http_status, status);
-        assert.equal(meta.source_status, sourceStatus);
-        assert.equal(Snapshot.readRawPayload(meta)?.toString(), body);
-        const comp = { id: 'http-error', name: 'HTTP error' };
-        Enrich.persistShopifyPriceEvidence({ tenantId: tid }, comp, out, 'example.com');
-        const ev = Evidence.findEvidenceBySnapshot(tid, failedId);
-        assert.equal(ev.length, 1);
-        assert.equal(ev[0].evidence_status, 'unavailable');
-        assert.equal(Fact.findFactsBySnapshot(tid, failedId).length, 0);
-        assert.equal(comp.factExtract.fact_count, pageNumber === 1 ? 0 : 1);
+        if (pageNumber === 1) {
+          // 首页失败：recFail 元数据快照（SC-02 r3：失败响应不保留 body raw），Evidence 诚实 unavailable。
+          assert.equal(out.ok, false);
+          assert.equal(out.snapshotIds.length, 1);
+          assert.equal(out.snapshotId, out.snapshotIds[0]);
+          const meta = Snapshot.getById(tid, out.snapshotIds[0]);
+          assert.equal(meta.source_url, 'https://example.com/products.json?limit=250&page=1');
+          assert.equal(meta.http_status, status);
+          assert.equal(meta.source_status, sourceStatus);
+          assert.equal(meta.raw_payload_ref, null, '元数据快照不保留失败响应 body');
+          const comp = { id: 'http-error', name: 'HTTP error' };
+          Enrich.persistShopifyPriceEvidence({ tenantId: tid }, comp, out, 'example.com');
+          const ev = Evidence.findEvidenceBySnapshot(tid, out.snapshotIds[0]);
+          assert.equal(ev.length, 1);
+          assert.equal(ev[0].evidence_status, 'unavailable');
+          assert.equal(Fact.findFactsBySnapshot(tid, out.snapshotIds[0]).length, 0);
+          assert.equal(comp.factExtract.fact_count, 0);
+        } else {
+          // 后续页失败：已成功页证据/Fact 完整，失败页走结构化 failedPage。
+          assert.equal(out.ok, true);
+          assert.equal(out.total, 250);
+          assert.equal(out.partialScan, true);
+          assert.equal(out.partialScanReason, `products_json_page_2_http_${status}`);
+          assert.deepEqual(out.failedPage, { page: 2, reason: `products_json_page_2_http_${status}` });
+          assert.equal(out.snapshotIds.length, 1);
+          const comp = { id: 'http-error', name: 'HTTP error' };
+          Enrich.persistShopifyPriceEvidence({ tenantId: tid }, comp, out, 'example.com');
+          assert.equal(comp.factExtract.fact_count, 1);
+          assert.equal(Evidence.findEvidenceBySnapshot(tid, out.snapshotIds[0])[0].evidence_status, 'verified');
+        }
       }
     }
   });
-  await t('首页与后续页网络异常无body仍保留该页失败metadata', async () => {
+  await t('首页网络异常整体失败落元数据快照；后续页网络异常结构化failedPage', async () => {
     for (const pageNumber of [1, 2]) {
       const tid = `tenant:t1-net-${pageNumber}`;
-      route = page => { if (page === pageNumber) throw new Error('network_down'); return new Response(firstPage); };
+      route = page => { if (page === pageNumber) return { error: new Error('network_down') }; return { body: firstPage }; };
       const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: tid });
-      assert.equal(out.snapshotIds.length, pageNumber);
-      const failedId = out.snapshotIds[pageNumber - 1];
-      const meta = Snapshot.getById(tid, failedId);
-      assert.equal(meta.source_url, `https://example.com/products.json?limit=250&page=${pageNumber}`);
-      assert.equal(meta.source_status, 'internal_error', '保留既有异常分类；Evidence层映射为unavailable');
-      assert.equal(meta.http_status, null);
-      assert.equal(meta.raw_payload_ref, null);
-      assert.equal(meta.observed_at, null);
+      if (pageNumber === 1) {
+        // 首页网络异常：整体失败路径，recFail 落基础 URL 元数据快照（无 page 查询参数）。
+        assert.equal(out.ok, false);
+        assert.equal(out.snapshotIds.length, 1);
+        const meta = Snapshot.getById(tid, out.snapshotIds[0]);
+        assert.equal(meta.source_url, 'https://example.com/products.json');
+        assert.equal(meta.source_status, 'internal_error', '保留既有异常分类；Evidence层映射为unavailable');
+        assert.equal(meta.http_status, null);
+        assert.equal(meta.raw_payload_ref, null);
+        assert.equal(meta.observed_at, null);
+      } else {
+        assert.equal(out.ok, true);
+        assert.equal(out.partialScan, true);
+        assert.equal(out.partialScanReason, 'products_json_page_2_error');
+        assert.deepEqual(out.failedPage, { page: 2, reason: 'products_json_page_2_error' });
+        assert.equal(out.snapshotIds.length, 1);
+      }
       const comp = { id: 'network-error', name: 'Network error' };
       Enrich.persistShopifyPriceEvidence({ tenantId: tid }, comp, out, 'example.com');
-      assert.equal(Evidence.findEvidenceBySnapshot(tid, failedId)[0].evidence_status, 'unavailable');
+      assert.equal(Evidence.findEvidenceBySnapshot(tid, out.snapshotIds[0])[0].evidence_status, pageNumber === 1 ? 'unavailable' : 'verified');
     }
   });
   await t('partial目录摘录及分析证据保留已观察范围和原因，完整目录文案兼容', async () => {
@@ -233,9 +269,10 @@ async function t(name, fn) {
   await t('重研开始即清旧Metric，抓取使用实际tenant/project；抓取抛错也不留旧引用', async () => {
     const comp = { id: 'restart', name: 'Restart', url: 'https://example.com', priceMetric: { metric_id: 'old' } };
     const state = { tenantId: TA, projectId: 'restart-project', competitors: [comp] };
-    global.fetch = async () => { throw new Error('all_sources_down'); };
+    httpsMod.request = () => { throw new Error('all_sources_down'); };
     // Stop after the real fetch stage; search/LLM may fail, but no live network runs.
     try { await Enrich.deepResearchOne(comp, state, { search: { provider: 'none' }, llm: { apiKey: '' } }); } catch (_) {}
+    finally { httpsMod.request = routeStub; }
     assert.equal(comp.priceMetric, null);
     const catalog = [];
     function visit(dir) { if (!fs.existsSync(dir)) return; for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -273,7 +310,7 @@ async function t(name, fn) {
     assert.equal(comp.factExtract.comparisons[1].reason,'no_previous_fact');assert.equal(calls,2);
   });
 })().catch(e => { failed++; console.error(e); }).finally(() => {
-  global.fetch = originalFetch;
+  httpsMod.request = routeStub;
   dns.promises.lookup = originalLookup;
   global.setTimeout = originalTimeout;
   require('../observability/telemetry.js')._resetForTest();

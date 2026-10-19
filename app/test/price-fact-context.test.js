@@ -33,7 +33,7 @@ function snapshot(body, overrides = {}) {
     observed_at: WHEN, fetched_at: WHEN, projectRef: 'project-one', bodyBytes: body == null ? null : Buffer.from(body), ...overrides }).meta;
 }
 function cart(overrides = {}, body = '{ "currency": "USD" }\n') {
-  return snapshot(body, { provider: 'shopify_cart_json', source_url: 'https://example.com/cart.js', ...overrides });
+  return snapshot(body, { provider: 'shopify_cart_js_json', capability: 'storefront_currency', source_url: 'https://example.com/cart.js', ...overrides });
 }
 function extract(s, c, extra = {}) {
   return Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: s.snapshot_id,
@@ -164,64 +164,101 @@ t('availability-only change keeps raw price comparison and generates no price ev
   assert.equal(d.meta.status, 'no_meaningful_change');
   assert.equal(Event.recordPriceChangeEvent({ tenantId: TA, diffId: d.meta.diff_id }).recorded, false);
 });
-const originalFetch = global.fetch, originalLookup = dns.promises.lookup;
+const originalLookup = dns.promises.lookup;
+const httpsMod = require('node:https');
+const { EventEmitter } = require('events');
+const originalRequest = httpsMod.request;
+// SC-02 r3：net.js 经 safeRequest（node:https 直连）抓取，打桩下沉到 https.request。
+// respond(status, body, headers) 组装一次响应；不返回则按 200/空体处理。
+function stubHttps(route) {
+  httpsMod.request = function (opts, cb) {
+    const req = new EventEmitter();
+    req.setTimeout = () => {}; req.destroy = () => {};
+    req.end = () => {
+      const u = new URL('https://' + (opts.hostname || opts.host) + (opts.path || '/'));
+      let r = null;
+      try { r = route(u, req) || {}; } catch (e) { process.nextTick(() => req.emit('error', e)); return; }
+      if (r.error) { process.nextTick(() => req.emit('error', r.error)); return; }
+      const res = new EventEmitter();
+      res.statusCode = r.status == null ? 200 : r.status;
+      res.headers = Object.assign({ 'content-type': 'application/json' }, r.headers);
+      process.nextTick(() => { cb(res); if (r.body != null) res.emit('data', Buffer.from(r.body)); res.emit('end'); });
+    };
+    return req;
+  };
+}
 t('existing cart request stores exact raw and returns separate currencySnapshotId without extra HTTP calls', async () => {
   dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
   const cartRaw = '{  "currency" : "usd", "items": [] }\n'; const calls = [];
-  global.fetch = async input => { const u = new URL(String(input)); calls.push(u.pathname);
-    return new Response(u.pathname === '/cart.js' ? cartRaw : rawProducts, { headers: { 'content-type': 'application/json' } }); };
-  const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA, projectRef: 'network-project' });
-  assert.equal(out.currency, 'USD'); assert.equal(calls.length, 2);
-  assert.deepEqual(calls.slice().sort(), ['/cart.js', '/products.json']);
-  assert.ok(out.currencySnapshotId); assert.deepEqual(out.snapshotIds, [out.snapshotId]);
-  const c = Snapshot.getById(TA, out.currencySnapshotId), s = Snapshot.getById(TA, out.snapshotId);
-  assert.equal(Snapshot.readRawPayload(c).toString(), cartRaw);
-  assert.equal(c.fetched_at, s.fetched_at); assert.equal(c.tenant.project_ref, 'network-project');
-  assert.equal(c.parser_version, null); assert.equal(c.source_status, 'success');
-  assert.equal(evOf(Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: out.snapshotId,
-    currencySnapshotId: out.currencySnapshotId, projectRef: 'network-project' })).currency, 'USD');
+  stubHttps(u => { calls.push(u.pathname);
+    return { body: u.pathname === '/cart.js' ? cartRaw : rawProducts }; });
+  try {
+    const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA, projectRef: 'network-project' });
+    assert.equal(out.currency, 'USD'); assert.equal(calls.length, 2);
+    assert.deepEqual(calls.slice().sort(), ['/cart.js', '/products.json']);
+    assert.ok(out.currencySnapshotId); assert.deepEqual(out.snapshotIds, [out.snapshotId]);
+    const c = Snapshot.getById(TA, out.currencySnapshotId), s = Snapshot.getById(TA, out.snapshotId);
+    assert.equal(Snapshot.readRawPayload(c).toString(), cartRaw);
+    assert.equal(c.fetched_at, s.fetched_at); assert.equal(c.tenant.project_ref, 'network-project');
+    assert.equal(c.parser_version, null); assert.equal(c.source_status, 'success');
+    assert.equal(evOf(Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: out.snapshotId,
+      currencySnapshotId: out.currencySnapshotId, projectRef: 'network-project' })).currency, 'USD');
+  } finally { httpsMod.request = originalRequest; }
 });
 t('HTTP/parse/network cart failure snapshots retain failure/raw and never provide fake currency', async () => {
   for (const kind of ['http', 'parse', 'network']) {
-    global.fetch = async input => { const u = new URL(String(input));
-      if (u.pathname !== '/cart.js') return new Response(rawProducts);
-      if (kind === 'network') throw new Error('cart_down');
-      return new Response(kind === 'parse' ? 'broken JSON' : 'blocked', { status: kind === 'http' ? 403 : 200 }); };
-    const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
-    assert.equal(out.currency, null); assert.ok(out.currencySnapshotId);
-    const c = Snapshot.getById(TA, out.currencySnapshotId);
-    assert.equal(c.source_status, { http: 'blocked', parse: 'parse_failed', network: 'internal_error' }[kind]);
-    assert.equal(c.raw_payload_ref === null, kind === 'network');
-    assert.equal(out.snapshotIds.length, 1);
+    stubHttps(u => {
+      if (u.pathname !== '/cart.js') return { body: rawProducts };
+      if (kind === 'network') return { error: new Error('cart_down') };
+      return kind === 'parse' ? { body: 'broken JSON' } : { status: 403, body: 'blocked' };
+    });
+    try {
+      const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
+      assert.equal(out.currency, null); assert.ok(out.currencySnapshotId);
+      const c = Snapshot.getById(TA, out.currencySnapshotId);
+      assert.equal(c.source_status, { http: 'blocked', parse: 'parse_failed', network: 'internal_error' }[kind]);
+      assert.equal(c.raw_payload_ref === null, kind === 'network');
+      assert.equal(out.snapshotIds.length, 1);
+    } finally { httpsMod.request = originalRequest; }
   }
 });
 t('product first-page parse failure still completes and exposes existing cart snapshot', async () => {
-  global.fetch = async input => new Response(new URL(String(input)).pathname === '/cart.js' ? '{"currency":"USD"}' : 'broken');
-  const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
-  assert.equal(out.ok, false); assert.ok(out.currencySnapshotId);
-  assert.equal(Snapshot.getById(TA, out.currencySnapshotId).source_status, 'success');
-});
-t('network captures actual final URLs so cross-domain cart or product responses cannot prove same-shop currency', async () => {
-  for (const crossPath of ['/cart.js', '/products.json']) {
-    global.fetch = async input => { const u = new URL(String(input));
-      const response = new Response(u.pathname === '/cart.js' ? '{"currency":"USD"}' : rawProducts);
-      Object.defineProperty(response, 'url', { value: `https://${u.pathname === crossPath ? 'elsewhere.com' : 'example.com'}${u.pathname}` });
-      return response;
-    };
+  stubHttps(u => ({ body: u.pathname === '/cart.js' ? '{"currency":"USD"}' : 'broken' }));
+  try {
     const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
-    const sm = Snapshot.getById(TA, out.snapshotId), cm = Snapshot.getById(TA, out.currencySnapshotId);
-    assert.equal(sm.final_url, `https://${crossPath === '/products.json' ? 'elsewhere.com' : 'example.com'}/products.json`);
-    assert.equal(cm.final_url, `https://${crossPath === '/cart.js' ? 'elsewhere.com' : 'example.com'}/cart.js`);
-    const r = Extract.extractShopifyPriceEvidence({ tenantId: TA, snapshotId: out.snapshotId, currencySnapshotId: out.currencySnapshotId });
-    assert.equal(r.ok, false); assert.equal(r.reason, 'currency_snapshot_domain_mismatch');
-    if (crossPath === '/cart.js') assert.equal(out.currency, null);
-  }
+    assert.equal(out.ok, false); assert.ok(out.currencySnapshotId);
+    assert.equal(Snapshot.getById(TA, out.currencySnapshotId).source_status, 'success');
+  } finally { httpsMod.request = originalRequest; }
+});
+t('provenance stays pinned to validated request URLs; redirects are re-validated per hop', async () => {
+  dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
+  // 公网 302（cart → elsewhere 公网）：逐跳校验后跟随；快照 source_url 仍钉在请求 URL，
+  // final_url 不伪造（SC-02 r3：无逐跳 final 记录时宁缺毋假）。
+  let hop = 0;
+  stubHttps(u => {
+    if (u.pathname === '/cart.js' && hop === 0) { hop = 1; return { status: 302, headers: { location: 'https://elsewhere.com/cart.js' } }; }
+    return { body: u.pathname === '/cart.js' ? '{"currency":"USD"}' : rawProducts };
+  });
+  try {
+    const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
+    const cm = Snapshot.getById(TA, out.currencySnapshotId);
+    assert.equal(cm.source_url, 'https://example.com/cart.js');
+    assert.equal(cm.final_url, null);
+    assert.equal(out.currency, 'USD');
+  } finally { httpsMod.request = originalRequest; hop = 0; }
+  // 公网 302 → 私网：第二跳 assertPublicUrl 连接前拒绝（SSRF_BLOCKED 整体拒绝，不做 partial 收束）
+  stubHttps(() => ({ status: 302, headers: { location: 'http://127.0.0.1/private' } }));
+  try {
+    const out = await Net.fetchShopifyProducts('https://example.com', { tenantId: TA });
+    assert.equal(out.ok, false);
+    assert.ok(/SSRF_BLOCKED/.test(String(out.error)), '私网重定向被拒: ' + out.error);
+  } finally { httpsMod.request = originalRequest; }
 });
 (async () => {
   let failed = 0;
   try { for (const [name, fn] of tests) { try { await fn(); console.log('ok - ' + name); }
     catch (e) { failed++; console.error('FAIL - ' + name + '\n' + e.stack); } } }
-  finally { global.fetch = originalFetch; dns.promises.lookup = originalLookup; fs.rmSync(TMP, { recursive: true, force: true }); }
+  finally { httpsMod.request = originalRequest; dns.promises.lookup = originalLookup; fs.rmSync(TMP, { recursive: true, force: true }); }
   console.log(`=== price-fact-context.test: ${tests.length - failed} passed, ${failed} failed ===`);
   process.exitCode = failed ? 1 : 0;
 })();

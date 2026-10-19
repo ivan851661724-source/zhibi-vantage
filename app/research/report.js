@@ -49,9 +49,10 @@ function assembleFacts(state) {
   const done = (state.competitors || []).filter(c => c.status === 'done' && !_ex.has(c.id));
   const facts = [];
   // ▶ 报告-数据同源：suspect = 该事实来自被标 flaggedOutlier（量级离谱降级）的对手 → 决策链需标"数据存疑"
-  const addFact = (text, source, suspect, dim) => {
+  // when：事实自带的原始时间提示（仅"动作"类有），供冻结事实包做时间范围过滤；无法判定时间 → null
+  const addFact = (text, source, suspect, dim, when) => {
     if (facts.length >= 60) return;
-    facts.push({ id: 'F' + (facts.length + 1), text, source: source || null, suspect: !!suspect, dim: dim || null });
+    facts.push({ id: 'F' + (facts.length + 1), text, source: source || null, suspect: !!suspect, dim: dim || null, when: when || null });
   };
   done.forEach(c => {
     const suspect = !!c.flaggedOutlier; // 该对手被数据卫生③降级 → 其事实默认存疑
@@ -84,7 +85,7 @@ function assembleFacts(state) {
       addFact(`${c.name} 单品价 ${fmtMoney(Math.min(..._pp), c.currency)} 起（共 ${_pp.length} 款在售标价，非价格带锚点）`, src('pricePoints'), suspect, '价格');
     }
     if (c.reviews && c.reviews.basis !== 'unverified' && c.reviews.rating != null) addFact(`${c.name} 口碑评分约 ${c.reviews.rating}，负面主题：${(c.reviews.negThemes || []).slice(0, 3).join('/') || '无'}`, src('reviews'), suspect, '口碑');
-    (c.recentMoves || []).slice(0, 2).forEach((m, i) => { if (m.basis === 'verified') addFact(`${c.name} 近期动作：${m.desc}（${m.when || '时间不详'}）`, src('recentMoves.' + i), suspect, '动作'); });
+    (c.recentMoves || []).slice(0, 2).forEach((m, i) => { if (m.basis === 'verified') addFact(`${c.name} 近期动作：${m.desc}（${m.when || '时间不详'}）`, src('recentMoves.' + i), suspect, '动作', m.when || null); });
     if ((c.sellingPoints || []).length) addFact(`${c.name} 主打卖点：${c.sellingPoints.join('/')}`, c.url || null, suspect, '卖点');
     if ((c.tactics || []).length) addFact(`${c.name} 销售打法：${c.tactics.join('/')}`, c.url || null, suspect, '打法');
   });
@@ -187,6 +188,18 @@ function validateReport(md, factIds, gapIds, opts) {
     suspectSentences,
     qc: { checks, passed, total: checks.length, allPass: passed === checks.length }
   };
+}
+// 用户定位（价格段/卖点）渲染为可读原点文本（冻结时与报告路径共用同一实现）
+function positioningTextOf(pos) {
+  let posText = '(未填写定位——空白分析以全赛道为参照，未以你为锚点)';
+  if (pos && pos.hasProfile) {
+    const lines = [];
+    if (pos.price) lines.push(`价格段：${pos.price.band.currency} ${pos.price.band.min}-${pos.price.band.max}，被 ${pos.price.contestedBy} 家同币种竞争品牌占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。`);
+    if (pos.sellingPoints) lines.push('卖点：' + pos.sellingPoints.map(r => `「${r.label}」${r.claimedBy ? `被${r.claimedBy}家主打` : '当前样本中尚未发现主打品牌（待验证空缺）'}`).join('；') + '。');
+    if (pos.challenges && pos.challenges.length) lines.push('已识别信号：' + pos.challenges.map(c => c.text).join(' '));
+    posText = lines.join('\n');
+  }
+  return posText;
 }
 async function buildReport(state, config) {
   const dsKey = llmApiKey(config);
@@ -350,4 +363,232 @@ ${weDontKnowText}
 }
 
 
-module.exports = { dimensionCoverage, assembleFacts, isClaimLine, validateReport, buildReport };
+// ============================================================
+// 报告输入适配层（SC-04 评审轮 2 · P0）
+// 只接受【冻结事实包】pack——执行期不接收实时 state、不读数据库，
+// 与项目实时状态完全隔离。pack 由 report-service.buildFactPack 在用户
+// 显式触发时一次性冻结（facts/whitespace/voiceOpp/coverage/positioning/
+// evidenceDist/scope，全部为当时深拷贝）。LLM 只允许整理 pack 内的事实，
+// 每条事实可对应报告已保存的 citation（factId 一一对应）。
+// ============================================================
+const REPORT_NARRATIVE_SECTIONS = Object.freeze(['overview', 'problems', 'opportunities', 'judgment']);
+const REPORT_ALL_SECTIONS = Object.freeze(['overview', 'problems', 'opportunities', 'judgment', 'facts', 'gaps']);
+const SECTION_PROMPTS = {
+  overview: `## 一、现状
+- 赛道正在发生什么：市场规模与趋势、细分与区域（标注占比，声明维度内部不重不漏）、头部竞争格局（对头部 3-5 家各给 Strengths 与可趁软肋 Cautions）。
+- 趋势列 2-4 条、格局每条挂 [F#]。
+- 无可靠赛道级量化数据时，必须明确写"未采集到赛道级量化数据，以下为公开行业资料推算，置信度低，需你二次核实"，并标 [推算]。`,
+  problems: `## 二、问题
+- 站在用户视角，指出"不顺耳但有用"的问题：用户未被满足的需求、对手的软肋、已知风险与制约（Restraints / Challenges 放这里）。
+- 每条先讲 what，再用"因为/源于/导致"解释 why，挂 [F#]。`,
+  opportunities: `## 三、机会
+- 逐条复述下方【空缺清单 G# 市场机会】，每条用**空白卡**格式（用 > 引用块）：
+- 同时补充下方【用户声音机会 O#（口碑驱动 · 补充层）】：这些是"重要但对手普遍没做好的地方"（用户抱怨 / 痛点聚类），作为补充层与 G# 市场空缺并列呈现；逐条带 [O#] 引用与分母（N/M 家对手提到），不得脱离 O# 编号编造。
+  > **[空白 Gx]** 空白：… ／ 证据类型：… ／ 推理逻辑：… ／ 置信度：高|中|低 ／ 可行性提示：…
+- 文案空缺（观察级 G#）提及须注明"基于官网文案比对，未验证市场层面"，不得当作市场空白大做文章。`,
+  judgment: `## 四、我们的判断
+- 综合上述给出"我们的判断"——这是对局势的**有倾向的评估，不是替你下结论，也不列行动建议**。
+- 用 3-5 条判断句收束，每条必须带明确倾向（不要只罗列两面、不要留"见仁见智"式尾巴），并挂证据编号 [F#]/[G#]：
+  · **最锋利的空白在哪**：给出你（助理）最看好的 1-2 个空白，句式如"我们判断 X 是当前最值得盯的空白"；若处于单家观察模式（样本<3、无群体空白），则基于"单家观察"给初步倾向，并明确标注"单家观察·推测，群体共识待≥3家"。
+  · **最大风险在哪**：最该警惕的对手软肋或已知制约，给出明确"我们判断风险在 Y"。
+  · **你（用户）定位的相对位置是否成立**：给出明确结论——"成立 / 偏乐观 / 偏保守"，并给一句理由（挂 [F#]/[G#]）。
+- 倾向性表达边界：可以说"我们判断……""我们倾向认为……"，但**绝不写"你应该做 X / 建议你立即"**这类替结论的句子——决策权始终归用户。
+- 说明数据来源、as-of 时间，并主动列出"我们不知道 / 未探测 / 未采集"的事项（基于下方清单），不伪装全知。`,
+};
+function selectedSections(scope) {
+  const arr = (scope && Array.isArray(scope.sections) && scope.sections.length) ? scope.sections : null;
+  if (!arr) return { narrative: REPORT_NARRATIVE_SECTIONS.slice(), structured: ['overview', 'facts', 'opportunities', 'gaps'] };
+  return {
+    narrative: REPORT_NARRATIVE_SECTIONS.filter(s => arr.includes(s)),
+    structured: REPORT_ALL_SECTIONS.filter(s => arr.includes(s)),
+  };
+}
+
+// 结构化回退：严格按 sections 渲染；未选择的章节不生成；叙事章节在无模型时诚实声明未生成
+function structuredMarkdownFromPack(pack) {
+  const scope = pack.scope || {};
+  const sel = selectedSections(scope).structured;
+  const lines = [];
+  lines.push('# 调研报告（结构化版本）');
+  lines.push('');
+  lines.push('- 生成时间：' + new Date().toISOString());
+  lines.push('- 冻结事实包时间：' + (pack.generatedAt || '—'));
+  const nBrands = Array.isArray(pack.brandIds) ? pack.brandIds.length : 0;
+  lines.push('- 适用范围：' + (scope.brandIds && scope.brandIds.length ? nBrands + ' 个指定品牌' : '项目全部品牌（' + nBrands + ' 个）'));
+  if (scope.from || scope.to) lines.push('- 时间范围：' + (scope.from || '不限') + ' ~ ' + (scope.to || '不限') + '（仅作用于带时间字段的事实/事件；空白与机会分析基于冻结时点数据）');
+  lines.push('- 说明：模型不可用或未产出文本，本版返回**已批准事实清单**，不含任何未引用推断。');
+  for (const s of sel) {
+    lines.push('');
+    if (s === 'overview') {
+      lines.push('## 范围与覆盖');
+      for (const c of (pack.coverage || []).slice(0, 50)) {
+        lines.push(`- ${c.name}：${c.summary ? ('维度含数据 ' + c.summary.dimensionsWithData + '/' + c.summary.integratedDimensions + '，未接入 ' + (c.summary.notIntegrated || []).length) : '—'}`);
+      }
+      if (!(pack.coverage || []).length) lines.push('- （无品牌覆盖记录）');
+    } else if (s === 'facts') {
+      lines.push('## 事实清单');
+      for (const f of (pack.facts || []).slice(0, 100)) lines.push('- [F] ' + (f.text || '') + (f.dim ? '（维度：' + f.dim + '）' : ''));
+      if (Array.isArray(pack.timeUnresolved) && pack.timeUnresolved.length) {
+        lines.push('');
+        lines.push('### 未进入本报告的事实（时间无法判定或不在所选范围，不做"命中"处理）');
+        for (const u of pack.timeUnresolved.slice(0, 30)) lines.push('- ' + (u.text || '') + '（' + (u.reason || '') + '）');
+      }
+    } else if (s === 'opportunities') {
+      lines.push('## 机会与限制');
+      const opp = pack.opportunities || [];
+      if (!opp.length) lines.push('- 资料不足，暂不生成机会判断。');
+      for (const o of opp.slice(0, 30)) lines.push('- ' + (o.theme || '') + '（覆盖品牌数：' + (o.brandCount != null ? o.brandCount : '—') + '）');
+      for (const l of (pack.opportunityLimits || []).slice(0, 10)) lines.push('- 限制：' + l);
+    } else if (s === 'gaps') {
+      lines.push('## 资料缺口');
+      for (const g of (pack.gaps || []).slice(0, 50)) lines.push('- ' + (g.displayName || g.dimension) + '：' + (g.text || ''));
+      if (!(pack.gaps || []).length) lines.push('- （无缺口记录）');
+    } else {
+      lines.push('## ' + (SECTION_PROMPTS[s] ? SECTION_PROMPTS[s].split('\n')[0].replace(/^##\s*/, '') : s));
+      lines.push('- 模型不可用，本章节未生成；请查看事实清单，或稍后重新生成。');
+    }
+  }
+  return lines.join('\n');
+}
+
+async function buildReportFromPack(pack, config) {
+  if (!pack || !Array.isArray(pack.facts)) throw new Error('REPORT_PACK_INVALID');
+  const scope = pack.scope || {};
+  const secs = selectedSections(scope);
+  const facts = pack.facts;
+  const ws = pack.whitespace || {};
+  const opps = ws.opps || [];
+  const copyGaps = ws.copyGaps || [];
+  const singleGaps = ws.singleGaps || [];
+  const singleMode = !!ws.singleMode;
+  const voiceOpp = pack.voiceOpp || { hidden: true, themes: [], doneBrands: 0, brandsWithVoice: 0 };
+  const dimCov = pack.dimensionCoverage || { cov: {}, detected: [], undetected: [] };
+  const pos = pack.positioning || { hasProfile: false };
+
+  const suspectFactIds = facts.filter(f => f.suspect).map(f => f.id);
+  const suspectGapIds = opps.filter(g => g.suspect).map(g => g.gid);
+
+  // 结构化回退路径：无叙事章节需求、或 LLM 失败时使用（两者都只吃 pack）
+  const buildStructured = () => ({
+    generatedAt: new Date().toISOString(),
+    asOf: (pack.generatedAt || new Date().toISOString()).slice(0, 10),
+    markdown: structuredMarkdownFromPack(pack),
+    structured: true,
+    generatedBy: { version: APP_VERSION, commit: APP_COMMIT, startedAt: STARTED_AT, mode: 'structured-fallback' },
+    evidenceDist: pack.evidenceDist || null,
+    audit: { facts: facts.length, gaps: opps.length, removedSentences: 0, flaggedSentences: 0, suspectSentences: 0, source: 'frozen-pack' },
+    qc: null,
+  });
+  if (!secs.narrative.length) return buildStructured();
+
+  // —— LLM 叙事路径：brief 全部来自冻结包 ——
+  const factText = facts.map(f => `[${f.id}] ${f.text}`).join('\n');
+  const gapText = opps.map(g => `[${g.gid}] (${g.dim}·置信${g.confidence}${g.speculative ? '·推测' : ''}) ${g.value}：${g.note}`).join('\n');
+  const copyGapText = copyGaps.map(g => `[${g.gid}] (文案空缺·观察级) ${g.dim}·${g.value}：${g.note}`).join('\n');
+  const singleGapText = singleGaps.map(g => `[${g.gid}] (单家观察·推测·非群体共识) ${g.dim}·${g.value}：${g.note}`).join('\n');
+  const voiceOppText = voiceOpp.hidden
+    ? `(用户声音机会暂不可比：样本不足（${voiceOpp.brandsWithVoice || 0}/${voiceOpp.doneBrands || 0} 家有用户声音），不单列；详见「我们不知道」清单)`
+    : (voiceOpp.themes || []).map(t => `[O${t.onum}] (${t.zone}·机会分${t.opportunity}·重要性${t.importance}·满意度${t.satisfaction}) ${t.label}：${t.denominatorText}`).join('\n');
+
+  const weDontKnow = [];
+  (dimCov.undetected || []).forEach(d => {
+    const c = (dimCov.cov || {})[d];
+    if (c) weDontKnow.push(`- ${d}维度：本赛道仅 ${c.present}/${c.total} 家对手有可靠数据（覆盖率 ${(c.ratio * 100).toFixed(0)}% < 50%），本报告未引用该维度结论。`);
+  });
+  if (copyGaps.length) weDontKnow.push(`- 文案空缺（非市场空缺）：以下卖点/打法空缺仅基于"官网文案比对"（${copyGaps.length} 项），未验证市场层面需求，属观察级，不构成已确认的市场机会。`);
+  if (singleMode) weDontKnow.push(`- 当前仅 ${ws.total} 家对手完成研究（<3），空白分析处于"单家观察"模式：下方单家留白仅为结构推测、非群体共识，补充至 ≥3 家后才会给出赛道级群体空白。`);
+  if (suspectFactIds.length || suspectGapIds.length) weDontKnow.push(`- 部分结论依赖被降级（量级存疑 flaggedOutlier）竞争品牌的数据，可信度相对更低，建议在「我们的判断」段结合原始来源复核。`);
+  if (Array.isArray(pack.timeUnresolved) && pack.timeUnresolved.length) {
+    weDontKnow.push(`- 时间范围过滤：${pack.timeUnresolved.length} 条事实因无法判定时间或时间不在所选范围（${scope.from || '…'} ~ ${scope.to || '…'}），未进入本报告，不伪造"命中范围"。`);
+  }
+  const weDontKnowText = weDontKnow.length ? weDontKnow.join('\n') : '- （本次各维度探测覆盖较充分，暂无重大未探测项）';
+  const posText = pack.positioningText || '(未填写定位——空白分析以全赛道为参照，未以你为锚点)';
+
+  const structureBlock = secs.narrative.map(s => SECTION_PROMPTS[s]).join('\n');
+  const sys = `你是"知彼 Vantage"，站在用户（品牌负责人）那一边。基于给定的【事实清单F#】与【空缺清单G#】装配一份**研究级行业调研报告**（对标 Euromonitor / Nielsen / Similarweb 的产出标准：完整、准确、清晰、客观、每条可溯源）。
+【结构（markdown，必须严格按以下章节顺序输出，未列出的章节不得生成）】
+${structureBlock}
+【铁律】
+1. 你**不能**引入清单之外的"事实"。每一句论断句末必须标注引用编号 [F#] 或 [G#]；编造编号或**无任何编号的裸句**都会被系统自动删除（脑补句无处藏身）。
+2. 敢标不确定：任何估算 / 推断必须标 [推算] 或置信度分级，绝不伪装精确。
+3. 立场忠实：主动指出"你想进的方向已有强对手"这类不顺耳事实；主动标"相关于你的目标"；**绝不写"你应该做 X / 建议你立即"这类替结论的句子**——决策权始终归用户。
+4. 不堆免责、不写通用行业套话；直接、有据。
+5. **禁止常识外推**：你收到的【事实清单F#】【空缺清单G#】是你唯一可引用的"事实"来源；不得引入品牌常识/行业常识做推理（如"大牌所以渠道强""品类火热所以必有机会"）。【你的定位】是合法锚点（用户自身资料），其余背景信息仅供理解语境，不得作为 [F#]/[G#] 之外的引用。
+6. **文案空缺 ≠ 市场空缺**：标记为"文案空缺·观察级"的 G# 仅基于官网文案比对，是观察不是已确认机会；提及须注明"基于官网文案比对，未验证市场层面"，不得将其当作市场空白大做文章。
+直接输出 markdown，不要外层 json。`;
+  const user = `赛道：${pack.track || '（未提供）'}
+用户意图/目标：${JSON.stringify(pack.intent || {})}
+
+【你的定位（空白分析原点，作为参照事实，合法锚点）】
+${posText}
+
+【事实清单 F#】（你唯一可引用的"事实"来源，句末必须引用其中编号）
+${factText || '(无 verified 事实——请在执行摘要如实说明证据不足)'}
+
+【空缺清单 G# · 市场机会】（已剔除"文案空缺"，见下方观察级）
+${gapText || '(无)'}
+
+【文案空缺 · 观察级 G#】（仅基于官网文案比对，非已确认市场机会，提及须注明"未验证市场层面"）
+${copyGapText || '(无)'}
+
+【单家观察 · 推测 G#】（样本<3，仅结构推理"该对手应做而未做"，非群体共识，提及须注明"单家观察·推测"）
+${singleGapText || '(无)'}
+
+【用户声音机会 O#（口碑驱动 · 补充层）】
+${voiceOppText || '(无)'}
+
+【我们不知道 / 未探测维度】（在「我们的判断」段如实列出，不伪装全知）
+${weDontKnowText}
+
+【维度覆盖提示】已充分探测（进入报告原料）的维度：${(dimCov.detected || []).join('、') || '无'}；未充分探测（<50% 覆盖率，已排除出报告原料）的维度：${(dimCov.undetected || []).join('、') || '无'}。`;
+
+  const dsKey = llmApiKey(config);
+  let v = null, raw = null;
+  try {
+    raw = await deepseekText([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, resolveDeepModel(), { fieldKey: 'report', timeoutMs: 180000, maxAttempts: 2, thinking: false });
+    const citedGapIds = opps.map(g => g.gid).concat(singleGaps.map(g => g.gid)).concat(voiceOpp.hidden ? [] : (voiceOpp.themes || []).map(t => 'O' + t.onum));
+    v = validateReport(raw, facts.map(f => f.id), citedGapIds, { suspectFactIds, suspectGapIds });
+  } catch (e) {
+    // LLM 不可用/失败/校验异常 → 结构化回退（不失败报告，不伪造分析）
+    return buildStructured();
+  }
+  if (!v) return buildStructured();
+
+  // 附录：编号对照表（可点开核验来源 URL）——来自冻结包事实（含来源）
+  const appendix = ['\n---\n### 附录 · 证据编号对照'];
+  facts.forEach(f => appendix.push(`- **${f.id}** ${f.text}${f.source ? ` — [来源](${f.source})` : ''}`));
+  opps.forEach(g => appendix.push(`- **${g.gid}** [${g.dim}] ${g.value}（置信度 ${g.confidence}${g.speculative ? '·推测' : ''}）`));
+  singleGaps.forEach(g => appendix.push(`- **${g.gid}** [单家观察·推测] ${g.dim}·${g.value}（置信度 ${g.confidence}）`));
+  (voiceOpp.hidden ? [] : (voiceOpp.themes || [])).forEach(t => appendix.push(`- **O${t.onum}** [${t.zone}] ${t.label}（机会分 ${t.opportunity} · 重要性 ${t.importance} · 满意度 ${t.satisfaction} · ${t.denominatorText}）`));
+
+  // 机器生成的"定位校准"块（来自冻结的 positioning，非模型生成）
+  let calib = '';
+  if (pos && pos.hasProfile) {
+    calib = '\n\n---\n### 定位校准 · 基于你填写的价格段 / 卖点（机器核对，非模型生成）\n';
+    if (pos.price) {
+      calib += `- **价格段** ${pos.price.band.currency} ${pos.price.band.min}–${pos.price.band.max}：被 **${pos.price.contestedBy}** 家同币种竞争品牌占据${pos.price.contestedNames.length ? `（${pos.price.contestedNames.join('、')}）` : ''}。\n`;
+    }
+    if (pos.sellingPoints) {
+      calib += '- **卖点对照**（你选的 vs 竞争品牌是否在做）：\n';
+      pos.sellingPoints.forEach(r => {
+        calib += `  - 「${r.label}」：${r.claimedBy ? `被 ${r.claimedBy} 家主打${r.claimedNames.length ? `（${r.claimedNames.join('、')}）` : ''} —— 竞争较为充分` : '**当前样本中尚未发现主打品牌 —— 待验证空缺**'}。\n`;
+      });
+    }
+    if (pos.challenges && pos.challenges.length) {
+      calib += '- **值得正视的信号**（不顺耳但有用）：\n' + pos.challenges.map(c => `  - ${c.text}`).join('\n') + '\n';
+    }
+  }
+  const _genFooter = reportProvenance(APP_VERSION, APP_COMMIT, STARTED_AT);
+  return {
+    generatedAt: new Date().toISOString(),
+    asOf: (pack.generatedAt || new Date().toISOString()).slice(0, 10),
+    markdown: (v.markdown || '（报告生成失败）') + calib + appendix.join('\n') + _genFooter,
+    structured: false,
+    generatedBy: { version: APP_VERSION, commit: APP_COMMIT, startedAt: STARTED_AT },
+    evidenceDist: pack.evidenceDist || null,
+    audit: { facts: facts.length, gaps: opps.length, removedSentences: v.removed, flaggedSentences: v.flagged, suspectSentences: v.suspectSentences, source: 'frozen-pack' },
+    qc: v.qc
+  };
+}
+
+module.exports = { dimensionCoverage, assembleFacts, isClaimLine, validateReport, buildReport, buildReportFromPack, positioningTextOf, REPORT_NARRATIVE_SECTIONS, REPORT_ALL_SECTIONS };

@@ -53,7 +53,7 @@ if (require.main === module) {
       }
       f.seed(f.store.getWorkspace(f.tenantId,s.input.workspaceId));
       const cartRaw='{"currency":"USD"}',cartPath='snapshots/'+f.ns+'/20261017/cart.raw';
-      f.write(cartPath,cartRaw);f.write('snapshots/'+f.ns+'/20261017/cart.json',{...snapshot,snapshot_id:'cart',provider:'shopify_cart_json',source_url:'https://example.com/cart.js',final_url:'https://example.com/cart.js',raw_payload_ref:{path:cartPath},raw_size:Buffer.byteLength(cartRaw),content_hash:'sha256:'+crypto.createHash('sha256').update(cartRaw).digest('hex')});
+      f.write(cartPath,cartRaw);f.write('snapshots/'+f.ns+'/20261017/cart.json',{...snapshot,snapshot_id:'cart',provider:'shopify_cart_js_json',capability:'storefront_currency',source_url:'https://example.com/cart.js',final_url:'https://example.com/cart.js',raw_payload_ref:{path:cartPath},raw_size:Buffer.byteLength(cartRaw),content_hash:'sha256:'+crypto.createHash('sha256').update(cartRaw).digest('hex')});
       const evPath='evidence/'+f.ns+'/'+s.ev+'.json',ev=JSON.parse(fs.readFileSync(path.join(f.dir,evPath),'utf8'));
       f.write(evPath,{...ev,source_snapshot_ids:[s.ss,'cart']});f.write(s.qualPath,{...s.qualification,source_snapshot_ids:[s.ss,'cart']});
       assert.equal(f.store.resolveAdmission(s.input).ok,true);

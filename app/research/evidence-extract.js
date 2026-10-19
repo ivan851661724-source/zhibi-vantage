@@ -96,7 +96,7 @@ function resolveCurrencyContext(input, meta) {
   const c = Snapshot.getById(input.tenantId || (meta.tenant && meta.tenant.tenant_id), input.currencySnapshotId);
   const reject = reason => ({ error: 'currency_snapshot_' + reason });
   if (!c) return reject('not_found');
-  if (c.capability !== 'product_catalog' || c.provider !== 'shopify_cart_json') return reject('source_mismatch');
+  if (c.capability !== 'storefront_currency' || c.provider !== 'shopify_cart_js_json') return reject('source_mismatch');
   const tenant = m => m.tenant && m.tenant.tenant_id || null;
   if (!tenant(meta) || tenant(meta) !== tenant(c)) return reject('tenant_mismatch');
   let productUrl, cartUrl, productFinal, cartFinal;

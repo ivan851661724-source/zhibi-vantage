@@ -65,14 +65,14 @@ function createMonitoringRuntime({store=createMonitoringStore(),queue,collect,cl
     const products=snapshotIds(source);
     if(source.ok&&!products.length)mismatch('catalog_snapshot_missing');
     if(source.url&&!endpoint(source.url,'/products.json'))mismatch('catalog_url_mismatch');
-    const check=(id,provider,pathname)=>{
+    const check=(id,provider,capability,pathname)=>{
       const snapshot=Snapshot.getById(target.tenant_id,id);
       if(!snapshot||!inScope(snapshot,target))mismatch('snapshot_tenant_or_project_mismatch');
-      if(snapshot.provider!==provider||snapshot.capability!=='product_catalog')mismatch('snapshot_provider_or_capability_mismatch');
+      if(snapshot.provider!==provider||snapshot.capability!==capability)mismatch('snapshot_provider_or_capability_mismatch');
       if(!endpoint(snapshot.source_url,pathname)||(snapshot.final_url&&!endpoint(snapshot.final_url,pathname)))mismatch('snapshot_endpoint_mismatch');
     };
-    for(const id of products)check(id,'shopify_products_json','/products.json');
-    if(source.currencySnapshotId)check(source.currencySnapshotId,'shopify_cart_json','/cart.js');
+    for(const id of products)check(id,'shopify_products_json','product_catalog','/products.json');
+    if(source.currencySnapshotId)check(source.currencySnapshotId,'shopify_cart_js_json','storefront_currency','/cart.js');
   }
   function persist(source,target,job) {
     // Validate actual collection metadata before legacy extraction can stamp the
@@ -108,7 +108,7 @@ function createMonitoringRuntime({store=createMonitoringStore(),queue,collect,cl
     if(comp.factExtract?.reason)issues.push('fact_'+comp.factExtract.reason);
     if(!comp.priceMetric)issues.push('metric_'+(comp.factExtract?.metric_reason||'unavailable'));
     const sourceResults=[...new Set([...snapshots,source.currencySnapshotId].filter(Boolean))].map(id=>Snapshot.getById(target.tenant_id,id)).filter(s=>inScope(s,target)).map(s=>({snapshot_id:s.snapshot_id,provider:s.provider,source_status:s.source_status,http_status:s.http_status,observed_at:s.observed_at,collector_version:s.collector_version}));
-    if(sourceResults.some(s=>s.provider==='shopify_cart_json'&&s.source_status!=='success'))issues.push('currency_source_unavailable');
+    if(sourceResults.some(s=>s.provider==='shopify_cart_js_json'&&s.source_status!=='success'))issues.push('currency_source_unavailable');
     const result={schema_version:1,job_id:job.job_id,revision:target.revision,source_status:sourceOutcome(source,target),source_results:sourceResults,completed_at:clock(),snapshot_ids:snapshots,currency_snapshot_id:source.currencySnapshotId||null,fact_ids:[...factIds],diff_ids:[...new Set(comparisons.map(c=>c.diff_id).filter(Boolean))],event_ids:events.map(e=>e.event_id),comparisons,price_metric:comp.priceMetric||null,evidence_extract:comp.evidenceExtract||null,fact_extract:comp.factExtract||null,partial_scan:!!source.partialScan,issues};
     const proof=observedReferences(dataDir,target,result);
     const checkedComparisons=proof.fact_ids.map(id=>proof.comparisons.find(c=>c.fact_id===id)||{fact_id:id,status:null,diff_id:null,event_id:null,reason:'comparison_reference_unverified'});

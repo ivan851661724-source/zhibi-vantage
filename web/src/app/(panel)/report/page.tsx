@@ -8,12 +8,31 @@
 //   failed  → 显示 s.briefError + 重试入口（重试 = 再 POST，后端幂等）
 // 轮询纪律：不新建接口/通道，只用现有 GET /api/state；组件卸载/切页清理定时器。
 // 轮询结果需携带当前项目操作所有权，切换项目后的旧终态不得覆盖新档案。
-import { useCallback, useEffect, useRef, useState } from 'react';
+// 注意：落地轮询结果用 patch() 而非 refresh()——refresh 走 stateSig 签名比对，
+// 签名不含 brief 字段，briefStatus 终态会被「数据未变」跳过导致报告永不渲染。
+import { useCallback, useEffect, useRef, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useZhibiState, useStateOperation } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { renderMarkdown } from '@/lib/md';
 import type { ZhibiState } from '@/types/state';
+import { ReportPanel } from '@/components/brand/report-panel';
+import { useRouter } from 'next/navigation';
+
+// 正式调研报告（SC-04）：用户显式触发生成；任务持久化可恢复；报告含版本、
+// 生成范围、数据覆盖、事实引用、机会与限制、纠错入口。
+// 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底。
+function CoreReportsSection({ projectId }: { projectId: string }) {
+  const router = useRouter();
+  if (!projectId) return null;
+  return (
+    <section className="core-reports-section">
+      <h3>调研报告（正式版）</h3>
+      <ReportPanel projectId={projectId} onOpen={(id) => router.push(`/report/${id}?projectId=${encodeURIComponent(projectId)}`)} />
+    </section>
+  );
+}
 
 const BRIEF_POLL_MS = 3000; // 任务书 F-2：轮询间隔 ≥3s
 const BRIEF_STALE_MS = 15 * 60 * 1000; // 与后端对齐：running 超 15 分钟无终态视为中断
@@ -29,8 +48,17 @@ interface Brief {
 }
 
 export default function ReportPage() {
+  return (
+    <Suspense fallback={<p className="hint">加载调研报告…</p>}>
+      <ReportInner />
+    </Suspense>
+  );
+}
+
+function ReportInner() {
   const { state, loading, patch } = useZhibiState();
   const beginOperation = useStateOperation();
+  const searchParams = useSearchParams();
   const brief = (state ? (state.brief as Brief | undefined) : undefined) || undefined;
   const dist = (brief && brief.evidenceDist) || (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined);
   const [busy, setBusy] = useState(false);
@@ -130,6 +158,9 @@ export default function ReportPage() {
 
       {/* R6.2：报告顶部诚实条（三色横条 + 点击展开字段清单） */}
       <EvidenceBar dist={dist} />
+
+      {/* SC-04：正式调研报告（冻结事实包 + 持久任务 + 引用可追溯） */}
+      <CoreReportsSection projectId={String(searchParams.get('projectId') || (state as { projectId?: string } | null)?.projectId || '')} />
 
       {err && <p className="hint">⚠ {err}</p>}
       {!hasTrack && !loading && <p className="hint">还没有调研数据——先在工作台发起一次赛道调研。</p>}

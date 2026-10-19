@@ -10,6 +10,7 @@ import { LABELS, lbl } from '@/lib/labels';
 import type { Competitor, ZhibiState } from '@/types/state';
 import { PriceMetricBlock, metricPrice } from '@/components/price-metric-detail';
 import { MonitoringControls } from '@/components/monitoring-controls';
+import { DataSurfaceOverview } from '@/components/data-surface/data-surface-overview';
 
 // ---- 基础字典（移植 app.js 顶部常量） ----
 const REL_LABEL: Record<string, string> = {
@@ -655,6 +656,9 @@ export function IntelProfile({
       <IntelFieldBox icon="blank" colorVar="unk" title="空白 · 未探测" sub="not detected ≠ 确认没有">
         <BlankItems c={c} />
       </IntelFieldBox>
+
+      {/* 五维数据覆盖总览（SC-02：官网与商品=真实采集；其余维度读 Registry 能力状态，未接入如实显示） */}
+      <DataSurfaceOverview competitorId={c.id} />
 
       <NoteBox cid={c.id} />
     </div>

@@ -37,7 +37,58 @@ for (const k of ['debug', 'info', 'warn', 'error']) logger[k] = silent;
 const realLookup = dns.promises.lookup;
 dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
 const realFetch = global.fetch;
-let fetchRoutes = {}; // url 前缀 → (url, opts) => Response
+// net.js safeRequest 通道（复审 §一）：fetchShopifyProducts/Collections 走
+// node:https.request + 受控 dns.lookup——为同套 fetchRoutes 补 stub 适配层。
+const nodeHttpsStub = require('node:https');
+const realHttpsRequest = nodeHttpsStub.request;
+const realDnsLookupCb = dns.lookup;
+dns.lookup = function (hostname, options, cb) {
+  const cb2 = typeof options === 'function' ? options : cb;
+  const all = options && typeof options === 'object' && options.all;
+  // safeLookup 以 {all:true} 调用并期望 (err, [{address,family}])；连接层需要 (err, ip, family) 成对
+  process.nextTick(() => all ? cb2(null, [{ address: '93.184.216.34', family: 4 }]) : cb2(null, '93.184.216.34', 4));
+};
+const { EventEmitter: StubEE } = require('events');
+nodeHttpsStub.request = function (opts, cb) {
+  const cands = [
+    'https://' + (opts.hostname || '') + (opts.path || '/'),
+    'http://' + (opts.hostname || '') + (opts.path || '/'),
+  ];
+  let key = null;
+  for (const c of cands) {
+    for (const prefix of Object.keys(fetchRoutes)) { if (c.startsWith(prefix)) { key = prefix; break; } }
+    if (key) break;
+  }
+  const req = new StubEE();
+  req.setTimeout = () => {};
+  req.destroy = () => {};
+  req.end = () => {
+    if (!key) { process.nextTick(() => req.emit('error', new Error('no stub route: ' + cands[0]))); return; }
+    Promise.resolve().then(() => fetchRoutes[key](cands[0], opts || {})).then(async (fake) => {
+      let body = '', status = 200, headers = {};
+      if (fake && typeof fake.arrayBuffer === 'function') {
+        status = fake.status;
+        if (fake.headers && typeof fake.headers.forEach === 'function') fake.headers.forEach((v, k) => { headers[k] = v; });
+        body = Buffer.from(await fake.arrayBuffer());
+      } else if (fake && fake.kind === 'timeout') {
+        process.nextTick(() => req.emit('error', new Error('SAFE_FETCH_TIMEOUT')));
+        return;
+      } else {
+        status = (fake && fake.status) || 200;
+        headers = (fake && fake.headers) || {};
+        body = Buffer.from((fake && fake.body) || '');
+      }
+      const res = new StubEE();
+      res.statusCode = status; res.headers = headers;
+      process.nextTick(() => { cb(res); if (body && body.length) res.emit('data', body); res.emit('end'); });
+    }).catch((e) => process.nextTick(() => req.emit('error', e)));
+  };
+  return req;
+};
+const nodeHttpStub = require('node:http');
+const realHttpRequest = nodeHttpStub.request;
+nodeHttpStub.request = nodeHttpsStub.request; // http:// 路由复用同一 fetchRoutes 适配层
+let fetchRoutes = {}; // url 前缀 → (url, opts) => Response（或 { kind:'timeout' }）
 global.fetch = (url, opts) => {
   const s = String(url);
   for (const prefix of Object.keys(fetchRoutes)) {
@@ -265,14 +316,16 @@ const BASE = 'http://example.com';
     assert.ok(officialPage.ok && typeof officialPage.text === 'string', 'fetchPage 业务契约不变');
     assert.ok(shopify.ok && shopify.total === 1 && shopify.currency === 'USD', 'fetchShopifyProducts 业务契约不变');
     const m1 = Snapshot.getById(TENANT_A, officialPage.snapshotId);
-    const m2 = Snapshot.getById(TENANT_A, shopify.snapshotId);
+    const m2 = Snapshot.getById(TENANT_A, shopify.snapshotIds[0]); // 🔴 复审 §四：页级快照（无聚合伪装快照）
     assert.ok(m1 && m1.capability === 'evidence_url');
     assert.ok(m2 && m2.capability === 'product_catalog' && m2.provider === 'shopify_products_json');
-    // P0 终审对照面：首页不满额（1 < 100）= 完整枚举 → success + partial_scan=false（05 §5.2 冻结术语）
-    assert.equal(m2.source_status, 'success', '首页 < 100 款即全部 → success');
-    assert.equal(m2.partial_scan, false, 'partial_scan=false（完整枚举）');
-    assert.equal(m2.partial_scan_reason, null);
-    assert.equal(m2.partial_scan_observed_count, 1);
+    assert.equal(m2.source_status, 'success', '页快照 2XX → success');
+    // P0 终审对照面：首页不满额（1 < 250）= 完整枚举 → partialScan=false（05 §5.2 冻结术语；
+    // 扫描级语义在返回值与 attempt summary，不伪装成单个原始响应快照）
+    assert.equal(shopify.partialScan, false, 'partialScan=false（完整枚举）');
+    assert.equal(shopify.partialScanReason, null);
+    assert.equal(shopify.total, 1);
+    assert.ok(/page=1/.test(String(m2.source_url)), '页快照 source_url 带 page=N');
     assert.ok(new Date(m2.observed_at) <= new Date(m2.collected_at), 'observed_at <= collected_at');
   });
 
@@ -315,14 +368,20 @@ const BASE = 'http://example.com';
     };
     const out = await net.fetchShopifyProducts(BASE, { tenantId: TENANT_A });
     assert.ok(out.ok && out.total === 1000, '业务行为不变（items/total 契约兼容）');
-    const meta = Snapshot.getById(TENANT_A, out.snapshotId);
-    assert.equal(meta.source_status, 'partial', '分页预算耗尽不得记 success');
-    assert.equal(meta.partial_scan, true, 'partial_scan=true（枚举不完整，冻结术语）');
-    assert.equal(meta.partial_scan_reason, 'products_json_pagination_budget_250x4_exhausted');
-    assert.equal(meta.partial_scan_observed_count, 1000);
-    assert.ok(meta.observed_at, 'body 已接收 → observed_at 非空（P1-1 同样适用）');
-    assert.ok(!('coverage' in meta), '无业务 Coverage 字段（P0-3）');
-    assert.ok(!('scan' in meta), '不得存在平行词汇 scan.*（P0 终审）');
+    // 🔴 复审 §二/§四：扫描级 partial 语义在返回值（attempt summary 承接）；
+    // 原始字节以页级快照存在（source_url 带 page=N），无聚合伪装快照。
+    assert.equal(out.partialScan, true, '分页预算耗尽不得记 success 语义');
+    assert.equal(out.partialScanReason, 'products_json_pagination_budget_250x4_exhausted');
+    assert.deepStrictEqual(out.successfullyFetchedPages, [1, 2, 3, 4]);
+    assert.equal(out.failedPage, null);
+    const pageMetas = out.snapshotIds.map(sid => Snapshot.getById(TENANT_A, sid)).filter(m => m && m.capability === 'product_catalog');
+    assert.equal(pageMetas.length, 4, '4 页快照全部落盘');
+    for (const m of pageMetas) {
+      assert.ok(/page=[0-9]/.test(String(m.source_url || '')), '页快照 source_url 带 page=N: ' + m.source_url);
+      assert.ok(m.observed_at, 'body 已接收 → observed_at 非空（P1-1 同样适用）');
+      assert.ok(!('coverage' in m), '无业务 Coverage 字段（P0-3）');
+      assert.ok(!('scan' in m), '不得存在平行词汇 scan.*（P0 终审）');
+    }
   });
 
   // 17. P0-3：失败观察（unavailable/timeout）无 body 也绝不隐含任何 Coverage complete
@@ -404,6 +463,9 @@ const BASE = 'http://example.com';
   // 还原全局 stub（跑回归时防止泄漏到其他用例——本文件独立进程执行，此为防御性收尾）
   dns.promises.lookup = realLookup;
   global.fetch = realFetch;
+  nodeHttpsStub.request = realHttpsRequest;
+  nodeHttpStub.request = realHttpRequest;
+  dns.lookup = realDnsLookupCb;
 
   console.log(`\n结果：${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

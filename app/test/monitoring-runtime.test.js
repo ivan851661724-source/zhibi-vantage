@@ -33,23 +33,29 @@ test('B-R1 formal www-only identity keeps exact HTTP, Snapshot, Evidence, Fact a
   const proofPath='snapshots/'+f.ns+'/20261017/'+seed.ss+'.json',proof=JSON.parse(fs.readFileSync(path.join(f.dir,proofPath)));proof.source_url=proof.final_url='https://www.example.com/products.json';f.write(proofPath,proof);
   assert.equal(f.store.resolveAdmission(seed.input).ok,true);const target=f.store.createWatchTarget(seed.input);
   const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];const hosts=[];
-  global.fetch=async(input,opts)=>{const u=new URL(String(input));hosts.push(u.hostname);const response=new Response(u.pathname==='/cart.js'?'{"currency":"USD"}':JSON.stringify({products:Array.from({length:6},(_,i)=>({id:990000+i,variants:[{id:9900000+i,price:'10.00',available:true}]}))}));Object.defineProperty(response,'url',{value:u.href});return response;};
+  // SC-02 r3：net.js 经 safeRequest（node:https 直连）抓取，打桩下沉到 https.request。
+  const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
+  httpsMod.request=function(opts,cb){hosts.push(opts.hostname);const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};
+    req.end=()=>{const p=String(opts.path||'');const body=p.startsWith('/cart.js')?'{"currency":"USD"}':JSON.stringify({products:Array.from({length:6},(_,i)=>({id:990000+i,variants:[{id:9900000+i,price:'10.00',available:true}]}))});
+      const res=new EventEmitter();res.statusCode=200;res.headers={'content-type':'application/json'};
+      process.nextTick(()=>{cb(res);res.emit('data',Buffer.from(body));res.emit('end');});};
+    return req;};
   try {
     runtime.tick(now);await runtime.drain(now);assert.deepEqual(hosts,['www.example.com','www.example.com']);
     const result=JSON.parse(jobs()[0].result);assert.equal(jobs()[0].status,'done');assert.ok(result.price_metric.metric_id);assert.equal(result.price_metric.value.median,10);
     const Snapshot=require('../research/source-snapshot'),Fact=require('../research/fact-store'),Evidence=require('../research/evidence-store'),Metric=require('../research/price-metric');
-    for(const id of [...result.snapshot_ids,result.currency_snapshot_id]){const s=Snapshot.getById(f.tenantId,id);assert.equal(new URL(s.source_url).hostname,target.source.domain);assert.equal(new URL(s.final_url).hostname,target.source.domain);assert.equal(s.collector_version,'net-shopify-direct-2');}
+    for(const id of [...result.snapshot_ids,result.currency_snapshot_id]){const s=Snapshot.getById(f.tenantId,id);assert.equal(new URL(s.source_url).hostname,target.source.domain);assert.equal(new URL(s.final_url||s.source_url).hostname,target.source.domain);assert.equal(s.collector_version,'net-shopify-direct-2');}
     for(const id of result.fact_ids){const fact=Fact.getFactById(f.tenantId,id);assert.equal(fact.entity_ref.domain,target.source.domain);for(const eid of fact.evidence_ids)assert.equal(Evidence.getEvidenceById(f.tenantId,eid).entity_ref.domain,target.source.domain);}
     assert.equal(Metric.getMetricById(f.tenantId,result.price_metric.metric_id).domain,target.source.domain);
     hosts.length=0;const legacy=await require('../research/net').fetchShopifyProducts('https://www.example.com',{tenantId:f.tenantId,projectRef:seed.input.projectId});assert.deepEqual(hosts,['example.com','example.com']);assert.equal(Snapshot.getById(f.tenantId,legacy.snapshotId).collector_version,'net-1');
-  }finally{dns.promises.lookup=lookup;global.fetch=()=>{throw Error('network forbidden');};}
+  }finally{dns.promises.lookup=lookup;httpsMod.request=origReq;}
 });
 test('B-R1 actual mismatched catalog/cart snapshots retain raw but never normalize or project',async()=>{
   for(const defect of ['source_host','final_host','provider','capability','project','cart_host']){
     let target;const {runtime,add}=setup(async()=>{
       const Snapshot=require('../research/source-snapshot');
       const product=Snapshot.record({tenantId:f.tenantId,projectRef:defect==='project'?'another-project':target.project_id,capability:defect==='capability'?'reviews':'product_catalog',provider:defect==='provider'?'generic_web_fetch':'shopify_products_json',source_url:'https://'+(defect==='source_host'?'www.example.com':'example.com')+'/products.json',final_url:'https://'+(defect==='final_host'?'www.example.com':'example.com')+'/products.json',http_status:200,source_status:'success',observed_at:new Date().toISOString(),bodyBytes:Buffer.from(JSON.stringify({products:[{id:880000+counter,variants:[{id:8800000+counter,price:'15.00',available:true}]}]}))});
-      const cart=Snapshot.record({tenantId:f.tenantId,projectRef:target.project_id,capability:'product_catalog',provider:'shopify_cart_json',source_url:'https://'+(defect==='cart_host'?'www.example.com':'example.com')+'/cart.js',source_status:'success',http_status:200,observed_at:new Date().toISOString(),bodyBytes:Buffer.from('{"currency":"USD"}')});
+      const cart=Snapshot.record({tenantId:f.tenantId,projectRef:target.project_id,capability:'storefront_currency',provider:'shopify_cart_js_json',source_url:'https://'+(defect==='cart_host'?'www.example.com':'example.com')+'/cart.js',source_status:'success',http_status:200,observed_at:new Date().toISOString(),bodyBytes:Buffer.from('{"currency":"USD"}')});
       return {ok:true,url:'https://example.com/products.json',snapshotIds:[product.meta.snapshot_id],currencySnapshotId:cart.meta.snapshot_id};
     });target=add().target;runtime.tick(now);await runtime.drain(now);
     const result=JSON.parse(jobs()[0].result);assert.equal(jobs()[0].status,'error',defect);assert.equal(result.reason,'SOURCE_SCOPE_MISMATCH');assert.equal(result.source_status,'unavailable');
@@ -122,8 +128,11 @@ test('pause and stop while collecting fence normalization and retain collection 
 test('real Net to M1 keeps baseline, emits observed price event, preserves project and rejects market-null recheck without HTTP',async()=>{
   const {runtime,add}=setup();const {target,seed}=add();
   const dns=require('node:dns'), lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];
-  let calls=0, price='10.00';global.fetch=async input=>{calls++;const u=new URL(String(input));assert.equal(u.hostname,'example.com');
-    return new Response(u.pathname==='/cart.js'?'{"currency":"USD"}':JSON.stringify({products:[{id:counter,title:'Synthetic',variants:[{id:counter*10,price,available:true}]}]}));};
+  const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
+  let calls=0, price='10.00';httpsMod.request=function(opts,cb){calls++;const u=new URL('https://'+opts.hostname+String(opts.path||'/'));assert.equal(u.hostname,'example.com');
+    const body=u.pathname==='/cart.js'?'{"currency":"USD"}':JSON.stringify({products:[{id:counter,title:'Synthetic',variants:[{id:counter*10,price,available:true}]}]});
+    const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};req.end=()=>{const res=new EventEmitter();res.statusCode=200;res.headers={'content-type':'application/json'};
+      process.nextTick(()=>{cb(res);res.emit('data',Buffer.from(body));res.emit('end');});};return req;};
   try{
     runtime.tick(now);await runtime.drain(now);let result=JSON.parse(jobs()[0].result);
     assert.equal(result.source_status,'success');assert.ok(result.price_metric.metric_id);assert.equal(result.price_metric.market,null);assert.deepEqual(result.event_ids,[]);
@@ -147,40 +156,51 @@ test('real Net to M1 keeps baseline, emits observed price event, preserves proje
     const paged=restarted.status(f.tenantId,{projectId:target.project_id,competitorId:target.competitor_id,offset:1,limit:1});
     assert.equal(paged.total_coverage,3);assert.equal(paged.coverage.length,1);assert.equal(paged.total_event_projections,1);assert.deepEqual(paged.event_projections,[]);
     const missing=restarted.status(f.tenantId,{projectId:'other',competitorId:'other'});assert.equal(missing.total_coverage,0);assert.equal(missing.total_event_projections,0);
-  }finally{dns.promises.lookup=lookup;global.fetch=()=>{throw Error('network forbidden');};}
+  }finally{dns.promises.lookup=lookup;httpsMod.request=origReq;}
 });
 test('direct HTTP blocked, parse failure, empty and partial keep explicit outcomes and supported references',async()=>{
   const {runtime,add}=setup();add();const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];
   const timeout=global.setTimeout;global.setTimeout=(fn,ms,...args)=>timeout(fn,ms===2000?0:ms,...args);
-  let scenario='blocked';global.fetch=async input=>{const u=new URL(String(input));if(u.pathname==='/cart.js')return new Response('{"currency":"USD"}');
-    if(scenario==='blocked')return new Response('blocked',{status:403});if(scenario==='parse')return new Response('{broken');if(scenario==='empty')return new Response('{"products":[]}');
-    if(u.searchParams.get('page')==='2')return new Response('blocked',{status:403});
-    return new Response(JSON.stringify({products:Array.from({length:250},(_,i)=>i?{id:i+1000,variants:[]}:{id:999,title:'Synthetic',variants:[{id:9990,price:'10.00',available:true}]})}));};
+  const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
+  let scenario='blocked';httpsMod.request=function(opts,cb){const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};
+    req.end=()=>{const u=new URL('https://'+opts.hostname+String(opts.path||'/'));let status=200,body;
+      if(u.pathname==='/cart.js'){body='{"currency":"USD"}';}
+      else if(scenario==='blocked'){status=403;body='blocked';}
+      else if(scenario==='parse'){body='{broken';}
+      else if(scenario==='empty'){body='{"products":[]}';}
+      else if(u.searchParams.get('page')==='2'){status=403;body='blocked';}
+      else body=JSON.stringify({products:Array.from({length:250},(_,i)=>i?{id:i+1000,variants:[]}:{id:999,title:'Synthetic',variants:[{id:9990,price:'10.00',available:true}]})});
+      const res=new EventEmitter();res.statusCode=status;res.headers={'content-type':'application/json'};
+      process.nextTick(()=>{cb(res);res.emit('data',Buffer.from(body));res.emit('end');});};
+    return req;};
   try {for(const [kind,outcome] of [['blocked','blocked'],['parse','parse_failed'],['empty','success'],['partial','partial']]){
     scenario=kind;runtime.tick(now);await runtime.drain(now);const result=JSON.parse(jobs().at(-1).result);assert.equal(result.source_status,outcome);assert.ok(result.snapshot_ids.length);assert.equal(result.no_change,undefined);assert.equal(result.freshness,undefined);
     assert.ok(result.source_results.every(s=>s.collector_version==='net-shopify-direct-2'));
     const c=runtime.status(f.tenantId).coverage[0];assert.equal(c.source_status,outcome);assert.equal(c.quiet.allowed,false);
     if(kind==='empty')assert.ok(result.issues.includes('empty_catalog'));if(kind==='partial'){assert.equal(result.partial_scan,true);assert.ok(result.price_metric.metric_id);assert.ok(result.issues.length);}
     now+=8*3600000;
-  }}finally{dns.promises.lookup=lookup;global.setTimeout=timeout;global.fetch=()=>{throw Error('network forbidden');};}
+  }}finally{dns.promises.lookup=lookup;global.setTimeout=timeout;httpsMod.request=origReq;}
 });
 test('formal pre-fetch SSRF rejection records its actual collector version without HTTP',async()=>{
-  const {runtime,add}=setup();add();const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'127.0.0.1',family:4}];let calls=0;global.fetch=async()=>{calls++;throw Error('forbidden');};
+  const {runtime,add}=setup();add();const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'127.0.0.1',family:4}];
+  const httpsMod=require('node:https');const origReq=httpsMod.request;let calls=0;httpsMod.request=function(){calls++;throw Error('forbidden');};
   try {runtime.tick(now);await runtime.drain(now);const result=JSON.parse(jobs()[0].result);assert.equal(calls,0);assert.equal(result.source_status,'blocked');assert.equal(result.source_results[0].collector_version,'net-shopify-direct-2');}
-  finally{dns.promises.lookup=lookup;global.fetch=()=>{throw Error('network forbidden');};}
+  finally{dns.promises.lookup=lookup;httpsMod.request=origReq;}
 });
 test('formal cart and catalog HTTP redirects never reach an unvalidated destination',async()=>{
   const {runtime,add}=setup();const {target}=add();const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];
-  let destinationRequests=0;const modes=[];
-  global.fetch=async(input,opts)=>{const url=new URL(String(input));modes.push(opts.redirect||'follow');
-    if(opts.redirect!=='manual'){destinationRequests++;return new Response(url.pathname==='/cart.js'?'{"currency":"USD"}':'{"products":[]}');}
-    return new Response('redirect response retained',{status:302,headers:{location:'http://127.0.0.1/private'}});
-  };
-  try {runtime.tick(now);await runtime.drain(now);assert.equal(destinationRequests,0);assert.deepEqual(modes,['manual','manual']);
+  let destinationRequests=0;
+  const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
+  httpsMod.request=function(opts,cb){if(String(opts.hostname)==='127.0.0.1')destinationRequests++;
+    const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};
+    req.end=()=>{const res=new EventEmitter();res.statusCode=302;res.headers={location:'http://127.0.0.1/private'};
+      process.nextTick(()=>{cb(res);res.emit('data',Buffer.from('redirect response retained'));res.emit('end');});};
+    return req;};
+  try {runtime.tick(now);await runtime.drain(now);assert.equal(destinationRequests,0);
     const result=JSON.parse(jobs()[0].result);assert.equal(result.source_status,'unavailable');
     assert.equal(result.source_results.length,2);assert.ok(result.source_results.every(r=>r.source_status==='unavailable'));
     const Snapshot=require('../research/source-snapshot');for(const id of [...result.snapshot_ids,result.currency_snapshot_id]){const s=Snapshot.getById(target.tenant_id,id);assert.equal(s.http_status,302);assert.equal(s.collector_version,'net-shopify-direct-2');assert.equal(s.parser_version,null);}
-  }finally{dns.promises.lookup=lookup;global.fetch=()=>{throw Error('network forbidden');};}
+  }finally{dns.promises.lookup=lookup;httpsMod.request=origReq;}
 });
 test('heartbeat maintains a long collection lease and stop prevents another dispatch',async()=>{
   const {runtime,add}=setup(async()=>{await new Promise(r=>setTimeout(r,1250));return {ok:false,empty:true};});add();runtime.tick(now);
@@ -189,7 +209,10 @@ test('heartbeat maintains a long collection lease and stop prevents another disp
 });
 test('same-tenant legacy events comparing another project are not associated with a watch result',async()=>{
   const {runtime,add}=setup();const first=add();const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];
-  let price='20.00';global.fetch=async input=>new Response(new URL(String(input)).pathname==='/cart.js'?'{"currency":"USD"}':JSON.stringify({products:[{id:777777,variants:[{id:7777770,price,available:true}]}]}));
+  const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
+  let price='20.00';httpsMod.request=function(opts,cb){const p=String(opts.path||'/');const body=p.startsWith('/cart.js')?'{"currency":"USD"}':JSON.stringify({products:[{id:777777,variants:[{id:7777770,price,available:true}]}]});
+    const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};req.end=()=>{const res=new EventEmitter();res.statusCode=200;res.headers={'content-type':'application/json'};
+      process.nextTick(()=>{cb(res);res.emit('data',Buffer.from(body));res.emit('end');});};return req;};
   try {runtime.tick(now);await runtime.drain(now);f.store.pauseWatchTarget(f.tenantId,first.target.watch_target_id,now);
     const second=add();price='15.00';await new Promise(r=>setTimeout(r,5));now+=8*3600000;runtime.tick(now);await runtime.drain(now);
     const result=JSON.parse(jobs().at(-1).result);assert.equal(result.fact_ids.length,1);assert.deepEqual(result.event_ids,[]);
@@ -198,7 +221,7 @@ test('same-tenant legacy events comparing another project are not associated wit
     assert.ok(result.issues.includes('event_outside_watch_scope'));
     assert.deepEqual(result.diff_ids,[]);assert.equal(result.comparisons[0].status,null);assert.equal(result.comparisons[0].reason,'comparison_outside_watch_scope');
     assert.equal(runtime.status(f.tenantId).total_event_projections,0);
-  }finally{dns.promises.lookup=lookup;global.fetch=()=>{throw Error('network forbidden');};}
+  }finally{dns.promises.lookup=lookup;httpsMod.request=origReq;}
 });
 test('synthetic market-proven recheck preserves a pre-join baseline, is idempotent and rejects missing times',async()=>{
   let calls=0;const {runtime,queue}=setup(async(_url,opts)=>{calls++;assert.equal(opts.trigger,'recheck');return {ok:false,empty:true};});
@@ -230,11 +253,17 @@ test('real partial Net event is visible; projection and current-result SQLite fa
     const {runtime,add}=setup();add();const productId=600000+counter;
     const dns=require('node:dns'),lookup=dns.promises.lookup;dns.promises.lookup=async()=>[{address:'93.184.216.34',family:4}];
     const timeout=global.setTimeout;global.setTimeout=(fn,ms,...args)=>timeout(fn,ms===2000?0:ms,...args);
+    const httpsMod=require('node:https'),{EventEmitter}=require('events');const origReq=httpsMod.request;
     let price='10';let partial=false;
-    global.fetch=async input=>{const u=new URL(String(input));if(u.pathname==='/cart.js')return new Response('{"currency":"USD"}');
-      if(partial&&u.searchParams.get('page')==='2')return new Response('blocked',{status:403});
-      const product={id:productId,variants:[{id:productId*10,price,available:true}]};
-      return new Response(JSON.stringify({products:partial?[product,...Array.from({length:249},(_,i)=>({id:productId+i+1,variants:[]}))]:[product]}));};
+    httpsMod.request=function(opts,cb){const req=new EventEmitter();req.setTimeout=()=>{};req.destroy=()=>{};
+      req.end=()=>{const u=new URL('https://'+opts.hostname+String(opts.path||'/'));let status=200,body;
+        if(u.pathname==='/cart.js')body='{"currency":"USD"}';
+        else if(partial&&u.searchParams.get('page')==='2'){status=403;body='blocked';}
+        else{const product={id:productId,variants:[{id:productId*10,price,available:true}]};
+          body=JSON.stringify({products:partial?[product,...Array.from({length:249},(_,i)=>({id:productId+i+1,variants:[]}))]:[product]});}
+        const res=new EventEmitter();res.statusCode=status;res.headers={'content-type':'application/json'};
+        process.nextTick(()=>{cb(res);res.emit('data',Buffer.from(body));res.emit('end');});};
+      return req;};
     try {
       runtime.tick(now);await runtime.drain(now);const first=runtime.status(f.tenantId).targets[0].latest_result;assert.ok(first.coverage_id);
       await new Promise(r=>setTimeout(r,5));price='12';partial=mode==='partial';now+=8*3600000;
@@ -249,7 +278,7 @@ test('real partial Net event is visible; projection and current-result SQLite fa
         assert.deepEqual(status.targets[0].latest_result,first);
         assert.ok(require('../research/domain-event').listEvents(f.tenantId).some(e=>String(e.entity_ref?.product_id)===String(productId)),'append-only Event remains outside SQLite rollback');
       }
-    }finally {if(mode!=='partial')f.store.getDb().exec('DROP TRIGGER IF EXISTS runtime_fault');dns.promises.lookup=lookup;global.setTimeout=timeout;global.fetch=()=>{throw Error('network forbidden');};}
+    }finally {if(mode!=='partial')f.store.getDb().exec('DROP TRIGGER IF EXISTS runtime_fault');dns.promises.lookup=lookup;global.setTimeout=timeout;httpsMod.request=origReq;}
   }
 });
 test.after(()=>{tenantDb.close();db.closeDb();f.cleanup();fs.rmSync(bootDir,{recursive:true,force:true});});

@@ -681,3 +681,17 @@ Provider 更新周期慢于用户刷新时，返回现有数据及其真实更�
 ## 25.6 兼容与验收
 
 新增字段优先向后兼容；未知 summary/measurement_method 必须诚实降级。接口进入现行 API 文档前，必须具备真实 adapter、双租户测试、失败测试、重启恢复、provenance 回读和前端消费测试。
+
+# —— 核心产品主闭环（SC-04，随 review/core-product-framework 分支，未合并）——
+GET  /api/brands?projectId=                   # 竞品库列表（覆盖/最近观察/最近变化/缺口）
+GET  /api/brands/:brandId                     # 品牌详情（概览/商品与价格/时间线/覆盖/情报/报告）
+GET  /api/brands/:brandId/timeline            # 品牌时间线（kind/nature/from/to/limit）
+GET  /api/brands/:brandId/coverage            # 数据覆盖与来源
+GET  /api/intelligence?projectId=&brandId=&type=&from=&to=   # 情报库（可筛选）
+GET  /api/opportunities?projectId=            # 机会视图（样本范围 + 依据 + 限制）
+GET  /api/reports?projectId=                  # 报告列表
+POST /api/reports                             # 生成报告（202 + 持久任务，仅用户显式触发）
+GET  /api/reports/:reportId                   # 报告详情（正文/引用/覆盖/缺口/任务状态）
+
+# 纪律：全部 tenant-scoped；项目/品牌/报告/Evidence 必须属于当前租户，跨租户统一 404 不泄露存在性；
+# 响应不含服务器路径、内部错误码、调用栈、密钥、原始 payload 路径。

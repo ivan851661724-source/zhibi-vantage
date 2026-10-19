@@ -60,3 +60,7 @@ scripts/hackathon/
 
 # Local pnpm package/project cache (may contain junctions into the checkout)
 .pnpm-store/
+
+# e2e 运行期产物（seed 凭据与截图不入库）
+web/e2e/.e2e-seed.json
+web/e2e/.e2e-shots/

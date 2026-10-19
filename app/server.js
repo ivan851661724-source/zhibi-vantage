@@ -348,5 +348,20 @@ migrateConfigSecrets();
 migrateResearchNamespaces();
 // 模块 0-4：启动回收崩溃遗留的 running 任务（claimExpiresAt 过期 → 回 pending，断点续跑）
 try { Tasks.reclaimExpired(Date.now()); } catch (e) { /* 非致命 */ }
+// 网络出口代理提示：受限网络（企业出口/沙箱）下 Node 内置 fetch 默认不读
+// http_proxy。Node ≥22 支持以 NODE_USE_ENV_PROXY=1 启动启用内建 EnvHttpProxyAgent
+// （自动 bypass no_proxy）。本进程不改 dispatcher（undici dispatcher 不宜运行时热插拔），
+// 仅对缺省配置做运营提示。SSRF 校验语义不变：先 DNS 解析与 IP 判定，后才发起连接。
+try {
+  if ((process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy)
+    && process.env.NODE_USE_ENV_PROXY !== '1' && process.env.ZB_FETCH_PROXY_DISABLED !== '1') {
+    console.warn('[fetch] 检测到代理环境变量但未启用 NODE_USE_ENV_PROXY=1：出站抓取将直连（受限网络下会失败）。需要经代理出站时以 NODE_USE_ENV_PROXY=1 启动。');
+  }
+} catch (e) { /* 提示失败不影响启动 */ }
+// Data Surface（SC-02 整改轮）：采集持久任务常驻 worker（reclaim + reconcile + 消费）。
+// 替代进程内 fire-and-forget——重启后 pending/过期 running 自动恢复执行。
+try { require('./services/collect-jobs.js').startWorker(); } catch (e) { console.error('[collect-jobs] worker 启动失败（忽略，刷新时可即时触发）:', e.message); }
+// SC-04：调研报告生成常驻 worker（持久化 report_jobs：reclaim + 认领 + 执行）。
+// 重启后 pending/过期 running 自动恢复执行或诚实失败；生成只由用户显式触发。
+try { require('./services/report-service.js').startWorker(); } catch (e) { console.error('[report-service] worker 启动失败（忽略，可在报告列表重试）:', e.message); }
 startServer(PORT0);
-
