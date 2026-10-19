@@ -2988,3 +2988,8 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
   .core-tab{padding:8px 10px;font-size:12.5px}
   .core-inbox-sum{gap:6px}
 }
+
+/* r4.10：情报库底部建设中维度折叠区域（项目级、去重、无事件字段） */
+.core-building-fold{margin-top:16px}
+.core-building-fold>summary{cursor:pointer;font-weight:600;font-size:13px;user-select:none}
+.core-building-msg{color:var(--txt2, #666)}

@@ -148,10 +148,13 @@ function pageBody(ids) {
     const withoutEv = all.filter(i => !i.evidence || i.evidence.length === 0);
     for (const i of withoutEv) assert.notStrictEqual(i.status, 'verified', '无 Evidence 不得标已核实');
     for (const i of withEv) assert.ok(['verified', 'pending'].includes(i.status), '有 Evidence 才可核实/待核实');
-    // 按类型筛选（资料缺口）
+    // r4.10 规格变更：未接入维度不再生成资料缺口情报项（项目级噪音），
+    // 改由 constructionDimensions 独立字段承载——items 中 gap 项必须为 0
     const gaps = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, type: 'gap' });
-    assert.ok(gaps.length >= 4, '资料缺口项 >= 4（四个未接入维度）');
-    for (const g of gaps) assert.strictEqual(g.status, 'insufficient');
+    assert.strictEqual(gaps.length, 0, '未接入维度不得生成情报事件');
+    for (const i of all) assert.ok(!(i.title || '').includes('：未接入'), '无「XX：未接入」噪音卡片');
+    const cd = BrandSvc.constructionDimensions();
+    assert.strictEqual(cd.length, 4, '建设中维度恰 4 条（独立字段）');
     // 按时间筛选
     const future = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, from: new Date(Date.now() + 86400000).toISOString() });
     assert.strictEqual(future.length, 0, '未来时间窗内无情报');

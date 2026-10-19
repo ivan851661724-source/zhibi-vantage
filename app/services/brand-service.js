@@ -305,21 +305,32 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
       });
     }
   } catch (e) { /* 无事件目录 */ }
-  // 资料缺口：未接入维度（不产生伪数据，只列缺口）
-  const cov = buildCoverage(tenantId, projectId, comp);
-  for (const d of cov.dimensions) {
-    if (d.state !== 'unsupported') continue;
-    push({
-      id: 'gap_' + d.code + '_' + (comp.id || 'x'), brandId, brandName: comp.name || null,
-      type: 'gap', typeText: '资料缺口', at: new Date().toISOString(),
-      nature: 'summarized', natureText: NATURE_TEXT.summarized,
-      status: 'insufficient', statusText: INTEL_STATUS_TEXT.insufficient,
-      title: d.displayName + '：未接入',
-      detail: '该数据源尚未接入，无法显示任何数据或估算。',
-      evidence: [], correctionEndpoint: null, dimension: d.code,
+  // r4.10：未接入维度不再生成情报事件。「XX：未接入」是项目级数据覆盖状态，
+  // 不是某品牌在某时刻发生的竞争变化——带时间戳/状态徽章地混进时间线属于噪音，
+  // 且随品牌数量成倍重复。建设中维度改由 constructionDimensions() 项目级
+  // 独立字段承载（前端在情报库底部单一去重区域呈现）。
+  // 真实采集失败 / 部分采集 / 已观察变化（上方两段）不受影响。
+  return items;
+}
+
+// ---------- 项目级建设中维度（r4.10） ----------
+// 未接入维度的唯一展示口径：与 buildCoverage 的 unsupported 判定同口径
+// （该维度下无 ga 能力 → 未接入）；按 code 去重恰一条；纯静态投影——
+// 不含品牌 ID、事件 ID、时间戳、Evidence/Snapshot 或任何模拟数据。
+// 暴露路径在租户鉴权后的 /api/intelligence 内，天然 tenant/project scoped。
+function constructionDimensions() {
+  const out = [];
+  for (const d of Registry.listDimensions()) {
+    const ga = Registry.capabilitiesByDimension(d.code).filter(c => c.maturity === 'ga');
+    if (ga.length) continue;
+    out.push({
+      code: d.code,
+      displayName: d.displayName,
+      state: 'not_integrated',
+      message: '尚未接入，当前不生成数据、估算或结论。',
     });
   }
-  return items;
+  return out;
 }
 
 // ---------- 品牌视图 ----------
@@ -401,6 +412,6 @@ module.exports = {
   NATURE_TEXT, INTEL_STATUS_TEXT, INTEL_TYPE_TEXT, COVER_STATE_TEXT,
   syncProjectBrands, loadProjectState, findCompetitor, domainOfUrl,
   buildCoverage, rebuildTimeline, timelineView, firstObservedAt,
-  listIntelligence, buildBrandIntelligence,
+  listIntelligence, buildBrandIntelligence, constructionDimensions,
   listBrandViews, getBrandView,
 };

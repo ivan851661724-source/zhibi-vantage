@@ -134,6 +134,8 @@ async function intelligence(ctx, req, res, url) {
   });
   ctx.sendJSON(res, 200, {
     projectId: rp.projectId, items, count: items.length,
+    // r4.10：项目级建设中维度（未接入维度不再混入 items，改由本字段独立承载）
+    constructionDimensions: BrandSvc.constructionDimensions(),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,

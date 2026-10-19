@@ -12,7 +12,8 @@
 | S4 失败报告重新生成 | `/report?projectId=A` 列表含「生成失败」行 → 点「重新生成」→ URL 切换为 `/report/<新reportId>?projectId=A`（≠ 失败报告 id）→ 新任务状态可见（排队中/生成中/已完成），页面轮询至终态 |
 | S5 未接入维度诚实呈现 | 品牌详情 coverage tab 建设中区域：列出 社媒内容/广告活动/口碑与评论/搜索与热度 四维度，标注「尚未接入」「刷新：不可用」，区域内无 `<svg>` 图表、无 0 值徽章、无虚构来源 |
 | S6 报告详情切项目（r3 规则 3） | 报告详情 `?projectId=A` → 顶部选择器切到 B → URL 变为 `/report?projectId=B`（**不保留** reportId）→ 页面不再展示 A 的报告内容（无「生成失败」「结构化事实版本」），展示 B 的报告列表空状态「暂无报告」 |
-| S7 情报库 brandId 清理（r3 规则 1） | `/intel?projectId=A&brandId=<A品牌>` 筛选生效（展示该品牌情报）→ 顶部选择器切到 B → URL **清除 brandId** → 页面展示 B 的真实空状态「尚无采集结果」，无「当前筛选没有结果」假空、无 A 项目情报内容 |
+| S7 情报库 brandId 清理（r3 规则 1） | `/intel?projectId=A&brandId=<A品牌>` 筛选生效（展示该品牌情报）→ 顶部选择器切到 B → URL **清除 brandId** → 页面展示 B 的真实数据或真实空状态，无「当前筛选没有结果」假空、无 A 项目情报内容 |
+| S8 情报库噪音修复（r4.10） | `/intel?projectId=A`：主列表无「XX：未接入」卡片（未接入维度是项目级覆盖状态，不是情报事件）；真实采集项（成功/部分完成）保留；底部「数据覆盖与建设中维度」折叠区域恰 4 项、每维度恰一次、统一文案「尚未接入，当前不生成数据、估算或结论。」、无时间戳/来源链接/Evidence/「待核实」/「资料不足」/svg 图表 |
 
 ## 运行前提
 
@@ -44,7 +45,7 @@ node seed.cjs --data-dir /tmp/zhibi-e2e --backend http://127.0.0.1:3300
 node core-ui-r2.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json
 ```
 
-成功输出：`[e2e] ALL PASS（7 场景，截图目录 ...）`，截图落 `web/e2e/.e2e-shots/`（gitignore，不进仓库）。退出码 0=全过 / 1=有失败 / 2=环境缺失（如未装 playwright）。
+成功输出：`[e2e] ALL PASS（8 场景，截图目录 ...）`，截图落 `web/e2e/.e2e-shots/`（gitignore，不进仓库）。退出码 0=全过 / 1=有失败 / 2=环境缺失（如未装 playwright）。
 
 ## 数据诚实性说明
 

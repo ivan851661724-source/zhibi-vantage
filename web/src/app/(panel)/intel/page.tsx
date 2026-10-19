@@ -11,7 +11,7 @@ import { IntelProfile } from '@/components/intel-profile';
 import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
-import { fetchIntelligence, type IntelItem } from '@/lib/core-api';
+import { fetchIntelligence, type ConstructionDimension, type IntelItem } from '@/lib/core-api';
 import { intelSummary } from '@/lib/core-logic';
 
 const INTEL_TYPES: { value: string; label: string }[] = [
@@ -42,6 +42,8 @@ function IntelInbox({ projectId }: { projectId: string }) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [fcItem, setFcItem] = useState<IntelItem | null>(null);
+  // r4.10：项目级建设中维度（后端独立字段，不再混入情报列表）
+  const [construction, setConstruction] = useState<ConstructionDimension[]>([]);
 
   // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
   // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
@@ -64,7 +66,7 @@ function IntelInbox({ projectId }: { projectId: string }) {
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
@@ -137,6 +139,25 @@ function IntelInbox({ projectId }: { projectId: string }) {
           competitorId={fcItem.competitorId}
           onClose={() => setFcItem(null)}
         />
+      ) : null}
+
+      {/* r4.10：数据覆盖与建设中维度——项目级单一去重区域（页面最底部）。
+          未接入维度不是情报事件：无时间戳、无来源、无证据、无状态徽章、无 0 值；
+          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。 */}
+      {construction.length ? (
+        <details className="core-building core-building-fold">
+          <summary>数据覆盖与建设中维度（{construction.length}）</summary>
+          <p className="hint">以下维度尚未接入，与具体品牌无关：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。</p>
+          <ul className="core-building-list">
+            {construction.map(d => (
+              <li key={d.code}>
+                <span className="core-building-name">{d.displayName}</span>
+                <span className="core-building-state">尚未接入</span>
+                <span className="core-building-msg">{d.message}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
     </section>
   );

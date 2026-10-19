@@ -92,6 +92,14 @@ export interface IntelItem {
   correctionEndpoint?: string | null;
 }
 
+// r4.10：项目级建设中维度（未接入维度不再作为情报事件出现在 items 中）
+export interface ConstructionDimension {
+  code: string;
+  displayName: string;
+  state: 'not_integrated';
+  message: string;
+}
+
 export interface OpportunityView {
   status: 'ok' | 'insufficient';
   statusText: string;
@@ -195,7 +203,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {

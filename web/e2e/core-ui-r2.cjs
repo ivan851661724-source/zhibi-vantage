@@ -11,6 +11,9 @@
 //      页面不再展示 A 的报告正文/引用/失败态，展示 B 的列表或空状态）（r3 规则 3）
 //   S7 情报库 ?projectId=A&brandId=<A品牌> 切换项目 → URL 清除 brandId，
 //      展示 B 的真实数据或真实空状态，无筛选残留造成的假空结果（r3 规则 1）
+//   S8 情报库噪音修复（r4.10）：主列表无「XX：未接入」卡片；底部「数据覆盖
+//      与建设中维度」区域恰 4 项、无时间戳/「暂无可打开来源」/「待核实」；
+//      统一文案；真实采集项（成功/部分完成）保留
 // 用法：node core-ui-r2.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json [--shots dir]
 // 前提：见同目录 README.md（后端 + 前端已启动；seed.cjs 已跑完）。
 const fs = require('fs');
@@ -195,7 +198,49 @@ function check(name, cond, extra) {
   check('无 A 项目情报内容（DollForge）', !body7.includes('DollForge'));
   await page.screenshot({ path: path.join(SHOTS, 's7-intel-clear-brandid.png'), fullPage: true });
 
+  // ---------- S8 情报库噪音修复（r4.10）：未接入维度 ≠ 情报事件 ----------
+  console.log('S8 未接入维度去噪 + 底部建设中区域');
+  await page.goto(q(FRONT + '/intel', SEED.projectA), { waitUntil: 'networkidle', timeout: 30000 });
+  await page.waitForSelector('.core-inbox', { timeout: 15000 });
+  await page.waitForFunction(() => {
+    const box = document.querySelector('.core-inbox');
+    if (!box) return false;
+    const t = box.textContent || '';
+    return t.includes('尚无采集结果') || document.querySelectorAll('.core-intel li').length > 0;
+  }, undefined, { timeout: 15000 });
+  await page.waitForTimeout(400);
+  const bodyA = await page.textContent('.core-inbox');
+  // 主列表：无「XX：未接入」噪音卡片（seed A 项目 3 品牌，修复前会有 12 条此类噪音）
+  check('主列表无「：未接入」噪音卡片', !bodyA.includes('：未接入') && !bodyA.includes('：未接入\n'));
+  for (const dim of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
+    check('主列表无「' + dim + '：未接入」', !bodyA.includes(dim + '：未接入'));
+  }
+  // 真实采集项保留（seed full：ok 品牌 1 次成功 + partial 品牌 1 次部分完成）
+  const lisA = await page.locator('.core-intel li').count();
+  check('真实情报项保留（成功/部分完成，A 项目恰 2 条）', lisA === 2, '实际 ' + lisA);
+  check('「采集完成」项在列表中', bodyA.includes('采集完成'));
+  // 底部建设中区域：折叠面板恰 4 项
+  await page.click('.core-building-fold > summary');
+  await page.waitForTimeout(200);
+  const fold = page.locator('.core-building-fold');
+  check('底部建设中区域存在（唯一、可折叠）', (await fold.count()) === 1);
+  const foldLis = await page.locator('.core-building-fold .core-building-list > li').count();
+  check('建设中区域恰 4 项（每维度一条，不随品牌数重复）', foldLis === 4, '实际 ' + foldLis);
+  const foldText = await fold.textContent();
+  for (const dim of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
+    check('建设中区域列出「' + dim + '」恰一次', (foldText.match(new RegExp(dim, 'g')) || []).length === 1);
+  }
+  check('统一文案出现 4 次（尚未接入，当前不生成数据、估算或结论。）', (foldText.match(/尚未接入，当前不生成数据、估算或结论。/g) || []).length === 4);
+  check('无时间戳（不含日期格式）', !/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/.test(foldText));
+  check('无「待核实」徽章', !foldText.includes('待核实'));
+  check('无「暂无可打开来源」', !foldText.includes('暂无可打开来源'));
+  check('无「资料不足」', !foldText.includes('资料不足'));
+  check('无「尚未采集」事件字样', !foldText.includes('尚未采集'));
+  const foldHtml = await fold.innerHTML();
+  check('无 svg 图表 / 无 Evidence 链接', !foldHtml.includes('<svg') && !foldHtml.includes('href='));
+  await page.screenshot({ path: path.join(SHOTS, 's8-intel-noise-fix.png'), fullPage: true });
+
   await browser.close();
-  console.log(failures === 0 ? '[e2e] ALL PASS（7 场景，截图目录 ' + SHOTS + '）' : '[e2e] ' + failures + ' FAIL');
+  console.log(failures === 0 ? '[e2e] ALL PASS（8 场景，截图目录 ' + SHOTS + '）' : '[e2e] ' + failures + ' FAIL');
   process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error('[e2e] FATAL', e && e.stack || e); process.exit(1); });
