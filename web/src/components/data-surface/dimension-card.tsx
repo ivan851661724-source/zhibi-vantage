@@ -53,6 +53,52 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
       </div>
     );
   }
+  // ---------- Wave 1：四个新维度各自的摘要形状（不复用 Shopify 价格卡模板） ----------
+  if (summary.kind === 'social_videos') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'social_videos' }>;
+    return (
+      <div className="ds-card-sum">
+        公开视频 <b className="num">{s.videoCount}</b> 个
+        {s.channelTitle ? <> · 频道 {s.channelTitle}</> : null}
+        {s.periodStart && s.periodEnd ? <> · 期间 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="公开来源观察：YouTube Data API 实际返回的公开字段">公开来源观察</span>
+        {s.matchReasons && s.matchReasons.length ? <span className="ds-mm-note">归属依据：{s.matchReasons.join('；')}</span> : null}
+      </div>
+    );
+  }
+  if (summary.kind === 'trend_series') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'trend_series' }>;
+    return (
+      <div className="ds-card-sum">
+        趋势点 <b className="num">{s.pointCount}</b> 个
+        {s.keyword ? <> · 关键词 {s.keyword}</> : null}
+        {s.region ? <> · 地区 {s.region}</> : null}
+        {s.periodStart && s.periodEnd ? <> · 期间 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="数据服务估算：非平台原始事实">数据服务估算</span>
+      </div>
+    );
+  }
+  if (summary.kind === 'ad_creatives') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'ad_creatives' }>;
+    return (
+      <div className="ds-card-sum">
+        公开广告素材 <b className="num">{s.creativeCount}</b> 条
+        <span className="ds-mm-tag" title="数据服务估算：仅接口实际返回的公开字段">数据服务估算</span>
+        <span className="ds-mm-note">广告花费 / 获客成本 / ROI / 转化率当前公开来源无法直接观测</span>
+      </div>
+    );
+  }
+  if (summary.kind === 'reviews_digest') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'reviews_digest' }>;
+    return (
+      <div className="ds-card-sum">
+        评论样本 <b className="num">{s.reviewCount}</b> 条 · 来源页面 <b className="num">{s.sourceCount}</b> 个
+        {s.periodStart && s.periodEnd ? <> · 采集范围 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="公开来源观察：通过 robots 与归属校验的公开页面">公开来源观察</span>
+        {s.sampleNote ? <span className="ds-mm-note">{s.sampleNote}</span> : null}
+      </div>
+    );
+  }
   // 未知 kind：诚实降级为通用键值（不假装看得懂，也不编数）
   return (
     <div className="ds-card-sum ds-card-sum-unknown">
@@ -97,6 +143,8 @@ export function DimensionCard({
         </div>
       ) : null))}
       {dim.surfaceState === 'unsupported' && dim.reasonText ? <p className="ds-card-note">{dim.reasonText}</p> : null}
+      {/* P0-2 整改 r2：pending_config 用户侧口径「数据服务暂不可用」（reasonText 后端下发） */}
+      {dim.surfaceState === 'pending_config' && dim.reasonText ? <p className="ds-card-note ds-note-config">{dim.reasonText}</p> : null}
       {dim.surfaceState === 'empty' ? <p className="ds-card-note">该维度受支持但还未采集过数据，点「刷新数据」开始第一次采集。</p> : null}
       {dim.surfaceState === 'loading' ? <p className="ds-card-note">正在采集该维度数据，完成后自动更新（无需重复点击）。</p> : null}
 

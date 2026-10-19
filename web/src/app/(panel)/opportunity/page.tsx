@@ -37,17 +37,26 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
           <>
             <li>已接入维度：{db.integrated.length ? db.integrated.join('、') : '—'}</li>
             <li>当前实际有数据的维度：{db.covered.length ? db.covered.join('、') : '暂无（尚未采集到可用数据）'}</li>
-            <li>本次判断未使用的维度（建设中）：{db.notIntegrated.length ? db.notIntegrated.join('、') : '无'}</li>
+            {db.pendingConfig && db.pendingConfig.length ? <li>需要系统数据服务配置的维度：{db.pendingConfig.join('、')}</li> : null}
+            <li>本次判断未使用的维度（建设中）：{(db.pendingConfig || []).length + db.notIntegrated.length ? [...(db.pendingConfig || []), ...db.notIntegrated].join('、') : '无'}</li>
           </>
         ) : null}
         <li>机会状态：{v.statusText}</li>
         {v.note ? <li>{v.note}</li> : null}
       </ul>
-      {db && db.notIntegrated.length ? (
+      {db && (db.pendingConfig || []).length + db.notIntegrated.length ? (
         <div className="core-building core-opp-building">
           <div className="core-building-head">数据覆盖与建设中维度</div>
-          <p className="hint">以下维度尚未接入：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。</p>
+          <p className="hint">以下维度当前不生成数据、估算或结论；接入并完成配置验证后这里会展示采集状态与来源。</p>
           <ul className="core-building-list">
+            {(db.pendingConfig || []).map(n => (
+              <li key={'pc_' + n}>
+                <span className="core-building-name">{n}</span>
+                <span className="core-building-state">需要系统数据服务配置</span>
+                <span className="core-building-meta">最近观察：—</span>
+                <span className="core-building-meta">当前不生成数据、估算或结论</span>
+              </li>
+            ))}
             {db.notIntegrated.map(n => (
               <li key={n}>
                 <span className="core-building-name">{n}</span>

@@ -29,8 +29,10 @@ const DIMENSIONS = Object.freeze([
 ]);
 const DIMENSION_CODES = new Set(DIMENSIONS.map(d => d.code));
 
-// maturity 词表（05 §17 GA Gate；not_integrated = 未接入，不得宣称能力）
-const MATURITY = new Set(['ga', 'not_integrated']);
+// maturity 词表（05 §17 GA Gate；not_integrated = 未接入，不得宣称能力；
+// pending_config = 结构就绪但未通过一次真实 staging 成功请求，禁止标 ga——
+// Wave 1 纪律：没有真实成功请求的 adapter 不能升级为 GA）
+const MATURITY = new Set(['ga', 'not_integrated', 'pending_config']);
 
 const CAPABILITIES = Object.freeze([
   {
@@ -80,88 +82,106 @@ const CAPABILITIES = Object.freeze([
     refreshPolicy: { cooldownMinutes: 5, dailyQuota: null },
   },
   {
-    code: 'social_content',
-    displayName: '社媒内容',
+    // Wave 1：YouTube 官方 Data API v3 公开内容（官方 REST 契约直连，零 npm 依赖）。
+    // pending_config：结构/契约就绪，凭据（YOUTUBE_API_KEY）真实可用并完成一次
+    // 真实 staging 成功请求前，禁止升级 ga（live-source-smoke 负责验证）。
+    code: 'youtube_content',
+    displayName: '社媒内容（YouTube 公开频道）',
     dimension: 'social_content',
-    adapter: null,
-    adapters: [],
-    provider: null,
-    supportedObjects: { objectTypes: [], platforms: [], markets: 'none' },
-    access: null,
-    requiresServerCredential: false,
-    manualRefresh: false,
+    adapter: 'youtube',
+    adapters: ['youtube'],
+    provider: 'youtube_data_api_v3',
+    supportedObjects: { objectTypes: ['official_domain', 'brand_channel'], platforms: ['youtube'], markets: 'public_api' },
+    access: 'official_public_api',
+    requiresServerCredential: true,
+    configKeys: ['YOUTUBE_API_KEY'],
+    measurementMethod: 'public_source_observation',
+    manualRefresh: true,
     autoInspect: false,
-    freshnessSlaHours: null,
-    maturity: 'not_integrated',
-    limitations: '数据源尚未接入；本条目仅为维度占位，不宣称任何采集能力（05 §8 门槛）',
-    costAttributionKey: null,
-    collectorVersion: null,
-    parserVersion: null,
-    adapterStrategy: null,
-    refreshPolicy: { cooldownMinutes: 0, dailyQuota: null },
+    freshnessSlaHours: 48,
+    maturity: 'pending_config',
+    limitations: '仅展示 YouTube Data API 实际返回的公开视频与公开互动字段（标题/发布时间/链接/缩略图/公开计数/可用评论摘要）；广告花费、转化、私域数据不可观测，不推断（00 §17 冻结）',
+    costAttributionKey: 'infra.youtube_content',
+    collectorVersion: 'net-1',
+    parserVersion: 'youtube-adapter-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 30, dailyQuota: null },
   },
   {
-    code: 'ad_activity',
-    displayName: '广告活动',
+    // Wave 1：TikTok 官方商业内容研究接口骨架。未获官方研究权限前保持
+    // pending_config（「需要系统数据服务配置」），不得写成「未观察到广告」或「未接入」。
+    code: 'tiktok_commercial_content',
+    displayName: '广告活动（TikTok 商业内容）',
     dimension: 'ad_campaigns',
-    adapter: null,
-    adapters: [],
-    provider: null,
-    supportedObjects: { objectTypes: [], platforms: [], markets: 'none' },
-    access: null,
-    requiresServerCredential: false,
-    manualRefresh: false,
+    adapter: 'tiktok',
+    adapters: ['tiktok'],
+    provider: 'tiktok_research_api',
+    supportedObjects: { objectTypes: ['brand_channel', 'advertiser_name'], platforms: ['tiktok'], markets: 'public_api' },
+    access: 'official_commercial_api',
+    requiresServerCredential: true,
+    configKeys: ['TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET'],
+    measurementMethod: 'licensed_estimate',
+    manualRefresh: true,
     autoInspect: false,
-    freshnessSlaHours: null,
-    maturity: 'not_integrated',
-    limitations: '广告数据源尚未接入（05 §1 P1 Ad Activity 占位）',
-    costAttributionKey: null,
-    collectorVersion: null,
-    parserVersion: null,
-    adapterStrategy: null,
-    refreshPolicy: { cooldownMinutes: 0, dailyQuota: null },
+    freshnessSlaHours: 72,
+    maturity: 'pending_config',
+    limitations: '仅展示接口实际返回的公开广告素材（素材链接/广告主/投放日期/地区/公开触达字段）及来源；广告花费、获客成本、ROI、转化率不可观测，不推算（00 §17 冻结）',
+    costAttributionKey: 'infra.tiktok_commercial_content',
+    collectorVersion: 'net-1',
+    parserVersion: 'tiktok-adapter-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 60, dailyQuota: null },
   },
   {
-    code: 'review_rating',
-    displayName: '口碑与评论',
+    // Wave 1：公开评论页发现与可验证采集（复用系统搜索链 + robots/SSRF 合规门）。
+    // 不接无授权的封闭评论 API（Trustpilot 等商业 API 未来以独立 provider 接入）。
+    code: 'public_reviews',
+    displayName: '口碑与评论（公开页面）',
     dimension: 'reviews_reputation',
-    adapter: null,
-    adapters: [],
-    provider: null,
-    supportedObjects: { objectTypes: [], platforms: [], markets: 'none' },
-    access: null,
+    adapter: 'reviews',
+    adapters: ['reviews'],
+    provider: 'public_web_reviews',
+    supportedObjects: { objectTypes: ['official_domain', 'public_review_page'], platforms: ['public_web'], markets: 'public_web' },
+    access: 'public_web_page',
     requiresServerCredential: false,
-    manualRefresh: false,
+    configKeys: ['SERPER_API_KEY', 'TAVILY_API_KEY', 'BRAVE_API_KEY', 'BOCHA_API_KEY'],
+    measurementMethod: 'public_source_observation',
+    manualRefresh: true,
     autoInspect: false,
-    freshnessSlaHours: null,
-    maturity: 'not_integrated',
-    limitations: '评论数据源尚未接入（05 §1 P1 Review/Rating 占位）',
-    costAttributionKey: null,
-    collectorVersion: null,
-    parserVersion: null,
-    adapterStrategy: null,
-    refreshPolicy: { cooldownMinutes: 0, dailyQuota: null },
+    freshnessSlaHours: 72,
+    maturity: 'pending_config',
+    limitations: '仅展示通过 robots/公开访问/品牌归属校验页面的评论片段、评分字段与来源；样本量与采集时间范围必须明示，不将页面样本表述为「全网口碑」（05 §9）',
+    costAttributionKey: 'infra.public_reviews',
+    collectorVersion: 'net-1',
+    parserVersion: 'reviews-adapter-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 60, dailyQuota: null },
   },
   {
-    code: 'search_interest',
-    displayName: '搜索与热度',
+    // Wave 1：DataForSEO Labs Trends（官方 REST 契约直连；CommonJS 零依赖架构
+    // 下不引 TS SDK，按官方契约受控请求——Basic auth，凭据不进快照/日志）。
+    // licensed_estimate：结果为数据服务估算，永不做平台原始事实表述。
+    code: 'dataforseo_trends',
+    displayName: '搜索与热度（DataForSEO Trends）',
     dimension: 'search_interest',
-    adapter: null,
-    adapters: [],
-    provider: null,
-    supportedObjects: { objectTypes: [], platforms: [], markets: 'none' },
-    access: null,
-    requiresServerCredential: false,
-    manualRefresh: false,
+    adapter: 'dataforseo',
+    adapters: ['dataforseo'],
+    provider: 'dataforseo_labs_trends',
+    supportedObjects: { objectTypes: ['keyword', 'official_domain'], platforms: ['dataforseo'], markets: 'licensed_api' },
+    access: 'licensed_data_service',
+    requiresServerCredential: true,
+    configKeys: ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'],
+    measurementMethod: 'licensed_estimate',
+    manualRefresh: true,
     autoInspect: false,
-    freshnessSlaHours: null,
-    maturity: 'not_integrated',
-    limitations: '搜索兴趣源尚未接入（05 §1 P2 Search Interest 占位）；兴趣 ≠ 销量 ≠ 绝对搜索量（05 §9）',
-    costAttributionKey: null,
-    collectorVersion: null,
-    parserVersion: null,
-    adapterStrategy: null,
-    refreshPolicy: { cooldownMinutes: 0, dailyQuota: null },
+    freshnessSlaHours: 168,
+    maturity: 'pending_config',
+    limitations: '仅展示 DataForSEO 实际返回的趋势/地区/时间段字段，一律标注「数据服务估算」（licensed_estimate）；兴趣 ≠ 销量 ≠ 绝对搜索量，不把搜索摘要当作热度（05 §9）',
+    costAttributionKey: 'infra.dataforseo_trends',
+    collectorVersion: 'net-1',
+    parserVersion: 'dataforseo-adapter-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 360, dailyQuota: null },
   },
 ]);
 
@@ -185,6 +205,20 @@ function supportsForBrand(capabilityCode, brandCtx) {
   if (!cap) return { supported: false, reasonCode: 'not_supported', reasonText: '能力不存在' };
   if (cap.maturity === 'not_integrated') {
     return { supported: false, reasonCode: 'source_not_integrated', reasonText: '数据源尚未接入，暂时无法采集该维度' };
+  }
+  if (cap.maturity === 'pending_config') {
+    // P0-2 整改 r2：实现完成未验证——结构条件满足即允许发起真实采集；
+    // 运行门控（凭据就绪/验证状态）由 source-readiness 在采集入口统一管理。
+    const b2 = brandCtx || {};
+    if (cap.code === 'youtube_content' || cap.code === 'dataforseo_trends' || cap.code === 'tiktok_commercial_content') {
+      if (!b2.name && !b2.url) return { supported: false, reasonCode: 'not_applicable', reasonText: '该品牌缺少可用于查询的名称或官网地址' };
+      return { supported: true, reasonCode: null, reasonText: null };
+    }
+    if (cap.code === 'public_reviews') {
+      if (!b2.url) return { supported: false, reasonCode: 'not_applicable', reasonText: '该品牌没有可发现评论页的官网地址' };
+      return { supported: true, reasonCode: null, reasonText: null };
+    }
+    return { supported: false, reasonCode: 'source_pending_config', reasonText: '数据服务暂不可用，请稍后再试。' };
   }
   const b = brandCtx || {};
   if (cap.code === 'shopify_catalog' || cap.code === 'shopify_collections') {
@@ -219,6 +253,23 @@ function assertRegistryIntegrity() {
     if (!MATURITY.has(cap.maturity)) errs.push(cap.code + ': unknown maturity ' + cap.maturity);
     if (cap.maturity === 'ga') {
       if (!cap.adapterStrategy) errs.push(cap.code + ': ga capability requires adapterStrategy');
+    } else if (cap.maturity === 'pending_config') {
+      // Wave 1：结构就绪但未通过真实 staging 验证——契约要件必须显式齐备，
+      // 升级 ga 由 live-source-smoke 真实成功请求触发（人工改 Registry）。
+      if (!cap.adapter || !cap.provider) errs.push(cap.code + ': pending_config capability requires adapter+provider');
+      if (!Array.isArray(cap.adapters) || !cap.adapters.includes(cap.adapter)) {
+        errs.push(cap.code + ': pending_config capability adapters[] must include primary adapter');
+      }
+      if (!cap.adapterStrategy) errs.push(cap.code + ': pending_config capability requires adapterStrategy');
+      if (!Array.isArray(cap.configKeys) || !cap.configKeys.length || !cap.configKeys.every(k => typeof k === 'string' && k.length)) {
+        errs.push(cap.code + ': pending_config capability requires configKeys（smoke 与状态展示依据）');
+      }
+      if (!cap.measurementMethod) errs.push(cap.code + ': pending_config capability requires measurementMethod');
+      if (!cap.freshnessSlaHours) errs.push(cap.code + ': pending_config capability requires freshnessSlaHours');
+      if (!cap.manualRefresh && !cap.autoInspect) errs.push(cap.code + ': pending_config capability must allow refresh or inspect');
+      if (cap.refreshPolicy && !(cap.refreshPolicy.cooldownMinutes > 0)) {
+        errs.push(cap.code + ': pending_config capability requires cooldownMinutes > 0');
+      }
     } else if (cap.adapterStrategy != null) errs.push(cap.code + ': not_integrated capability must not declare adapterStrategy');
     if (cap.maturity === 'ga') {
       if (!cap.adapter || !cap.provider) errs.push(cap.code + ': ga capability requires adapter+provider');
@@ -227,10 +278,11 @@ function assertRegistryIntegrity() {
       }
       if (!cap.manualRefresh && !cap.autoInspect) errs.push(cap.code + ': ga capability must allow refresh or inspect');
       if (!cap.freshnessSlaHours) errs.push(cap.code + ': ga capability requires freshnessSlaHours');
-    } else {
+    } else if (cap.maturity !== 'pending_config') {
       if (cap.adapter || cap.provider) errs.push(cap.code + ': not_integrated capability must not declare adapter/provider');
       if (Array.isArray(cap.adapters) && cap.adapters.length) errs.push(cap.code + ': not_integrated capability must not declare adapters[]');
       if (cap.manualRefresh || cap.autoInspect) errs.push(cap.code + ': not_integrated capability must not allow refresh/inspect');
+      if (Array.isArray(cap.configKeys) && cap.configKeys.length) errs.push(cap.code + ': not_integrated capability must not declare configKeys');
     }
     // refreshPolicy：cooldownMinutes ≥ 0；ga 能力必须有冷却保护（>0），防无限刷新
     const rp = cap.refreshPolicy;
@@ -265,6 +317,10 @@ function userView(cap) {
     maturity: cap.maturity,
     limitations: cap.limitations,
     refreshPolicy: cap.refreshPolicy,
+    // Wave 1：产品面声明（非内部成本细节）——凭据要求与测量方法供状态展示与
+    // 「数据服务估算/公开来源观察」标签
+    configKeys: Array.isArray(cap.configKeys) ? cap.configKeys.slice() : null,
+    measurementMethod: cap.measurementMethod || null,
   };
 }
 // 管理员视图（全字段）

@@ -124,7 +124,10 @@ async function fetchPage(url, timeoutMs, opts) {
       if (gate.waitMs) await new Promise(r2 => setTimeout(r2, gate.waitMs));
       const robots = await FetchGate.robotsAllows(preU.origin, preU.pathname);
       if (robots === false) { FetchGate.recordResult(preU.hostname, true); return { ok: false, error: 'ROBOTS_DISALLOWED' }; }
-      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' } });
+      // Wave 1：受控自定义头（如 DataForSEO Basic auth）——仅合并进请求，
+      // 绝不进快照/日志/错误信息（凭据红线）；method 支持 JSON API POST。
+      const extraHeaders = (o.headers && typeof o.headers === 'object') ? o.headers : {};
+      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, method: o.method || 'GET', body: o.body != null ? o.body : undefined, headers: Object.assign({ 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' }, extraHeaders) });
       if (res.status >= 300 && res.status < 400 && res.headers && res.headers.location) {
         hops++;
         if (hops > 3) { const sid = recFail(Snapshot.SOURCE_STATUS.UNAVAILABLE, 'too_many_redirects', res.status, current, hops); return { ok: false, error: 'too_many_redirects', snapshotId: sid }; }
@@ -297,6 +300,8 @@ async function safeRequestOnce(rawUrl, opts) {
     });
     req.on('timeout', () => req.destroy(new Error('SAFE_FETCH_TIMEOUT')));
     req.on('error', reject);
+    // Wave 1：受控请求体（JSON API POST；凭据在 Authorization 头，体不进快照/日志）
+    if (o.body != null) req.write(o.body);
     req.end();
   });
   return res;

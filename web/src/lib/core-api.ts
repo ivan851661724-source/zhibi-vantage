@@ -2,7 +2,7 @@
 // 只暴露用户可见字段：不含服务器路径、内部错误码、栈、密钥、原始 payload 路径。
 import { apiGet, apiPost } from '@/lib/api';
 
-export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'unknown';
+export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'pending_config' | 'unknown';
 
 export interface CoverageDimension {
   code: string;
@@ -93,11 +93,13 @@ export interface IntelItem {
 }
 
 // r4.10：项目级建设中维度（未接入维度不再作为情报事件出现在 items 中）
+// P0-2 整改 r2：pending_config（实现完成未验证；用户侧「数据服务暂不可用」）≠ not_integrated
 export interface ConstructionDimension {
   code: string;
   displayName: string;
-  state: 'not_integrated';
+  state: 'pending_config' | 'not_integrated';
   message: string;
+  configKeys?: string[];
 }
 
 export interface OpportunityView {
@@ -109,7 +111,7 @@ export interface OpportunityView {
     caveats?: string[]; status?: string; note?: string;
   }[];
   sample: { brandCount: number; brandsWithData: number; required?: number };
-  dimensionBasis?: { integrated: string[]; notIntegrated: string[]; covered: string[] };
+  dimensionBasis?: { integrated: string[]; pendingConfig?: string[]; notIntegrated: string[]; covered: string[] };
   limits: string[];
   note?: string | null;
 }
@@ -242,6 +244,7 @@ export const COVER_STATE_TEXT: Record<string, string> = {
   loading: '采集中',
   failed: '最近采集失败，尚无可展示数据',
   unsupported: '未接入',
+  pending_config: '数据服务暂不可用',
   unknown: '尚未采集',
 };
 

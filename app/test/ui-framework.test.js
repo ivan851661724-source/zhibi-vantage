@@ -106,12 +106,13 @@ function pageBody(ids) {
     const db = v.dimensionBasis;
     assert.ok(db.integrated.length >= 1, '已接入维度非空');
     for (const name of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
-      assert.ok(db.notIntegrated.includes(name), `「${name}」必须在建设中名单`);
+      // Wave 1：四维为 pending_config——「需要系统数据服务配置」单列（≠未接入）
+      assert.ok((db.pendingConfig || []).includes(name), `「${name}」必须在需要配置名单`);
       assert.ok(!db.integrated.includes(name), `「${name}」不得出现在已接入名单`);
     }
     assert.ok(db.covered.includes('商品目录') || db.covered.length >= 1, '采集后有实际数据维度');
     // 建设中维度不得计入已接入（评审判据：不把未接入伪装成覆盖）
-    assert.ok(v.limits.some(l => /未接入/.test(l)), 'limits 同步保留未接入声明');
+    assert.ok(v.limits.some(l => /需要系统数据服务配置/.test(l)), 'limits 保留需要配置声明（Wave 1 语义）');
   });
 
   await t('U4 报告自动重试进度透出（列表「自动重试中」依据）；恢复后 generatedBy=llm', async () => {
@@ -156,7 +157,7 @@ function pageBody(ids) {
     const feSections = [...logicTs.matchAll(/code: '([a-z]+)'/g)].map(m => m[1]).sort();
     assert.deepStrictEqual(feSections, [...Report.REPORT_ALL_SECTIONS].sort(), '报告章节码集两端一致');
     // 覆盖状态枚举：后端 dimensionCoverage 可能产出的 state ⊆ 前端 COVER_STATE_TEXT 键
-    const keys = ['ok', 'partial', 'empty', 'stale', 'loading', 'failed', 'unsupported', 'unknown'];
+    const keys = ['ok', 'partial', 'empty', 'stale', 'loading', 'failed', 'unsupported', 'pending_config', 'unknown'];
     for (const k of keys) assert.ok(new RegExp(`${k}: '`).test(apiTs), `COVER_STATE_TEXT 缺少 ${k}`);
     const cov = BrandSvc.buildCoverage(TID, PID, BrandSvc.findCompetitor(BrandSvc.loadProjectState(TID, PID), 'compU1'));
     for (const d of cov.dimensions) assert.ok(keys.includes(d.state), `未知覆盖状态 ${d.state}`);

@@ -159,7 +159,8 @@ function buildFactPack(tenantId, projectId, state, scope) {
     const cov = BrandSvc.buildCoverage(tenantId, projectId, comp || {});
     coverage.push({ brandId: x.bid, name: brand.canonicalName, summary: cov.summary, dimensions: cov.dimensions.map(d => ({ code: d.code, state: d.state, stateText: d.stateText, lastObservedAt: d.lastObservedAt })) });
     for (const d of cov.dimensions) {
-      if (d.state === 'unsupported') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_integrated', text: '该数据源尚未接入，不提供任何数据或估算。' });
+      if (d.state === 'pending_config') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'pending_config', text: '需要系统数据服务配置：当前不生成数据、估算或结论。' });
+      else if (d.state === 'unsupported') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_integrated', text: '该数据源尚未接入，不提供任何数据或估算。' });
       else if (d.state === 'unknown') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_collected', text: '尚未采集（不等于未发现数据）。' });
       else if (d.state === 'failed') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'collect_failed', text: '最近采集失败，尚无可展示数据。' });
       else if (d.state === 'partial') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'partial', text: '部分采集，枚举不完整。' });
@@ -243,21 +244,31 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
     }
   }
   const MIN_BRANDS = 3;
-  // 只读视图扩展（UI 轮）：机会页「数据基础」需要维度级构成——已接入 / 建设中 / 实际有数据
+  // 只读视图扩展（UI 轮）：机会页「数据基础」需要维度级构成——已接入 / 需要配置 / 未接入 / 实际有数据
+  // Wave 1：pending_config 单列（需要系统数据服务配置 ≠ 未接入）
   const allDims = require('./capability-registry.js').listDimensions();
   const integratedNames = [];
+  const pendingConfigNames = [];
   const notIntegratedNames = [];
   for (const d of allDims) {
     const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
-    (caps.some(c => c.maturity === 'ga') ? integratedNames : notIntegratedNames).push(d.displayName);
+    if (caps.some(c => c.maturity === 'ga')) integratedNames.push(d.displayName);
+    else if (caps.some(c => c.maturity === 'pending_config')) pendingConfigNames.push(d.displayName);
+    else notIntegratedNames.push(d.displayName);
   }
   const limits = [];
   for (const d of allDims) {
     const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
-    if (!caps.some(c => c.maturity === 'ga')) limits.push(d.displayName + '：数据源未接入，本版不据此生成机会结论');
+    if (!caps.some(c => c.maturity === 'ga')) {
+      const isPending = caps.some(c => c.maturity === 'pending_config');
+      limits.push(d.displayName + (isPending
+        ? '：需要系统数据服务配置，配置并验证前不据此生成机会结论'
+        : '：数据源未接入，本版不据此生成机会结论'));
+    }
   }
   const dimensionBasis = {
     integrated: integratedNames,
+    pendingConfig: pendingConfigNames,
     notIntegrated: notIntegratedNames,
     covered: [...dimsWithData],
   };

@@ -53,6 +53,7 @@ const COVER_STATE_TEXT = Object.freeze({
   loading: '采集中',
   failed: '最近采集失败，尚无可展示数据',
   unsupported: '未接入',
+  pending_config: '数据服务暂不可用',
   unknown: '尚未采集',
 });
 
@@ -102,6 +103,19 @@ function buildCoverage(tenantId, projectId, competitor) {
   for (const d of Registry.listDimensions()) {
     const caps = Registry.capabilitiesByDimension(d.code);
     const ga = caps.filter(c => c.maturity === 'ga');
+    // P0-2 整改 r2：实现态（pending_config）与运行态（readiness）分离——用户侧
+    // 只显示四种口径之一（此处=数据服务暂不可用）；凭据等技术细节仅管理员
+    // 健康接口可见（GET /api/admin/data-surface/capabilities），不进用户投影。
+    const pending = caps.filter(c => c.maturity === 'pending_config');
+    if (!ga.length && pending.length) {
+      dims.push({
+        code: d.code, displayName: d.displayName, state: 'pending_config', stateText: '数据服务暂不可用',
+        capabilities: pending.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity, measurementMethod: c.measurementMethod || null })),
+        lastObservedAt: null, reason: 'service_credential_required',
+        note: '数据服务暂不可用，请稍后再试。当前不生成数据、估算或结论。',
+      });
+      continue;
+    }
     if (!ga.length) {
       dims.push({
         code: d.code, displayName: d.displayName, state: 'unsupported', stateText: '未接入',
@@ -160,7 +174,8 @@ function buildCoverage(tenantId, projectId, competitor) {
       reason: finalState === 'unsupported' ? 'not_supported_for_object' : (hasAttempt ? null : 'not_collected_yet'),
     });
   }
-  const integrated = dims.filter(d => d.state !== 'unsupported');
+  // Wave 1：integrated 只计真正可采集的维度；pending_config 单列（不是已接入）
+  const integrated = dims.filter(d => d.state !== 'unsupported' && d.state !== 'pending_config');
   const withData = integrated.filter(d => ['ok', 'partial', 'stale'].includes(d.state));
   return {
     dimensions: dims,
@@ -168,6 +183,7 @@ function buildCoverage(tenantId, projectId, competitor) {
       totalDimensions: dims.length,
       integratedDimensions: integrated.length,
       notIntegrated: dims.filter(d => d.state === 'unsupported').map(d => d.code),
+      pendingConfig: dims.filter(d => d.state === 'pending_config').map(d => d.code),
       dimensionsWithData: withData.length,
       notCollected: integrated.filter(d => d.state === 'unknown').map(d => d.code),
     },
@@ -321,14 +337,29 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
 function constructionDimensions() {
   const out = [];
   for (const d of Registry.listDimensions()) {
-    const ga = Registry.capabilitiesByDimension(d.code).filter(c => c.maturity === 'ga');
+    const caps = Registry.capabilitiesByDimension(d.code);
+    const ga = caps.filter(c => c.maturity === 'ga');
     if (ga.length) continue;
-    out.push({
-      code: d.code,
-      displayName: d.displayName,
-      state: 'not_integrated',
-      message: '尚未接入，当前不生成数据、估算或结论。',
-    });
+    const pending = caps.filter(c => c.maturity === 'pending_config');
+    // r2：维度下全部为 pending_config → 用户侧「数据服务暂不可用」；
+    // 仍无任何真实能力 → 尚未接入。两种状态都不生成情报事件。
+    if (pending.length) {
+      // P0-2 整改 r2：用户侧口径收敛——「数据服务暂不可用」；configKeys 只进
+      // 管理员健康接口，不进用户投影（任务书 r2 §P0-2）。
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'pending_config',
+        message: '数据服务暂不可用，请稍后再试。当前不生成数据、估算或结论。',
+      });
+    } else {
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'not_integrated',
+        message: '尚未接入，当前不生成数据、估算或结论。',
+      });
+    }
   }
   return out;
 }

@@ -19,6 +19,80 @@ function localDay(iso: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' });
 }
 
+function ObsRow({ o, dimension }: { o: SurfaceObservation; dimension: string }) {
+  const day = (iso: string | null) => (iso ? localDay(iso) : '');
+  if (dimension === 'social_content') {
+    return (
+      <li className="ds-obs-item">
+        <span className="nm" title={o.title}>{o.title}</span>
+        <span className="val">
+          {o.publishedAt ? <span className="ds-obs-pub">{day(o.publishedAt)} 发布</span> : null}
+          {o.viewCount != null ? <> · 播放 <b className="num">{o.viewCount}</b></> : null}
+          {o.likeCount != null ? <> · 赞 <b className="num">{o.likeCount}</b></> : null}
+          {o.commentCount != null ? <> · 评论 <b className="num">{o.commentCount}</b></> : null}
+          {o.videoUrl ? <a className="ds-obs-link" href={o.videoUrl} target="_blank" rel="noreferrer noopener">来源 ↗</a> : null}
+          <span className="ds-mm-tag">公开来源观察</span>
+        </span>
+      </li>
+    );
+  }
+  if (dimension === 'search_interest') {
+    return (
+      <li className="ds-obs-item">
+        <span className="nm" title={o.title}>{o.title}</span>
+        <span className="val">
+          {o.periodStart && o.periodEnd ? <span className="ds-obs-pub">{o.periodStart} ~ {o.periodEnd}</span> : null}
+          {o.value != null ? <> · 指数 <b className="num">{o.value}</b></> : null}
+          {o.region ? <> · {o.region}</> : null}
+          <span className="ds-mm-tag">数据服务估算</span>
+        </span>
+      </li>
+    );
+  }
+  if (dimension === 'ad_campaigns') {
+    return (
+      <li className="ds-obs-item">
+        <span className="nm" title={o.title}>{o.title}</span>
+        <span className="val">
+          {o.publishedAt ? <span className="ds-obs-pub">{day(o.publishedAt)} 起投</span> : null}
+          {o.advertiser ? <> · {o.advertiser}</> : null}
+          {o.region ? <> · {o.region}</> : null}
+          {o.creativeUrl ? <a className="ds-obs-link" href={o.creativeUrl} target="_blank" rel="noreferrer noopener">素材 ↗</a> : null}
+          <span className="ds-mm-tag">数据服务估算</span>
+        </span>
+      </li>
+    );
+  }
+  if (dimension === 'reviews_reputation') {
+    return (
+      <li className="ds-obs-item">
+        <span className="nm" title={o.title}>{o.title}</span>
+        <span className="val">
+          {o.rating != null ? <> · 评分 <b className="num">{o.rating}</b></> : null}
+          {o.reviewCount != null ? <> · {o.reviewCount} 条评论</> : null}
+          {o.snippet ? <span className="ds-obs-snippet">{o.snippet}</span> : null}
+          {o.sourceUrl ? <a className="ds-obs-link" href={o.sourceUrl} target="_blank" rel="noreferrer noopener">来源 ↗</a> : null}
+          <span className="ds-mm-tag">公开来源观察</span>
+        </span>
+      </li>
+    );
+  }
+  return (
+    <li className="ds-obs-item">
+      <span className="nm" title={o.title}>{o.title}</span>
+      <span className="val">
+        {o.price != null ? (
+          o.currency
+            ? <span className="num">{curLabel(o.currency)}{o.price}</span>
+            : <span className="num">{o.price}（币种待确认）</span>
+        ) : <span className="ds-obs-noprice">价格未取到</span>}
+        {!o.available ? <span className="ds-obs-soldout">断货</span> : null}
+        {o.publishedAt ? <span className="ds-obs-pub">{localDay(o.publishedAt)} 上架</span> : null}
+      </span>
+    </li>
+  );
+}
+
 /** 明细摘要（判别联合：collections 无商品观察，显示集合口径） */
 function DetailSummary({ summary }: { summary: SurfaceSummary | null }) {
   if (!summary) return null;
@@ -92,20 +166,10 @@ export function ObservationList({ competitorId, dimension }: { competitorId: str
       {active && active.interrupted ? <p className="ds-obs-failnote">上次采集被中断，可重新刷新。</p> : null}
       <ul className="ds-obs-list">
         {page.map((o: SurfaceObservation, i: number) => (
-          <li key={(o.id || '') + i} className="ds-obs-item">
-            <span className="nm" title={o.title}>{o.title}</span>
-            <span className="val">
-              {o.price != null ? (
-                o.currency
-                  ? <span className="num">{curLabel(o.currency)}{o.price}</span>
-                  : <span className="num">{o.price}（币种待确认）</span>
-              ) : <span className="ds-obs-noprice">价格未取到</span>}
-              {!o.available ? <span className="ds-obs-soldout">断货</span> : null}
-              {o.publishedAt ? <span className="ds-obs-pub">{localDay(o.publishedAt)} 上架</span> : null}
-            </span>
-          </li>
+          <ObsRow key={(o.id || '') + i} o={o} dimension={dimension} />
         ))}
       </ul>
+
       <div className="ds-obs-pager">
         <button className="btn-mini" type="button" disabled={pg.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, pg.offset - limit))}>上一页</button>
         <span className="hint">{pg.offset + 1}–{Math.min(pg.offset + pg.limit, pg.total)} / {pg.total}</span>

@@ -107,6 +107,11 @@ const ADAPTER_METHODS = Object.freeze(['supports', 'resolveIdentity', 'collect',
 const SUMMARY_KINDS = Object.freeze({
   storefront_catalog: ['shopify_catalog'],
   storefront_collections: ['shopify_collections'],
+  // Wave 1：各新维度独立摘要形状（禁止复用 Shopify 价格卡模板）
+  social_videos: ['youtube_content'],
+  trend_series: ['dataforseo_trends'],
+  ad_creatives: ['tiktok_commercial_content'],
+  reviews_digest: ['public_reviews'],
 });
 
 // normalize 输出 outcome 冻结词表（§七.2：词表外一律拒绝）
@@ -116,6 +121,11 @@ const OUTCOMES = Object.freeze(['success', 'partial', 'empty_success']);
 const SUMMARY_REQUIRED_FIELDS = Object.freeze({
   storefront_catalog: ['count', 'onSaleCount', 'soldOutCount', 'priceMin', 'priceMax', 'priceMedian', 'currency', 'currencyStatus', 'partialScan'],
   storefront_collections: ['collectionCount', 'collections', 'sourceObservedCount', 'storedCount', 'partialScan', 'partialScanReason'],
+  // Wave 1：measurementMethod 为必填——公开来源观察 vs 数据服务估算必须在摘要层可判别
+  social_videos: ['videoCount', 'measurementMethod', 'partialScan'],
+  trend_series: ['pointCount', 'measurementMethod', 'periodStart', 'periodEnd', 'partialScan'],
+  ad_creatives: ['creativeCount', 'measurementMethod', 'partialScan'],
+  reviews_digest: ['reviewCount', 'sourceCount', 'measurementMethod', 'periodStart', 'periodEnd', 'partialScan'],
 });
 
 // 结构校验（启动自检 + 测试锁定）：缺方法/缺字段/缺白名单映射 → 显式失败
@@ -299,6 +309,14 @@ async function finalizeOutput(ctx, raw, out) {
 
   // ---------- Evidence：引用全部参与汇总的快照（多页 + 币种） ----------
   // 失败语义：抛错 / 未落账 → attempt failed/internal_error（§四.2），零 verified 放行
+  // P0-2 整改 r2：真实成功 → provider verification（operational 只能由真实成功产生）
+  try {
+    const capDef = Registry.getCapability(out.capability);
+    require('./source-readiness.js').recordVerification({
+      capability: out.capability, provider: (capDef && capDef.provider) || out.evidenceProvider || '',
+      status: 'success', tenantId: ctx.tenantId,
+    });
+  } catch (eR) { /* readiness 记录失败不影响 attempt 终态 */ }
   let evidenceId = null;
   if (out.evidenceSnapshotIds.length) {
     assertFence(ctx); // 写 Evidence 前 fencing 复核
@@ -476,13 +494,29 @@ function openAttempt(ctx, capability) {
 // 执行器统一落唯一最终失败；fence 贯穿一切终态写入（§三.1）。
 function failAttempt(ctx, res, extra) {
   const cls = classifyFetchFailure(res, ctx.tenantId);
+  // P0-2 整改 r2：真实失败分类进 readiness（CONFIG_MISSING 不记录——状态实时判定已优先覆盖）
+  try {
+    if (res && res.error !== 'CONFIG_MISSING' && ctx.attemptId) {
+      const att = SurfaceStore.getAttempt(ctx.tenantId, ctx.attemptId);
+      if (att && att.capability) {
+        const Readiness = require('./source-readiness.js');
+        const capDef = Registry.getCapability(att.capability);
+        const fc = cls.sourceStatus === 'blocked' ? 'auth_rejected'
+          : cls.sourceStatus === 'rate_limited' ? 'quota_exhausted' : 'unavailable';
+        Readiness.recordVerification({ capability: att.capability, provider: (capDef && capDef.provider) || '', status: 'failed', failureClass: fc, tenantId: ctx.tenantId });
+      }
+    }
+  } catch (e2) { /* readiness 记录失败不影响 attempt 终态 */ }
   if (ctx.suppressTerminal) {
     return { providerFailed: true, cls: cls.sourceStatus, errorClass: cls.sourceStatus, retryable: cls.retryable, sourceStatus: cls.sourceStatus };
   }
+  // Wave 1：extra.errorUserText 允许 adapter 定制失败文案（如凭据缺失 ≠ 来源拒绝），
+  // 但仍必须产品化（04 §20：无内部码/路径/栈），且绝不含密钥。
+  const userText = (extra && extra.errorUserText) || FAILURE_TEXT[cls.sourceStatus] || FAILURE_TEXT.unavailable;
   const done = SurfaceStore.completeAttempt(ctx.tenantId, ctx.attemptId, {
     status: 'failed', sourceStatus: cls.sourceStatus,
     errorClass: cls.sourceStatus,
-    errorUserText: FAILURE_TEXT[cls.sourceStatus] || FAILURE_TEXT.unavailable,
+    errorUserText: userText,
     endedAt: ctx.nowMs ? new Date(ctx.nowMs).toISOString() : undefined,
     observations: [], snapshotIds: (res && res.snapshotIds) || (res && res.snapshotId ? [res.snapshotId] : []) || [],
     evidenceIds: [],
@@ -745,7 +779,456 @@ const shopifyCollectionsAdapter = {
   },
 };
 
-const ADAPTERS = Object.freeze({ shopify: shopifyAdapter, shopify_collections: shopifyCollectionsAdapter });
+// ============================================================
+// Wave 1 adapters（youtube / dataforseo / tiktok / reviews）
+// 共同纪律（任务书 §一/§二/§三）：
+//  · 全部经既有链路：Registry → Adapter Contract → CollectionAttempt →
+//    SourceSnapshot → Evidence → Data Surface；不另起采集体系。
+//  · 凭据化 API 调用走 safeRequestOnce（assertPublicUrl/safeLookup 的
+//    SSRF/DNS-rebinding 防护全保留）；robots 合规门面向网页抓取，凭据化
+//    API 调用是授权数据服务使用而非爬取，不适用 robots（public_reviews
+//    的网页抓取部分仍走完整 FetchGate/robots）。
+//  · 凭据（query key / Authorization）绝不进快照 URL、日志、错误信息——
+//    快照 source_url 对凭据参数做 [REDACTED] 脱敏。
+//  · measurementMethod 必标：公开来源观察 vs 数据服务估算（licensed_estimate）。
+//  · 凭据缺失/权限不足/配额耗尽/来源不可达 = 各自真实失败状态，不伪装无结果。
+//  · 未通过一次真实 staging 成功请求（live-source-smoke）前，capability 保持
+//    pending_config，不升级 ga。
+// ============================================================
+const YT_ADAPTER_VERSION = 'youtube-adapter-1';
+const DFS_ADAPTER_VERSION = 'dataforseo-adapter-1';
+const TT_ADAPTER_VERSION = 'tiktok-adapter-1';
+const REV_ADAPTER_VERSION = 'reviews-adapter-1';
+
+// 失败文案（Wave 1 定制：配置缺失是系统状态，不是来源拒绝；04 §20 产品化）
+const WAVE1_FAILURE_TEXT = Object.freeze({
+  config_missing: '该数据服务尚未配置系统级访问凭据，当前无法采集；配置后即可使用。',
+  auth_rejected: '数据服务拒绝了本次访问（凭据无效或权限不足），已记录，暂无法采集。',
+  quota_exhausted: '数据服务配额已用尽，稍后重试或调整配额。',
+});
+
+// 凭据参数脱敏（P0 整改 r2）：默认敏感键表兜底——不依赖调用方传参；
+// 键名大小写不敏感。所有进入快照/错误/日志的 URL 必须统一经过本函数。
+const SENSITIVE_QUERY_KEYS = Object.freeze([
+  'key', 'api_key', 'apikey', 'access_token', 'token', 'client_secret',
+  'signature', 'secret', 'password',
+]);
+function redactSecretParams(u, secretParams) {
+  try {
+    const uu = new URL(u);
+    const lower = new Set(SENSITIVE_QUERY_KEYS.map(k => k.toLowerCase()));
+    for (const extra of (secretParams || [])) lower.add(String(extra).toLowerCase());
+    for (const k of [...uu.searchParams.keys()]) {
+      if (lower.has(k.toLowerCase())) uu.searchParams.set(k, '[REDACTED]');
+    }
+    return uu.href;
+  } catch (e) { return u; }
+}
+
+// 凭据化 API JSON 抓取（共享 helper）：SSRF 校验 → safeRequestOnce → 脱敏快照 → JSON。
+// robots 不适用（授权 API 调用）；快照仍逐次落账（原始字节可追溯）。
+async function fetchApiJson(spec) {
+  const o = spec || {};
+  const fetchedAt = new Date().toISOString();
+  try { await Net.assertPublicUrl(o.url); } catch (e) {
+    return { ok: false, error: 'internal_error', errorUserText: '请求地址未通过安全校验，已阻止。' };
+  }
+  let res = null;
+  try {
+    res = await Net.safeRequestOnce(o.url, { timeoutMs: o.timeoutMs || 15000, method: o.method || 'GET', headers: o.headers || {}, body: o.body != null ? o.body : undefined });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/SAFE_FETCH_TIMEOUT/.test(msg)) return { ok: false, error: 'timeout', errorUserText: WAVE1_FAILURE_TEXT.quota_exhausted ? '数据服务响应超时，稍后可重试。' : '数据服务响应超时。' };
+    return { ok: false, error: 'unavailable', errorUserText: '数据服务暂时无法访问，稍后可重试。' };
+  }
+  // 脱敏快照（原始字节；source_url / final_url 一律 [REDACTED] 凭据参数——P0 整改 r2）
+  let snapshotId = null;
+  const safeSourceUrl = redactSecretParams(o.url, o.secretParams || []);
+  const safeFinalUrl = redactSecretParams(res.url || o.url, o.secretParams || []);
+  try {
+    const s = Snapshot.record({
+      capability: o.capability || 'evidence_url', provider: o.provider || 'licensed_api',
+      source_url: safeSourceUrl, final_url: safeFinalUrl,
+      redirect_hops: 0, http_status: res.status, source_status: res.status >= 200 && res.status < 300 ? 'success' : (res.status === 401 || res.status === 403 ? 'blocked' : res.status === 429 ? 'rate_limited' : 'unavailable'),
+      observed_at: fetchedAt, fetched_at: fetchedAt, bodyBytes: res.buffer,
+      contentType: (res.headers && res.headers['content-type']) || 'application/json',
+      trigger: o.trigger || 'manual', tenantId: o.tenantId,
+    });
+    if (s.recorded) snapshotId = s.meta.snapshot_id;
+  } catch (e) { /* 快照失败 → 调用方按 Evidence 落账失败处理，不放水 */ }
+  if (!(res.status >= 200 && res.status < 300)) {
+    const st = res.status;
+    if (st === 401 || st === 403) return { ok: false, error: 'auth_rejected', status: st, snapshotId, errorUserText: WAVE1_FAILURE_TEXT.auth_rejected };
+    if (st === 429) return { ok: false, error: 'quota_exhausted', status: st, snapshotId, errorUserText: WAVE1_FAILURE_TEXT.quota_exhausted };
+    return { ok: false, error: 'unavailable', status: st, snapshotId, errorUserText: '数据服务返回 ' + st + '，稍后可重试。' };
+  }
+  let json = null;
+  try { json = JSON.parse(res.buffer.toString('utf8')); } catch (e) {
+    return { ok: false, error: 'parse_failed', status: res.status, snapshotId, errorUserText: '数据服务返回了无法解析的内容，已保留原始数据待修复。' };
+  }
+  return { ok: true, status: res.status, json, snapshotId, finalUrl: safeFinalUrl };
+}
+
+// YouTube 公开内容（官方 Data API v3 REST 契约；发现→归属校验→视频→评论）
+const youtubeAdapter = {
+  code: 'youtube',
+  displayName: '社媒内容（YouTube 公开频道）',
+  version: YT_ADAPTER_VERSION,
+  summaryKinds: ['social_videos'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('youtube_content', brandCtx);
+  },
+
+  // 品牌→频道归属校验：官方 channel 数据内的匹配依据（频道名/简介含品牌名或官网域）。
+  // 冻结语义（00 §53）：identity 只有 unresolved/resolved，无 candidate——不确定时
+  // 保持 unresolved，匹配依据写 originNote 供人工核对。
+  matchEvidence(channelSnippet, brand) {
+    const reasons = [];
+    const name = String(brand.name || '').trim().toLowerCase();
+    const domain = Net.domainOf(brand.url || '');
+    const title = String((channelSnippet && channelSnippet.title) || '').toLowerCase();
+    const desc = String((channelSnippet && (channelSnippet.description || channelSnippet.customUrl)) || '').toLowerCase();
+    if (name && title.includes(name)) reasons.push('频道名称包含品牌名「' + (brand.name || '') + '」');
+    if (domain && desc.includes(domain.toLowerCase())) reasons.push('频道公开简介包含官网域名 ' + domain);
+    if (name && desc.includes(name)) reasons.push('频道公开简介包含品牌名');
+    return reasons;
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'youtube',
+      officialDomain: d || null,
+      platformAccountId: null, // 频道归属需归属校验后由 recordIdentity 授予
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: YT_ADAPTER_VERSION,
+    };
+  },
+
+  // raw → StandardOutput：公开视频观察 + social_videos 摘要（measurementMethod 必标）
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const videos = (Array.isArray(res.videos) ? res.videos : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(v => ({
+      id: String(v.videoId || v.id || ''),
+      title: String(v.title || '').slice(0, 120),
+      price: null, currency: null,
+      available: true,
+      publishedAt: v.publishedAt || null,
+      // 公开互动字段原样透出（YouTube Data API statistics；不推算任何衍生指标）
+      viewCount: typeof v.viewCount === 'number' ? v.viewCount : null,
+      likeCount: typeof v.likeCount === 'number' ? v.likeCount : null,
+      commentCount: typeof v.commentCount === 'number' ? v.commentCount : null,
+      thumbnailUrl: v.thumbnailUrl || null,
+      videoUrl: v.videoUrl || null,
+    }));
+    const partial = !!res.partialScan;
+    const comments = (Array.isArray(res.comments) ? res.comments : []).slice(0, 20).map(c => ({
+      text: String(c.text || '').slice(0, 160), videoId: c.videoId || null, sourceUrl: c.sourceUrl || null,
+    }));
+    return {
+      capability: 'youtube_content', dimension: 'social_content',
+      outcome: partial ? 'partial' : 'success',
+      observations: videos,
+      summary: {
+        kind: 'social_videos',
+        videoCount: videos.length,
+        channelTitle: res.channelTitle || null,
+        channelId: res.channelId || null,
+        matchReasons: res.matchReasons || [],
+        measurementMethod: 'public_source_observation',
+        periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
+        comments,
+        partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'youtube', evidenceProvider: 'youtube_data_api_v3',
+      claimField: 'social.public_videos', claimScope: 'public_social_content_observation',
+      entityKey: res.channelId || ident.officialDomain || null,
+      entityRef: { kind: 'youtube_channel', channelId: res.channelId || null },
+      extractedValue: {
+        summaryKind: 'social_videos', videoCount: videos.length,
+        channelId: res.channelId || null, matchReasons: res.matchReasons || [],
+        measurementMethod: 'public_source_observation', partialScan: partial,
+      },
+      parserVersion: YT_ADAPTER_VERSION,
+      note: 'YouTube Data API v3 public content (per-response snapshots, key redacted)',
+      sourceUrl: res.sourceUrl || null,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'youtube_content');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url, isShopify: comp.isShopify });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+
+    const key = String(process.env.YOUTUBE_API_KEY || '').trim();
+    if (!key) {
+      return failAttempt(ctx, { ok: false, error: 'CONFIG_MISSING' }, { errorUserText: '数据服务暂不可用，请稍后再试。' });
+    }
+    const API = 'https://www.googleapis.com/youtube/v3';
+    const snapshotIds = [];
+    const brand = { name: comp.name, url: comp.url };
+    // 1) 官方 search 端点发现候选频道（同属 YouTube Data API；发现与采集同一凭据链路）
+    const find = await fetchApiJson({
+      url: API + '/search?part=snippet&type=channel&maxResults=5&q=' + encodeURIComponent(String(comp.name || '')) + '&key=' + encodeURIComponent(key),
+      tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3',
+      secretParams: ['key'], trigger,
+    });
+    if (!find.ok) return failAttempt(ctx, find, { errorUserText: find.errorUserText });
+    if (find.snapshotId) snapshotIds.push(find.snapshotId);
+    const candItems = (find.json && find.json.items) || [];
+    // 2) 可解释的归属校验：匹配依据记录；不确定 → identity 保持 unresolved（不升级）
+    let chosen = null, chosenReasons = [];
+    for (const it of candItems) {
+      const sn = it.snippet || {};
+      const reasons = this.matchEvidence(sn, brand);
+      if (reasons.length && !chosen) { chosen = it; chosenReasons = reasons; }
+    }
+    const emptyRes = { ok: true, videos: [], comments: [], snapshotIds, channelTitle: null, channelId: null, matchReasons: [], partialScan: false, sourceUrl: 'https://www.googleapis.com/youtube/v3/search' };
+    if (!chosen) {
+      // 无可归属频道：成功的「零观察」（≠ 失败 ≠ 未接入；任务书 §二.A.6）
+      const out = this.normalize(emptyRes, ctx);
+      if (suppress) return { providerOk: true, ident, raw: emptyRes, out };
+      let fin;
+      try { fin = await finalizeOutput(ctx, emptyRes, out); }
+      catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+      if (fin.invalid || fin.evidenceFailed) return fin;
+      return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey, emptyWindow: true });
+    }
+    const channelId = chosen.id && chosen.id.channelId;
+    const channelTitle = (chosen.snippet && chosen.snippet.title) || null;
+    // 3) 频道公开信息 + 最近公开视频（真实失败状态：权限不足/配额耗尽/不可达各自分类）
+    const chan = await fetchApiJson({
+      url: API + '/channels?part=snippet,statistics&id=' + encodeURIComponent(String(channelId || '')) + '&key=' + encodeURIComponent(key),
+      tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
+    });
+    if (!chan.ok) return failAttempt(ctx, chan, { errorUserText: chan.errorUserText });
+    if (chan.snapshotId) snapshotIds.push(chan.snapshotId);
+    const vidsSearch = await fetchApiJson({
+      url: API + '/search?part=snippet&type=video&order=date&maxResults=10&channelId=' + encodeURIComponent(String(channelId || '')) + '&key=' + encodeURIComponent(key),
+      tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
+    });
+    if (!vidsSearch.ok) return failAttempt(ctx, vidsSearch, { errorUserText: vidsSearch.errorUserText });
+    if (vidsSearch.snapshotId) snapshotIds.push(vidsSearch.snapshotId);
+    const vidIds = ((vidsSearch.json && vidsSearch.json.items) || []).map(v => v.id && v.id.videoId).filter(Boolean).slice(0, 10);
+    let stats = { items: [] };
+    if (vidIds.length) {
+      const det = await fetchApiJson({
+        url: API + '/videos?part=snippet,statistics&id=' + encodeURIComponent(vidIds.join(',')) + '&key=' + encodeURIComponent(key),
+        tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
+      });
+      if (!det.ok) return failAttempt(ctx, det, { errorUserText: det.errorUserText });
+      if (det.snapshotId) snapshotIds.push(det.snapshotId);
+      stats = det.json || { items: [] };
+    }
+    const videos = (stats.items || []).map(v => ({
+      videoId: v.id,
+      title: (v.snippet && v.snippet.title) || null,
+      publishedAt: (v.snippet && v.snippet.publishedAt) || null,
+      thumbnailUrl: (v.snippet && v.snippet.thumbnails && (v.snippet.thumbnails.medium || v.snippet.thumbnails.default) && (v.snippet.thumbnails.medium || v.snippet.thumbnails.default).url) || null,
+      viewCount: v.statistics && v.statistics.viewCount != null ? Number(v.statistics.viewCount) : null,
+      likeCount: v.statistics && v.statistics.likeCount != null ? Number(v.statistics.likeCount) : null,
+      commentCount: v.statistics && v.statistics.commentCount != null ? Number(v.statistics.commentCount) : null,
+      videoUrl: v.id ? 'https://www.youtube.com/watch?v=' + v.id : null,
+    }));
+    // 4) 可公开获取的评论摘要（首个视频一条线程页；失败不致命——评论属可选公开字段）
+    let comments = [];
+    if (vidIds.length) {
+      const ct = await fetchApiJson({
+        url: API + '/commentThreads?part=snippet&maxResults=5&videoId=' + encodeURIComponent(String(vidIds[0])) + '&key=' + encodeURIComponent(key),
+        tenantId: ctx.tenantId, capability: 'youtube_content', provider: 'youtube_data_api_v3', secretParams: ['key'], trigger,
+      });
+      if (ct.ok && ct.snapshotId) snapshotIds.push(ct.snapshotId);
+      if (ct.ok && ct.json && Array.isArray(ct.json.items)) {
+        comments = ct.json.items.map(i => {
+          const top = i.snippet && i.snippet.topLevelComment && i.snippet.topLevelComment.snippet;
+          return { text: (top && top.textDisplay) || '', videoId: vidIds[0], sourceUrl: vidIds[0] ? 'https://www.youtube.com/watch?v=' + vidIds[0] : null };
+        }).filter(c => c.text);
+      }
+    }
+    const res = {
+      ok: true, videos, comments, snapshotIds,
+      channelId, channelTitle, matchReasons: chosenReasons,
+      partialScan: false,
+      sourceUrl: 'https://www.googleapis.com/youtube/v3/search?q=' + encodeURIComponent(String(comp.name || '')) + '&type=channel',
+    };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    // 归属校验有据（频道名/简介匹配）→ 允许 resolved；无据保持 unresolved
+    try { recordIdentity(ctx, ident, chosenReasons.length ? 'success' : 'unconfirmed', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString(), configured: !!String(process.env.YOUTUBE_API_KEY || '').trim() };
+  },
+};
+
+// DataForSEO Labs Trends（官方 REST 契约；Basic auth；licensed_estimate）
+const dataforseoAdapter = {
+  code: 'dataforseo',
+  displayName: '搜索与热度（DataForSEO Trends）',
+  version: DFS_ADAPTER_VERSION,
+  summaryKinds: ['trend_series'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('dataforseo_trends', brandCtx);
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'dataforseo',
+      officialDomain: d || null,
+      platformAccountId: d || null,
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: DFS_ADAPTER_VERSION,
+    };
+  },
+
+  // 趋势点观察 + trend_series 摘要（每个结果标 licensed_estimate，不做平台原始事实表述）
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const points = (Array.isArray(res.points) ? res.points : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(p => ({
+      id: String(p.id || ''),
+      title: String(p.label || '').slice(0, 120),
+      price: null, currency: null,
+      available: true,
+      publishedAt: p.periodEnd || null,
+      periodStart: p.periodStart || null, periodEnd: p.periodEnd || null,
+      value: typeof p.value === 'number' ? p.value : null,
+      region: p.region || null,
+    }));
+    const partial = !!res.partialScan;
+    return {
+      capability: 'dataforseo_trends', dimension: 'search_interest',
+      outcome: partial ? 'partial' : 'success',
+      observations: points,
+      summary: {
+        kind: 'trend_series',
+        pointCount: points.length,
+        keyword: res.keyword || null,
+        region: res.region || null,
+        measurementMethod: 'licensed_estimate',
+        periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
+        providerRecordId: res.providerRecordId || null,
+        methodologyVersion: DFS_ADAPTER_VERSION,
+        partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'dataforseo', evidenceProvider: 'dataforseo_labs_trends',
+      claimField: 'search.trend', claimScope: 'licensed_estimate_series',
+      entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
+      entityRef: { kind: 'keyword_series', keyword: res.keyword || null },
+      extractedValue: {
+        summaryKind: 'trend_series', pointCount: points.length, keyword: res.keyword || null,
+        measurementMethod: 'licensed_estimate', providerRecordId: res.providerRecordId || null,
+        partialScan: partial,
+      },
+      parserVersion: DFS_ADAPTER_VERSION,
+      note: 'DataForSEO Labs Trends (licensed estimate; per-response snapshots; Basic auth never persisted)',
+      sourceUrl: res.sourceUrl || null,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'dataforseo_trends');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+
+    const login = String(process.env.DATAFORSEO_LOGIN || '').trim();
+    const password = String(process.env.DATAFORSEO_PASSWORD || '').trim();
+    if (!login || !password) {
+      return failAttempt(ctx, { ok: false, error: 'CONFIG_MISSING' }, { errorUserText: '数据服务暂不可用，请稍后再试。' });
+    }
+    const keyword = String(comp.name || '').trim();
+    if (!keyword) return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌缺少可用于趋势查询的名称。' });
+    const auth = Buffer.from(login + ':' + password).toString('base64');
+    const periodEnd = new Date();
+    const periodStart = new Date(Date.now() - 90 * 86400000);
+    const body = JSON.stringify([{
+      keywords: [keyword],
+      location_name: 'United States',
+      language_name: 'English',
+      date_from: periodStart.toISOString().slice(0, 10),
+      date_to: periodEnd.toISOString().slice(0, 10),
+    }]);
+    const r = await fetchApiJson({
+      url: 'https://api.dataforseo.com/v3/dataforseo_labs/google/trends/explore/live',
+      method: 'POST', headers: { 'Authorization': 'Basic ' + auth, 'Content-Type': 'application/json' }, body,
+      tenantId: ctx.tenantId, capability: 'dataforseo_trends', provider: 'dataforseo_labs_trends', trigger,
+    });
+    if (!r.ok) return failAttempt(ctx, r, { errorUserText: r.errorUserText });
+    // 只采信服务实际返回的字段：trend points（时间/值/地区）——结构按官方契约容错解析
+    const tasks = (r.json && r.json.tasks) || [];
+    const t0 = tasks[0] || {};
+    const result0 = (Array.isArray(t0.result) && t0.result[0]) || {};
+    const items = (result0.items && (result0.items.items || result0.items)) || [];
+    const flat = [];
+    for (const it of (Array.isArray(items) ? items : [])) {
+      const kwData = it.items || it.trend_items || [];
+      for (const p of (Array.isArray(kwData) ? kwData : [])) {
+        flat.push({
+          id: String(p.date || (p.period_end_date || p.timestamp || flat.length)),
+          label: keyword,
+          periodStart: p.date_from || p.period_start_date || null,
+          periodEnd: p.date_to || p.period_end_date || p.date || null,
+          value: typeof p.value === 'number' ? p.value : (p.values && Array.isArray(p.values) ? p.values[p.values.length - 1] : null),
+          region: result0.location_name || 'United States',
+        });
+      }
+    }
+    const res = {
+      ok: true, points: flat, snapshotIds: r.snapshotId ? [r.snapshotId] : [],
+      keyword, region: result0.location_name || 'United States',
+      periodStart: periodStart.toISOString().slice(0, 10), periodEnd: periodEnd.toISOString().slice(0, 10),
+      providerRecordId: (t0.id ? String(t0.id) : (r.json && r.json.cost != null ? 'cost_' + r.json.cost : null)) || null,
+      partialScan: flat.length === 0 && tasks.length === 0 ? false : false,
+      sourceUrl: 'https://app.dataforseo.com/' ,
+    };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    try { recordIdentity(ctx, ident, 'success', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString(), configured: !!String(process.env.DATAFORSEO_LOGIN || '').trim() && !!String(process.env.DATAFORSEO_PASSWORD || '').trim() };
+  },
+};
 
 // 全量结构自检（启动与测试锁定）：缺方法/缺 kind 映射 → 显式失败
 function assertAdaptersIntegrity() {
@@ -780,10 +1263,362 @@ function resolveAdapterChain(capability, overrides) {
 function getAdapter(code) { return ADAPTERS[String(code || '')] || null; }
 function listAdapters() { return Object.values(ADAPTERS).map(a => ({ code: a.code, displayName: a.displayName, version: a.version, summaryKinds: a.summaryKinds })); }
 
+// P0-3 整改 r2：TikTok 官方 OAuth client_credentials token 流程。
+// client key/secret 只用于官方规定的 token 获取（POST /v2/oauth/token/），
+// 绝不把 client key 当 access token；token 仅内存缓存 + 受控请求头使用，
+// 绝不进入 URL、快照、日志、错误或前端。token 获取请求不落快照（非数据采集）。
+const tiktokTokenCache = { token: null, expiresAt: 0 };
+async function getTikTokAccessToken(clientKey, clientSecret) {
+  const now = Date.now();
+  if (tiktokTokenCache.token && now < tiktokTokenCache.expiresAt - 60000) return { ok: true, token: tiktokTokenCache.token };
+  const OAUTH_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
+  try { await Net.assertPublicUrl(OAUTH_URL); } catch (e) {
+    return { ok: false, error: 'internal_error', errorUserText: '请求地址未通过安全校验，已阻止。' };
+  }
+  const body = new URLSearchParams({ grant_type: 'client_credentials', client_key: clientKey, client_secret: clientSecret }).toString();
+  let res = null;
+  try {
+    res = await Net.safeRequestOnce(OAUTH_URL, { timeoutMs: 15000, method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/SAFE_FETCH_TIMEOUT/.test(msg)) return { ok: false, error: 'timeout', errorUserText: '数据服务响应超时，稍后可重试。' };
+    return { ok: false, error: 'unavailable', errorUserText: '数据服务暂时无法访问，稍后可重试。' };
+  }
+  if (res.status === 401 || res.status === 403) return { ok: false, error: 'auth_rejected', status: res.status, errorUserText: WAVE1_FAILURE_TEXT.auth_rejected };
+  if (res.status === 429) return { ok: false, error: 'quota_exhausted', status: res.status, errorUserText: WAVE1_FAILURE_TEXT.quota_exhausted };
+  if (!(res.status >= 200 && res.status < 300)) return { ok: false, error: 'unavailable', status: res.status, errorUserText: '数据服务暂不可用，请稍后再试。' };
+  let json = null;
+  try { json = JSON.parse(res.buffer.toString('utf8')); } catch (e) { return { ok: false, error: 'parse_failed', status: res.status, errorUserText: '数据服务返回了无法解析的内容，已保留原始数据待修复。' }; }
+  const token = json && (json.access_token || (json.data && json.data.access_token));
+  if (!token) {
+    // 官方错误响应（error/code 字段）：权限不足等 → 如实 auth_rejected，不伪装无结果
+    return { ok: false, error: 'auth_rejected', status: 403, errorUserText: WAVE1_FAILURE_TEXT.auth_rejected };
+  }
+  tiktokTokenCache.token = String(token);
+  const expiresIn = Number(json.expires_in) > 0 ? Number(json.expires_in) * 1000 : 3600 * 1000;
+  tiktokTokenCache.expiresAt = now + expiresIn;
+  return { ok: true, token: tiktokTokenCache.token };
+}
+
+// TikTok 商业内容研究接口（官方 Business API 契约骨架 + 真实配置验证）。
+// 纪律：凭据真实可用并完成一次真实 staging 请求拿到可展示公开记录前，
+// capability 保持 pending_config；未获官方研究权限时运行态停在
+// ready_to_verify / auth_rejected（source-readiness 管理），不标 operational、
+// 不写成「未观察到广告」。
+const tiktokAdapter = {
+  code: 'tiktok',
+  displayName: '广告活动（TikTok 商业内容）',
+  version: TT_ADAPTER_VERSION,
+  summaryKinds: ['ad_creatives'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('tiktok_commercial_content', brandCtx);
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'tiktok',
+      officialDomain: d || null,
+      platformAccountId: null,
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: TT_ADAPTER_VERSION,
+    };
+  },
+
+  // 广告素材观察（仅接口实际返回字段；花费/获客成本/ROI/转化率绝不出现）
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const creatives = (Array.isArray(res.creatives) ? res.creatives : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(c => ({
+      id: String(c.id || ''),
+      title: String(c.title || '').slice(0, 120),
+      price: null, currency: null, // 🔴 广告花费不可观测，恒 null（00 §17 冻结）
+      available: true,
+      publishedAt: c.startDate || null,
+      advertiser: c.advertiser || null,
+      region: c.region || null,
+      creativeUrl: c.creativeUrl || null,
+      reach: c.reach != null ? c.reach : null, // 仅接口实际给出的公开触达字段
+    }));
+    const partial = !!res.partialScan;
+    return {
+      capability: 'tiktok_commercial_content', dimension: 'ad_campaigns',
+      outcome: partial ? 'partial' : 'success',
+      observations: creatives,
+      summary: {
+        kind: 'ad_creatives',
+        creativeCount: creatives.length,
+        measurementMethod: 'licensed_estimate',
+        periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
+        providerRecordId: res.providerRecordId || null,
+        methodologyVersion: TT_ADAPTER_VERSION,
+        partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'tiktok', evidenceProvider: 'tiktok_business_api',
+      claimField: 'ads.public_creatives', claimScope: 'licensed_ad_content_observation',
+      entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
+      entityRef: { kind: 'ad_creatives', keyword: ctx.competitor ? (ctx.competitor.name || null) : null },
+      extractedValue: {
+        summaryKind: 'ad_creatives', creativeCount: creatives.length,
+        measurementMethod: 'licensed_estimate', partialScan: partial,
+      },
+      parserVersion: TT_ADAPTER_VERSION,
+      note: 'TikTok commercial content research API (per-response snapshots; client secret never persisted)',
+      sourceUrl: res.sourceUrl || null,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'tiktok_commercial_content');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+
+    const clientKey = String(process.env.TIKTOK_CLIENT_KEY || '').trim();
+    const clientSecret = String(process.env.TIKTOK_CLIENT_SECRET || '').trim();
+    if (!clientKey || !clientSecret) {
+      return failAttempt(ctx, { ok: false, error: 'CONFIG_MISSING' }, { errorUserText: '数据服务暂不可用，请稍后再试。' });
+    }
+    // P0-3 整改 r2：先走官方 OAuth client_credentials 换取 access token；
+    // client key/secret 只用于本步骤。token 换取失败（权限不足/配额/不可达）
+    // 如实分类落账（failAttempt → readiness），绝不伪装「未观察到广告」。
+    const tk = await getTikTokAccessToken(clientKey, clientSecret);
+    if (!tk.ok) {
+      return failAttempt(ctx, { ok: false, error: tk.error, status: tk.status }, { errorUserText: tk.errorUserText });
+    }
+    // 官方商业内容库检索（Research API；token 仅在受控请求头中，不进 URL/快照）。
+    const body = JSON.stringify({ keyword: String(comp.name || '').trim(), page: 1, limit: 10 });
+    const r = await fetchApiJson({
+      url: 'https://open.tiktokapis.com/v2/research/adlib/commercial_content/ads/search/',
+      method: 'POST',
+      headers: { 'access-token': tk.token, 'Content-Type': 'application/json' }, body,
+      secretParams: ['access_token'],
+      tenantId: ctx.tenantId, capability: 'tiktok_commercial_content', provider: 'tiktok_research_api', trigger,
+    });
+    if (!r.ok) return failAttempt(ctx, r, { errorUserText: r.errorUserText });
+    const data = (r.json && r.json.data) || {};
+    const list = (data.ads || data.ad_list || data.list || []);
+    const creatives = (Array.isArray(list) ? list : []).map((a, i) => ({
+      id: a.ad_id || a.id || String(i),
+      title: a.ad_name || (a.video && (a.video.title || a.video.cover)) || null,
+      startDate: a.first_delivery_date || a.start_date || null,
+      advertiser: a.advertiser_name || a.advertiser || null,
+      region: a.country_code || a.region || null,
+      creativeUrl: (a.video && (a.video.download_url || a.video.url)) || (a.landing_page && a.landing_page[0]) || null,
+      reach: a.reach != null ? Number(a.reach) : null,
+    }));
+    const res = {
+      ok: true, creatives, snapshotIds: r.snapshotId ? [r.snapshotId] : [],
+      periodStart: null, periodEnd: null,
+      providerRecordId: (r.json && r.json.request_id) ? String(r.json.request_id) : null,
+      partialScan: false,
+      sourceUrl: 'https://business-api.tiktok.com/open_api/v1.3/research/adlib/ad/search/',
+    };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    try { recordIdentity(ctx, ident, 'success', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString(), configured: !!String(process.env.TIKTOK_CLIENT_KEY || '').trim() && !!String(process.env.TIKTOK_CLIENT_SECRET || '').trim() };
+  },
+};
+
+// 公开评论页（复用系统搜索链发现 + FetchGate/robots/SSRF 全合规抓取 + 页面抽取）
+const reviewsAdapter = {
+  code: 'reviews',
+  displayName: '口碑与评论（公开页面）',
+  version: REV_ADAPTER_VERSION,
+  summaryKinds: ['reviews_digest'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('public_reviews', brandCtx);
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'public_web',
+      officialDomain: d || null,
+      platformAccountId: d || null,
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: REV_ADAPTER_VERSION,
+    };
+  },
+
+  // 页面级评论观察（片段/评分/来源 URL）+ reviews_digest 摘要（样本量/时间范围/来源数）
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const pages = (Array.isArray(res.pages) ? res.pages : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(p => ({
+      id: String(p.pageId || p.url || ''),
+      title: String(p.title || '').slice(0, 120),
+      price: null, currency: null,
+      available: true,
+      publishedAt: p.publishedAt || p.fetchedAt || null,
+      rating: typeof p.rating === 'number' ? p.rating : null,
+      reviewCount: typeof p.reviewCount === 'number' ? p.reviewCount : null,
+      snippet: p.snippet ? String(p.snippet).slice(0, 200) : null,
+      sourceUrl: p.url || null,
+    }));
+    const partial = !!res.partialScan;
+    const totalReviews = pages.reduce((s, p) => s + (p.reviewCount || 0), 0);
+    return {
+      capability: 'public_reviews', dimension: 'reviews_reputation',
+      outcome: partial ? 'partial' : 'success',
+      observations: pages,
+      summary: {
+        kind: 'reviews_digest',
+        reviewCount: totalReviews,
+        sourceCount: pages.length,
+        measurementMethod: 'public_source_observation',
+        periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
+        methodologyVersion: REV_ADAPTER_VERSION,
+        sampleNote: '样本为本次采集窗口内通过校验的公开页面，不等于全网口碑',
+        partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'public_web', evidenceProvider: 'public_web_reviews',
+      claimField: 'reviews.public_pages', claimScope: 'public_page_reviews_observation',
+      entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
+      entityRef: { kind: 'review_pages', domain: ident.officialDomain || null },
+      extractedValue: {
+        summaryKind: 'reviews_digest', reviewCount: totalReviews, sourceCount: pages.length,
+        measurementMethod: 'public_source_observation', partialScan: partial,
+      },
+      parserVersion: REV_ADAPTER_VERSION,
+      note: 'public review pages (robots-respecting fetch; per-page raw snapshots)',
+      sourceUrl: res.sourceUrl || null,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'public_reviews');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+
+    // 候选发现复用系统搜索链（Serper/Tavily/Brave/Bocha fanout；配置缺失=真实失败状态）
+    const Search = require('../research/search.js');
+    const cfg = require('../core/config.js').loadConfig();
+    const searchReady = Search.providerConfigured(cfg, Search.providerMain(cfg)) || ['serper', 'brave', 'bocha', 'tavily'].some(n => Search.providerConfigured(cfg, n));
+    if (!searchReady) {
+      return failAttempt(ctx, { ok: false, error: 'CONFIG_MISSING' }, { errorUserText: '数据服务暂不可用，请稍后再试。' });
+    }
+    const brand = String(comp.name || '').trim();
+    const domain = Net.domainOf(comp.url || '');
+    let candidates = [];
+    try {
+      const r = await Search.fanoutSearch(
+        [brand + ' reviews', brand + ' customer reviews ratings', (domain ? domain + ' reviews' : brand + ' reviews site:trustpilot.com OR site:reddit.com')].filter(Boolean),
+        cfg, 'us', 'reviews'
+      );
+      candidates = (r && r.results || []).map(x => ({ url: x.url || x.link, title: x.title || null })).filter(c => c.url).slice(0, 5);
+    } catch (e) {
+      return failAttempt(ctx, { ok: false, error: 'unavailable', errorUserText: '候选评论页发现失败，稍后可重试。' });
+    }
+    if (!candidates.length) {
+      // 采集窗口无可归属公开评论页：成功零观察（≠ 失败 ≠ 未接入）
+      const res = { ok: true, pages: [], snapshotIds: [], partialScan: false, periodStart: null, periodEnd: null, sourceUrl: null };
+      const out = this.normalize(res, ctx);
+      if (suppress) return { providerOk: true, ident, raw: res, out };
+      let fin;
+      try { fin = await finalizeOutput(ctx, res, out); }
+      catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+      if (fin.invalid || fin.evidenceFailed) return fin;
+      return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey, emptyWindow: true });
+    }
+    // 逐页抓取：FetchGate/robots/SSRF 全合规（Net.fetchPage）；品牌归属粗校验（标题/URL 含品牌名或域名）
+    const pages = []; const snapshotIds = [];
+    for (const c of candidates) {
+      const fr = await Net.fetchPage(c.url, 15000, { trigger, tenantId: ctx.tenantId });
+      if (!fr || fr.ok !== true) continue; // robots 禁止/失败页不入库（不伪装成功）
+      if (fr.snapshotId) snapshotIds.push(fr.snapshotId);
+      let text = '';
+      try { text = Net.stripHtml(fr.html || '').slice(0, 800); } catch (e) { text = String(fr.html || '').slice(0, 800); }
+      const urlL = String(c.url).toLowerCase(); const titleL = String(c.title || '').toLowerCase(); const brandL = brand.toLowerCase();
+      const related = (domain && urlL.includes(domain)) || (brandL && (urlL.includes(brandL) || titleL.includes(brandL)));
+      if (!related) continue; // 归属校验不过 → 不入库（identity 保持 unresolved）
+      // 评分抽取：schema.org aggregateRating（JSON-LD）→ meta → 评分模式（可信度递减）
+      let rating = null, reviewCount = null;
+      try {
+        const lds = String(fr.html || '').match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
+        for (const ld of lds) {
+          try {
+            const j = JSON.parse(ld.replace(/<script type="application\/ld\+json">|<\/script>/g, ''));
+            const node = (j['@graph'] || [j]).find(n => n.aggregateRating || n.review) || j;
+            if (node.aggregateRating) {
+              rating = typeof node.aggregateRating.ratingValue === 'number' ? node.aggregateRating.ratingValue : Number(node.aggregateRating.ratingValue) || null;
+              reviewCount = Number(node.aggregateRating.reviewCount || node.aggregateRating.ratingCount) || null;
+              break;
+            }
+          } catch (e2) { /* 单个 JSON-LD 解析失败跳过 */ }
+        }
+      } catch (e) { /* 抽取失败保持 null */ }
+      pages.push({
+        pageId: c.url, url: c.url, title: c.title || (text.slice(0, 60)),
+        rating, reviewCount, snippet: text.slice(0, 200), fetchedAt: new Date().toISOString(),
+      });
+    }
+    const res = {
+      ok: true, pages, snapshotIds, partialScan: false,
+      periodStart: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+      periodEnd: new Date().toISOString().slice(0, 10),
+      sourceUrl: pages.length ? pages[0].url : null,
+    };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    try { recordIdentity(ctx, ident, 'success', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString() };
+  },
+};
+
+const ADAPTERS = Object.freeze({
+  shopify: shopifyAdapter, shopify_collections: shopifyCollectionsAdapter,
+  youtube: youtubeAdapter, dataforseo: dataforseoAdapter,
+  tiktok: tiktokAdapter, reviews: reviewsAdapter,
+});
+
 module.exports = {
   CATALOG_ADAPTER_VERSION, COLLECTIONS_ADAPTER_VERSION,
   ADAPTERS, ADAPTER_METHODS, SUMMARY_KINDS, ADAPTER_STRATEGIES, OUTCOMES,
   getAdapter, listAdapters, validateAdapter, validateOutput, assertAdaptersIntegrity,
+  redactSecretParams, SENSITIVE_QUERY_KEYS, fetchApiJson,
   resolveAdapterChain, classifyFetchFailure, summarize, summarizeObservations, assertFence,
   runProviderOutput, commitProviderTerminal, finalizeOutput, commitProviderEmpty, FAILURE_TEXT,
 };

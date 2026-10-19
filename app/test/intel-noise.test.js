@@ -133,21 +133,28 @@ const COMPS = [
     assert.strictEqual(cd.length, 4, '恰 4 条，实际 ' + cd.length + '：' + JSON.stringify(cd));
     const codes = new Set(cd.map(d => d.code));
     assert.strictEqual(codes.size, 4, 'code 去重后恰 4');
-    const allowed = new Set(['code', 'displayName', 'state', 'message']);
+    const allowed = new Set(['code', 'displayName', 'state', 'message', 'configKeys']);
     for (const d of cd) {
       for (const k of Object.keys(d)) assert.ok(allowed.has(k), '不允许字段 ' + k + '（不得含品牌 ID/事件 ID/时间戳/Evidence）');
-      assert.strictEqual(d.state, 'not_integrated');
+      // Wave 1：四维升级为 pending_config——「需要系统数据服务配置」≠ 未接入
+      assert.strictEqual(d.state, 'pending_config', d.code + ' 状态如实');
+      if (d.configKeys != null) assert.ok(Array.isArray(d.configKeys) && d.configKeys.length, 'configKeys 非空');
     }
     // Registry 口径：全部维度中无 ga 能力的恰好这 4 个
     const gaDims = Registry.listDimensions().filter(d => Registry.capabilitiesByDimension(d.code).some(c => c.maturity === 'ga'));
     assert.strictEqual(gaDims.length, 1, '已接入维度恰 1 个（website_products）');
   });
 
-  await t('N4 四项名称与统一文案正确', async () => {
+  await t('N4 四项名称与统一文案正确（r2：用户侧口径，无凭据变量名）', async () => {
     const cd = BrandSvc.constructionDimensions();
     const names = cd.map(d => d.displayName).sort();
     assert.deepStrictEqual(names, ['广告活动', '搜索与热度', '社媒内容', '口碑与评论'].sort(), JSON.stringify(names));
-    for (const d of cd) assert.strictEqual(d.message, '尚未接入，当前不生成数据、估算或结论。', '统一文案');
+    for (const d of cd) {
+      assert.ok(/当前不生成数据、估算或结论。/.test(d.message), '统一文案骨架：' + d.message);
+      assert.ok(/数据服务暂不可用/.test(d.message), d.code + ' 用户侧口径');
+      assert.strictEqual(/YOUTUBE_API_KEY|DATAFORSEO|TIKTOK_CLIENT|SERPER_API_KEY/.test(d.message), false, '无凭据变量名');
+      assert.strictEqual('configKeys' in d, false, 'configKeys 不进用户投影');
+    }
   });
 
   await t('N5 建设中维度与品牌数量/采集次数无关（项目级、不随品牌翻倍）', async () => {

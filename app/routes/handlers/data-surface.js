@@ -129,9 +129,22 @@ async function refresh(ctx, req, res, url, p) {
   const capabilityCode = typeof body.capability === 'string' && body.capability.trim() ? body.capability.trim().slice(0, 60) : 'shopify_catalog';
   const cap = Registry.getCapability(capabilityCode);
   if (!cap) { ctx.sendJSON(res, 404, { error: 'CAPABILITY_NOT_FOUND', message: '能力不存在。' }); return true; }
-  if (!cap.manualRefresh || cap.maturity !== 'ga') {
+  // P0-2 整改 r2：实现状态（maturity）与运行状态（readiness）分离。
+  // ga 与 pending_config 均可发起真实采集；not_integrated 仍拒绝。
+  if (!cap.manualRefresh || cap.maturity === 'not_integrated') {
     ctx.sendJSON(res, 400, { error: 'CAPABILITY_NOT_SUPPORTED', message: '该数据维度尚未接入，暂不支持刷新。' });
     return true;
+  }
+  const Readiness = require('../../services/source-readiness.js');
+  if (cap.maturity === 'pending_config') {
+    const rd = Readiness.getReadiness(cap.code);
+    if (rd.state === 'not_configured') {
+      // 用户侧文案（任务书 r2 §P0-2）：不出现环境变量名 / key 名；技术细节仅管理员健康接口可见
+      ctx.sendJSON(res, 400, { error: 'SOURCE_NOT_CONFIGURED', message: '数据服务暂不可用，请稍后再试。' });
+      return true;
+    }
+    // ready_to_verify / operational / auth_rejected / quota_exhausted / unavailable → 允许真实采集；
+    // 真实失败按分类落账（绝不伪装无结果），成功即持久化 provider verification。
   }
   const rc = resolveComp(ctx, tid, typeof body.projectId === 'string' ? body.projectId : '', competitorId);
   if (rc.error) { ctx.sendJSON(res, rc.error[0], { error: rc.error[1], message: rc.error[2] }); return true; }
@@ -206,7 +219,12 @@ async function adminCapabilities(ctx, req, res, url, p) {
     ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅平台超管可查看能力矩阵。' });
     return true;
   }
-  ctx.sendJSON(res, 200, Surface.buildAdminMatrix());
+  // P0-2 整改 r2：并入数据源就绪状态（readiness）——技术细节（哪些 key 已配置、
+  // 失败分类）仅管理员可见；只显示配置存在性布尔，绝不显示密钥值。
+  const Readiness = require('../../services/source-readiness.js');
+  const matrix = Surface.buildAdminMatrix();
+  matrix.sourceReadiness = Readiness.adminView();
+  ctx.sendJSON(res, 200, matrix);
   return true;
 }
 

@@ -23,6 +23,7 @@
 const Registry = require('./capability-registry.js');
 const Adapters = require('./source-adapter.js');
 const SurfaceStore = require('./surface-store.js');
+const Snapshot = require('../research/source-snapshot.js');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 与 watch-store 同口径：running 超时视为崩溃残留（投影层只读标记）
 
@@ -125,16 +126,26 @@ function summarizeObservations(observations) {
 
 // evidenceRefs：snapshot/证据成对；sourceUrl = 公开来源页（04 §11 用户可核对）。
 // 多 Evidence 全量展开（整改 §四.6：抽屉支持多条）。
-function evidenceRefsOf(attempt, comp) {
+// 🔴 Wave 1 修复：sourceUrl 优先反查 SourceSnapshot 的精确 source_url/final_url，
+// 品牌主页 URL（comp.url）只作最后回退——禁止把品牌主页 URL 当所有证据的来源。
+function evidenceRefsOf(attempt, comp, tenantId) {
   const out = [];
   const evIds = (attempt && attempt.evidenceIds) || [];
   const snapIds = (attempt && attempt.snapshotIds) || [];
   const n = Math.max(evIds.length, snapIds.length);
   for (let i = 0; i < n; i++) {
+    let preciseUrl = null;
+    const sid = snapIds[i] || null;
+    if (sid && tenantId) {
+      try {
+        const meta = Snapshot.getById(tenantId, sid);
+        if (meta) preciseUrl = meta.final_url || meta.source_url || null;
+      } catch (e) { /* 反查失败回退品牌主页 URL */ }
+    }
     out.push({
       evidenceId: evIds[i] || null,
-      snapshotId: snapIds[i] || null,
-      sourceUrl: (comp && comp.url) || null,
+      snapshotId: sid,
+      sourceUrl: preciseUrl || (comp && comp.url) || null,
     });
   }
   return out;
@@ -183,7 +194,7 @@ function capabilityBlock({ tenantId, projectId, competitorId, cap, comp, nowMs }
     latestAttempt: attemptUserView(derived.latestAttempt),
     gaps,
     actions,
-    evidenceRefs: evidenceRefsOf(usable, comp),
+    evidenceRefs: evidenceRefsOf(usable, comp, tenantId),
     pagination: { total: (usable && usable.observationCount) || 0 },
   };
 }
@@ -196,9 +207,26 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
   const identity = identityRows.length ? identityRows[0] : null;
 
   const dims = Registry.listDimensions().map(d => {
-    const caps = Registry.capabilitiesByDimension(d.code).filter(c => c.maturity === 'ga');
+    const allCaps = Registry.capabilitiesByDimension(d.code);
+    const caps = allCaps.filter(c => c.maturity === 'ga');
     if (!caps.length) {
-      const placeholder = Registry.capabilitiesByDimension(d.code)[0] || null;
+      const placeholder = allCaps[0] || null;
+      // P0-2 整改 r2：pending_config 维度用户侧口径收敛——「数据服务暂不可用」；
+      // 凭据要求等技术细节仅管理员健康接口可见（不出现环境变量名/key 名）。
+      const pending = allCaps.filter(c => c.maturity === 'pending_config');
+      if (pending.length) {
+        return {
+          code: d.code, displayName: d.displayName, capability: null,
+          surfaceState: 'pending_config', reasonText: '数据服务暂不可用，请稍后再试。',
+          freshness: { status: 'unknown', slaHours: null, lastSuccessAt: null },
+          summary: null, coverage: {},
+          isRefreshing: false, latestAttempt: null,
+          gaps: [{ code: 'service_credential_required', text: '数据服务暂不可用' }],
+          actions: [], evidenceRefs: [],
+          capabilityView: placeholder ? Registry.userView(placeholder) : null,
+          aggregations: [], pagination: { total: 0 },
+        };
+      }
       return {
         code: d.code, displayName: d.displayName, capability: null,
         surfaceState: 'unsupported', reasonText: '数据源尚未接入，暂时无法采集该维度',
@@ -295,7 +323,7 @@ function buildDimensionDetail({ tenantId, projectId, competitorId, dimension, of
       summary: usable ? (usable.summary || summarizeObservations(observations)) : null,
       observations: page,
       pagination: { offset: off, limit: lim, total: observations.length, hasMore: off + lim < observations.length },
-      evidenceRefs: evidenceRefsOf(usable, comp),
+      evidenceRefs: evidenceRefsOf(usable, comp, tenantId),
       gaps: derived.gaps,
       interrupted: runningExpired,
     };

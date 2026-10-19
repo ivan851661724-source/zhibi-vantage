@@ -131,8 +131,8 @@ function check(name, cond, extra) {
   check('新任务状态可见（' + (detailStatus || '').trim() + '）', ['排队中', '生成中', '自动重试中', '已完成'].some(s => (detailStatus || '').includes(s)), detailStatus);
   await page.screenshot({ path: path.join(SHOTS, 's4-regenerated.png'), fullPage: true });
 
-  // ---------- S5 四项未接入维度诚实呈现（无 0 值 / 无模拟图表 / 无虚构来源） ----------
-  console.log('S5 未接入维度诚实呈现');
+  // ---------- S5 建设中维度诚实呈现（r2：用户侧四种口径，凭据细节仅管理员接口） ----------
+  console.log('S5 建设中维度诚实呈现');
   await page.goto(FRONT + '/brands/' + encodeURIComponent(SEED.brandA) + '?projectId=' + encodeURIComponent(SEED.projectA) + '&tab=coverage', { waitUntil: 'networkidle', timeout: 30000 });
   await page.waitForSelector('.core-building', { timeout: 15000 });
   const building = page.locator('.core-building').first();
@@ -141,8 +141,9 @@ function check(name, cond, extra) {
   for (const dim of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
     check('建设中区域列出「' + dim + '」', bText.includes(dim));
   }
-  check('未接入维度标注「尚未接入」', bText.includes('尚未接入'));
-  check('刷新位标注「不可用」（未接入）', bText.includes('不可用'));
+  check('维度状态标注「数据服务暂不可用」（r2 用户侧口径，不写「未接入」）', bText.includes('数据服务暂不可用'));
+  check('用户页面零凭据变量名（YOUTUBE_API_KEY 等不出现）', !/YOUTUBE_API_KEY|DATAFORSEO_|TIKTOK_CLIENT|SERPER_API_KEY/.test(bText));
+  check('无「需要配置：」管理语气文案', !bText.includes('需要配置：'));
   check('无虚构来源（不含「来源：已核实」等）', !bText.includes('来源：已核实') && !bText.includes('来源：采集'));
   check('区域内无图表（无 <svg> 模拟图表）', !bHtml.includes('<svg'));
   check('区域内无 0 值徽章（无「共 0」「0 条」「0 个」）', !/共\s*0|0\s*条|0\s*个/.test(bText));
@@ -230,7 +231,10 @@ function check(name, cond, extra) {
   for (const dim of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
     check('建设中区域列出「' + dim + '」恰一次', (foldText.match(new RegExp(dim, 'g')) || []).length === 1);
   }
-  check('统一文案出现 4 次（尚未接入，当前不生成数据、估算或结论。）', (foldText.match(/尚未接入，当前不生成数据、估算或结论。/g) || []).length === 4);
+  // r2：pending_config 用户侧口径——「数据服务暂不可用…当前不生成数据、估算或结论。」
+  check('「数据服务暂不可用」出现（每项，≥4 次）', (foldText.match(/数据服务暂不可用/g) || []).length >= 4);
+  check('「当前不生成数据、估算或结论」出现（含 hint，≥4 次）', (foldText.match(/当前不生成数据、估算或结论/g) || []).length >= 4);
+  check('用户页面零凭据变量名', !/YOUTUBE_API_KEY|DATAFORSEO_|TIKTOK_CLIENT|SERPER_API_KEY/.test(foldText));
   check('无时间戳（不含日期格式）', !/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/.test(foldText));
   check('无「待核实」徽章', !foldText.includes('待核实'));
   check('无「暂无可打开来源」', !foldText.includes('暂无可打开来源'));

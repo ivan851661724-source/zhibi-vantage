@@ -143,16 +143,18 @@ function IntelInbox({ projectId }: { projectId: string }) {
 
       {/* r4.10：数据覆盖与建设中维度——项目级单一去重区域（页面最底部）。
           未接入维度不是情报事件：无时间戳、无来源、无证据、无状态徽章、无 0 值；
-          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。 */}
+          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。
+          P0-2 整改 r2：用户侧只有四种口径——数据服务暂不可用 / 正在验证数据服务 /
+          本轮未观察到结果 / 最近采集失败，可稍后重试；凭据细节仅管理员接口可见。 */}
       {construction.length ? (
         <details className="core-building core-building-fold">
           <summary>数据覆盖与建设中维度（{construction.length}）</summary>
-          <p className="hint">以下维度尚未接入，与具体品牌无关：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。</p>
+          <p className="hint">以下维度当前不生成数据、估算或结论；数据服务可用后这里会展示采集状态与来源。</p>
           <ul className="core-building-list">
             {construction.map(d => (
               <li key={d.code}>
                 <span className="core-building-name">{d.displayName}</span>
-                <span className="core-building-state">尚未接入</span>
+                <span className="core-building-state cfg">{d.state === 'pending_config' ? '数据服务暂不可用' : '尚未接入'}</span>
                 <span className="core-building-msg">{d.message}</span>
               </li>
             ))}
