@@ -9,7 +9,8 @@
 // 轮询纪律：不新建接口/通道，只用现有 GET /api/state；组件卸载/切页清理定时器。
 // 注意：落地轮询结果用 patch() 而非 refresh()——refresh 走 stateSig 签名比对，
 // 签名不含 brief 字段，briefStatus 终态会被「数据未变」跳过导致报告永不渲染。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { apiGet, apiPost } from '@/lib/api';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
@@ -20,13 +21,14 @@ import { useRouter } from 'next/navigation';
 
 // 正式调研报告（SC-04）：用户显式触发生成；任务持久化可恢复；报告含版本、
 // 生成范围、数据覆盖、事实引用、机会与限制、纠错入口。
+// 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底。
 function CoreReportsSection({ projectId }: { projectId: string }) {
   const router = useRouter();
   if (!projectId) return null;
   return (
     <section className="core-reports-section">
       <h3>调研报告（正式版）</h3>
-      <ReportPanel projectId={projectId} onOpen={(id) => router.push(`/report/${id}`)} />
+      <ReportPanel projectId={projectId} onOpen={(id) => router.push(`/report/${id}?projectId=${encodeURIComponent(projectId)}`)} />
     </section>
   );
 }
@@ -45,7 +47,16 @@ interface Brief {
 }
 
 export default function ReportPage() {
+  return (
+    <Suspense fallback={<p className="hint">加载调研报告…</p>}>
+      <ReportInner />
+    </Suspense>
+  );
+}
+
+function ReportInner() {
   const { state, loading, patch } = useZhibiState();
+  const searchParams = useSearchParams();
   const brief = (state ? (state.brief as Brief | undefined) : undefined) || undefined;
   const dist = (brief && brief.evidenceDist) || (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined);
   const [busy, setBusy] = useState(false);
@@ -140,7 +151,7 @@ export default function ReportPage() {
       <EvidenceBar dist={dist} />
 
       {/* SC-04：正式调研报告（冻结事实包 + 持久任务 + 引用可追溯） */}
-      <CoreReportsSection projectId={String(state?.projectId || '')} />
+      <CoreReportsSection projectId={String(searchParams.get('projectId') || (state as { projectId?: string } | null)?.projectId || '')} />
 
       {err && <p className="hint">⚠ {err}</p>}
       {!hasTrack && !loading && <p className="hint">还没有调研数据——先在工作台发起一次赛道调研。</p>}

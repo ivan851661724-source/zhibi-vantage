@@ -193,7 +193,7 @@ function rebuildTimeline(tenantId, brandId, projectId, competitor) {
           status: evStatus,
           title: '采集' + (a.status === 'success' ? '完成' : a.status === 'partial' ? '部分完成' : a.status === 'failed' ? '失败' : '进行中') + '：' + cap.displayName,
           detail: a.errorUserText || null, refType: 'collection_attempt', refId: a.attemptId,
-          payload: { capability: cap.code, status: a.status, observationCount: a.observationCount || 0 },
+          payload: { capability: cap.code, status: a.status, observationCount: a.observationCount || 0, evidenceIds: Array.isArray(a.evidenceIds) ? a.evidenceIds.slice(0, 20) : [] },
         });
       }
     }
@@ -275,7 +275,8 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
       }).filter(Boolean);
       const hasEvidence = evRefs.length > 0;
       push({
-        id: a.attemptId, brandId, brandName: comp.name || null, type: cap.code === 'shopify_catalog' ? 'product' : 'monitor',
+        id: a.attemptId, brandId, brandName: comp.name || null, competitorId: comp.id || null,
+        type: cap.code === 'shopify_catalog' ? 'product' : 'monitor',
         typeText: cap.code === 'shopify_catalog' ? '商品' : '监控状态',
         at, nature: 'observed', natureText: NATURE_TEXT.observed,
         status: hasEvidence ? (a.status === 'partial' ? 'pending' : 'verified') : (a.status === 'failed' ? 'insufficient' : 'insufficient'),
@@ -295,7 +296,7 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
     for (const e of events) {
       if (dom && e.entity_key && !String(e.entity_key).includes(dom)) continue;
       push({
-        id: e.event_id || ('ev_' + String(e.occurred_at || '')), brandId, brandName: comp.name || null,
+        id: e.event_id || ('ev_' + String(e.occurred_at || '')), brandId, brandName: comp.name || null, competitorId: comp.id || null,
         type: 'price', typeText: '价格', at: e.occurred_at || e.created_at,
         nature: 'computed', natureText: NATURE_TEXT.computed,
         status: 'pending', statusText: INTEL_STATUS_TEXT.pending,

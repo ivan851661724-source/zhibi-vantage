@@ -234,22 +234,40 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
   }
   // 已具备数据支持的品牌数（Data Surface 有终态成功/部分成功）
   let withData = 0;
+  const dimsWithData = new Set();
   for (const c of comps) {
     const cov = BrandSvc.buildCoverage(tenantId, projectId, c);
     if ((cov.summary.dimensionsWithData || 0) > 0) withData++;
+    for (const d of (cov.dimensions || [])) {
+      if (d.state === 'ok' || d.state === 'partial' || d.state === 'stale') dimsWithData.add(d.displayName);
+    }
   }
   const MIN_BRANDS = 3;
+  // 只读视图扩展（UI 轮）：机会页「数据基础」需要维度级构成——已接入 / 建设中 / 实际有数据
+  const allDims = require('./capability-registry.js').listDimensions();
+  const integratedNames = [];
+  const notIntegratedNames = [];
+  for (const d of allDims) {
+    const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
+    (caps.some(c => c.maturity === 'ga') ? integratedNames : notIntegratedNames).push(d.displayName);
+  }
   const limits = [];
-  for (const d of (require('./capability-registry.js').listDimensions())) {
+  for (const d of allDims) {
     const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
     if (!caps.some(c => c.maturity === 'ga')) limits.push(d.displayName + '：数据源未接入，本版不据此生成机会结论');
   }
+  const dimensionBasis = {
+    integrated: integratedNames,
+    notIntegrated: notIntegratedNames,
+    covered: [...dimsWithData],
+  };
   if (!comps.length || withData < MIN_BRANDS) {
     return {
       status: 'insufficient',
       statusText: '资料不足，暂不生成机会判断',
       items: [],
       sample: { brandCount: comps.length, brandsWithData: withData, required: MIN_BRANDS },
+      dimensionBasis,
       limits,
       note: '机会判断需要至少 ' + MIN_BRANDS + ' 个已具备真实数据覆盖的竞争品牌；当前不满足，Vantage 不给出机会结论（不做估算填充）。',
     };
@@ -293,6 +311,7 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
     statusText: items.length ? '已基于现有数据生成机会线索' : '资料不足，暂不生成机会判断',
     items,
     sample: { brandCount: comps.length, brandsWithData: withData, required: MIN_BRANDS },
+    dimensionBasis,
     limits,
     note: items.length ? '每条机会均标注事实依据、覆盖品牌数与限制；不含未接入维度的推断。' : '资料不足，暂不生成机会判断。',
   };
@@ -411,12 +430,19 @@ function getReportView(tenantId, reportId) {
   });
 }
 function listReportViews(tenantId, projectId) {
-  return BrandStore.listReports(tenantId, projectId).map(r => ({
-    reportId: r.reportId, projectId: r.projectId, version: r.version, status: r.status,
-    scope: r.scope, createdAt: r.createdAt, finishedAt: r.finishedAt,
-    factCount: (r.factPack && r.factPack.facts ? r.factPack.facts.length : 0),
-    gapCount: (r.gaps ? r.gaps.length : 0),
-  }));
+  const jobs = BrandStore.listReportJobs(tenantId);
+  return BrandStore.listReports(tenantId, projectId).map(r => {
+    // 只读视图扩展（UI 轮）：列表透出自动重试进度与最近失败说明（任务书 §六.1「自动重试中」）
+    const rjobs = jobs.filter(j => j.reportId === r.reportId);
+    const retryCount = rjobs.reduce((m, j) => Math.max(m, Number(j.retry || 0)), 0);
+    return {
+      reportId: r.reportId, projectId: r.projectId, version: r.version, status: r.status,
+      scope: r.scope, createdAt: r.createdAt, finishedAt: r.finishedAt,
+      factCount: (r.factPack && r.factPack.facts ? r.factPack.facts.length : 0),
+      gapCount: (r.gaps ? r.gaps.length : 0),
+      retryCount, errorText: r.errorText || null, generatedBy: r.generatedBy || null,
+    };
+  });
 }
 
 module.exports = {

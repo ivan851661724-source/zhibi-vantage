@@ -4,13 +4,15 @@
 // 铁律：分母常驻可见、每条可溯源、置信度封顶「中」、覆盖率不足不作排序结论。
 // 结构：卖点空缺（市场空缺，来自空白视图）默认主层 → 口碑机会（满意度×重要性）补充层。
 // 交互：散点图点 → 高亮下方对应卡片并平滑滚动（复刻 L1292-1299）。
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import type { ZhibiState } from '@/types/state';
 import { fetchOpportunities, type OpportunityView } from '@/lib/core-api';
 
-// 统一读模型机会基础（SC-04）：先展示「已具备什么数据」，再展示机会。
-// 样本不足 → 明确「资料不足，暂不生成机会判断」，绝不把未接入维度伪装成市场机会。
+// 统一读模型机会基础（SC-04 UI 框架轮）：先展示「已具备什么数据」（品牌样本 + 维度构成），
+// 再展示机会线索；样本不足 → 明确「资料不足，暂不生成机会判断」并给出补齐方向，
+// 绝不把未接入维度伪装成市场机会。
 function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
   const [v, setV] = useState<OpportunityView | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -25,24 +27,56 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
   }, [projectId]);
   if (err) return <p className="core-err">{err}</p>;
   if (!v) return null;
+  const db = v.dimensionBasis;
   return (
     <section className="core-opp-basis">
       <h3>数据基础与样本范围</h3>
       <ul>
         <li>竞争品牌数：{v.sample.brandCount}（已具备真实数据：{v.sample.brandsWithData}{v.sample.required ? ` / 至少需要 ${v.sample.required}` : ''}）</li>
+        {db ? (
+          <>
+            <li>已接入维度：{db.integrated.length ? db.integrated.join('、') : '—'}</li>
+            <li>当前实际有数据的维度：{db.covered.length ? db.covered.join('、') : '暂无（尚未采集到可用数据）'}</li>
+            <li>本次判断未使用的维度（建设中）：{db.notIntegrated.length ? db.notIntegrated.join('、') : '无'}</li>
+          </>
+        ) : null}
         <li>机会状态：{v.statusText}</li>
         {v.note ? <li>{v.note}</li> : null}
       </ul>
+      {db && db.notIntegrated.length ? (
+        <div className="core-building core-opp-building">
+          <div className="core-building-head">数据覆盖与建设中维度</div>
+          <p className="hint">以下维度尚未接入：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。</p>
+          <ul className="core-building-list">
+            {db.notIntegrated.map(n => (
+              <li key={n}>
+                <span className="core-building-name">{n}</span>
+                <span className="core-building-state">尚未接入</span>
+                <span className="core-building-meta">最近观察：—</span>
+                <span className="core-building-meta">来源：未接入</span>
+                <span className="core-building-meta">刷新：不可用</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       {v.status === 'insufficient' ? (
-        <p className="hint">当前样本不足，Vantage 不输出机会结论（不做估算填充）。</p>
+        <div className="core-opp-insufficient">
+          <p className="core-opp-insufficient-title">资料不足，暂不生成机会判断</p>
+          {v.note ? <p className="hint">{v.note}</p> : null}
+          <p className="hint">补齐方向：把更多竞争品牌推进到「已具备真实数据」（当前 {v.sample.brandsWithData}/{v.sample.required || 3}）；建设中维度接入后不会追溯生成，只对之后的数据生效。</p>
+        </div>
       ) : (
         <ul className="core-opp-items">
           {v.items.slice(0, 10).map((it, i) => (
             <li key={it.id || i}>
-              <span>{it.theme}</span>
+              <span className="core-opp-theme">{it.theme}</span>
               <span>覆盖品牌数 {it.brandCount != null ? it.brandCount : '—'}</span>
+              {it.from || it.to ? <span>时间范围 {it.from || '不限'} ~ {it.to || '不限'}</span> : null}
               <span>{it.status || '线索（待验证）'}</span>
-              {it.caveats && it.caveats.length ? <span className="core-opp-caveat">限制：{it.caveats.join('；')}</span> : null}
+              {it.basis != null ? <span className="core-opp-basisline">事实依据：{typeof it.basis === 'string' ? it.basis : JSON.stringify(it.basis)}</span> : null}
+              {it.caveats && it.caveats.length ? <span className="core-opp-caveat">限制与待验证：{it.caveats.join('；')}</span> : null}
+              <a className="core-opp-link" href={`/intel?projectId=${encodeURIComponent(projectId)}`}>到情报库核对 →</a>
             </li>
           ))}
         </ul>
@@ -52,7 +86,7 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
           {v.limits.map((l, i) => <li key={i}>{l}</li>)}
         </ul>
       ) : null}
-      <p className="hint">机会只是待验证线索，不是经营建议或确定结论。</p>
+      <p className="hint">文案口径：这里是「机会线索」，基于当前样本显示；不是经营决策或行动指令。</p>
     </section>
   );
 }
@@ -347,11 +381,22 @@ function OppItem({ t, hl }: { t: OppTheme; hl: boolean }) {
   );
 }
 
-// ---------- 主页面 ----------
+// ---------- 主页面（Suspense：useSearchParams 深链接） ----------
 export default function OpportunityPage() {
+  return (
+    <Suspense fallback={<p className="hint">加载机会视图…</p>}>
+      <OpportunityInner />
+    </Suspense>
+  );
+}
+
+function OpportunityInner() {
   const { state, loading } = useZhibiState();
+  const searchParams = useSearchParams();
   const [hl, setHl] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底
+  const urlProjectId = String(searchParams.get('projectId') || (state as { projectId?: string } | null)?.projectId || '');
 
   // 点图上的点 → 高亮下方对应卡片（复刻 L1292-1299）
   const onPick = (oid: string) => {
@@ -372,6 +417,7 @@ export default function OpportunityPage() {
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
+        <UnifiedOpportunityBasis projectId={urlProjectId} />
         <div className="ws-empty">
           <h3>机会地图</h3>
           <p>暂无数据。</p>
@@ -395,6 +441,7 @@ export default function OpportunityPage() {
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
+        <UnifiedOpportunityBasis projectId={urlProjectId} />
         <div className="ws-head">
           <h3>机会地图 · 初步（样本不足）</h3>
           <p className="ws-prelim-banner">⚠️ <b>初步信号 · 样本不足</b>：以下不是正式机会图，仅列出目前已识别的用户声音主题，<b>不作排序结论、不标重点机会</b>。{reasonLine}</p>
@@ -447,7 +494,7 @@ export default function OpportunityPage() {
           <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
         </div>
       </div>
-      <UnifiedOpportunityBasis projectId={String((state as { projectId?: string } | null)?.projectId || '')} />
+      <UnifiedOpportunityBasis projectId={urlProjectId} />
       <div className="ws-head">
         <h3>口碑机会 · 重要但没人做好的地方（补充层）</h3>
         <p>

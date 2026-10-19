@@ -71,12 +71,14 @@ export interface TimelineEvent {
   detail: string | null;
   refType?: string | null;
   refId?: string | null;
+  payload?: { evidenceIds?: string[]; observationCount?: number; capability?: string; status?: string } | null;
 }
 
 export interface IntelItem {
   id: string;
   brandId: string | null;
   brandName: string | null;
+  competitorId?: string | null;
   type: string;
   typeText: string;
   at: string;
@@ -99,6 +101,7 @@ export interface OpportunityView {
     caveats?: string[]; status?: string; note?: string;
   }[];
   sample: { brandCount: number; brandsWithData: number; required?: number };
+  dimensionBasis?: { integrated: string[]; notIntegrated: string[]; covered: string[] };
   limits: string[];
   note?: string | null;
 }
@@ -113,6 +116,9 @@ export interface ReportListItem {
   finishedAt: string | null;
   factCount: number;
   gapCount: number;
+  retryCount?: number;
+  errorText?: string | null;
+  generatedBy?: string | null;
 }
 
 export interface ReportCitation {
@@ -203,6 +209,20 @@ export function createReport(body: { projectId: string; brandIds?: string[]; fro
 }
 export function fetchReport(reportId: string, signal?: AbortSignal) {
   return apiGet<ReportDetail>(`/api/reports/${encodeURIComponent(reportId)}`, signal);
+}
+
+// 项目清单（顶部项目选择器数据源；GET /api/projects 为文件态清单唯一实现）
+export interface ProjectInfo {
+  id: string;
+  track: string;
+  discoveredAt: string | null;
+  total: number;
+  done: number;
+  hasBrief: boolean;
+  current: boolean;
+}
+export function fetchProjects(signal?: AbortSignal) {
+  return apiGet<{ projects: ProjectInfo[] }>('/api/projects', signal);
 }
 
 // 状态 → 展示语义（§六：未接入≠零值，尚未采集≠未发现数据）

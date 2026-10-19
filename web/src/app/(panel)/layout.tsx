@@ -11,6 +11,7 @@ import { ZhibiStateProvider, useZhibiState } from '@/hooks/use-zhibi-state';
 import { wbLoad } from '@/lib/wb';
 import { isDemoMode } from '@/lib/demo';
 import { AlertsCenter } from '@/components/alerts-center';
+import { ProjectPicker } from '@/components/core-ui';
 
 const NAV_GROUPS: {
   sec: string;
@@ -188,6 +189,8 @@ function TopBar() {
       </div>
       <div className="tb-title">
         {track ? <span className="tb-track"><span className="track-pill">{track}</span></span> : null}
+        {/* SC-04 UI 框架轮：全局项目选择入口（projectId 随跳转持续传递） */}
+        <ProjectPicker />
       </div>
       <div className="tb-right">
         {/* 演示态隐藏换赛道（避免误触 onboarding → 401 踢出演示） */}

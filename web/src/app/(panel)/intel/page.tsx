@@ -1,64 +1,128 @@
 'use client';
-// 情报库页（Phase 3：复刻 renderIntelTab L2201-2216）
-// 顶部对手 chips 切换 + 六维档案；纠错正式入口（弹窗 initialField 预选）。
+// 情报库（SC-04 UI 框架轮）：「竞争变化收件箱」主体 + 品牌逐字段档案（保留区）。
+// 收件箱：顶部摘要（可核实/待核实/资料缺口）+ 品牌/类型/时间/状态筛选 +
+// 情报卡（证据入口/纠错入口）；无证据的条目永不使用「已核实」样式。
+// 空状态三分：尚无采集结果 / 当前筛选无结果 / 资料不足。
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { FieldCorrectModal } from '@/components/field-correct';
 import { IntelProfile } from '@/components/intel-profile';
+import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
 import { fetchIntelligence, type IntelItem } from '@/lib/core-api';
+import { intelSummary } from '@/lib/core-logic';
 
-// 统一读模型情报库（SC-04）：按事实与变化组织，可按品牌/类型/时间筛选，
-// 每条带数据性质、状态与证据入口；没有 Evidence 的内容不标记「已核实」。
-function UnifiedIntelSection({ projectId }: { projectId: string }) {
-  const [items, setItems] = useState<IntelItem[]>([]);
-  const [brandId, setBrandId] = useState('');
+const INTEL_TYPES: { value: string; label: string }[] = [
+  { value: '', label: '全部类型' },
+  { value: 'price', label: '价格' },
+  { value: 'product', label: '商品' },
+  { value: 'promo', label: '促销' },
+  { value: 'channel', label: '渠道' },
+  { value: 'voice', label: '口碑' },
+  { value: 'gap', label: '资料缺口' },
+  { value: 'monitor', label: '监控状态' },
+];
+
+const STATUS_FILTERS: { value: string; label: string }[] = [
+  { value: '', label: '全部状态' },
+  { value: 'verified', label: '已核实' },
+  { value: 'pending', label: '待核实' },
+  { value: 'insufficient', label: '资料不足' },
+];
+
+function IntelInbox({ projectId }: { projectId: string }) {
+  const sp = useSearchParams();
+  const [apiItems, setApiItems] = useState<IntelItem[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [brandId, setBrandId] = useState(sp.get('brandId') || '');
   const [type, setType] = useState('');
+  const [status, setStatus] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
-  const [err, setErr] = useState<string | null>(null);
+  const [fcItem, setFcItem] = useState<IntelItem | null>(null);
 
+  // API 不支持 status 参数：状态筛选在前端做（展示层行为，不改后端契约）
   useEffect(() => {
     if (!projectId) return;
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setItems(r.items || []); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
 
+  const shown = useMemo(
+    () => (status ? apiItems.filter(it => it.status === status) : apiItems),
+    [apiItems, status],
+  );
+
   const brandOptions = useMemo(() => {
     const m = new Map<string, string>();
-    for (const it of items) if (it.brandId && it.brandName) m.set(it.brandId, it.brandName);
+    for (const it of apiItems) if (it.brandId && it.brandName) m.set(it.brandId, it.brandName);
     return [...m.entries()];
-  }, [items]);
+  }, [apiItems]);
+
+  const sum = useMemo(() => intelSummary(apiItems), [apiItems]);
+  const hasFilter = !!(brandId || type || status || from || to);
+  const onlyGaps = apiItems.length > 0 && sum.verified === 0 && sum.pending === 0;
 
   return (
-    <section className="core-intel-section">
-      <h3>情报库（按事实与变化）</h3>
+    <section className="core-intel-section core-inbox">
+      <h3>竞争变化收件箱</h3>
+      <div className="core-inbox-sum">
+        <span className="core-sum-item core-sum-ok">可核实 <b>{sum.verified}</b></span>
+        <span className="core-sum-item core-sum-warn">待核实 <b>{sum.pending}</b></span>
+        <span className="core-sum-item">资料缺口 <b>{sum.gaps}</b></span>
+      </div>
+      <p className="hint">「可核实」= 每条都有可打开的证据记录；无证据的条目一律待核实，不会使用已核实样式。</p>
+
       <div className="core-intel-filters">
         <select value={brandId} onChange={(e) => setBrandId(e.target.value)}>
           <option value="">全部品牌</option>
           {brandOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
         </select>
         <select value={type} onChange={(e) => setType(e.target.value)}>
-          <option value="">全部类型</option>
-          <option value="price">价格</option>
-          <option value="product">商品</option>
-          <option value="promo">促销</option>
-          <option value="channel">渠道</option>
-          <option value="voice">口碑</option>
-          <option value="gap">资料缺口</option>
-          <option value="monitor">监控状态</option>
+          {INTEL_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          {STATUS_FILTERS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="起始日期" />
+        <span className="core-filter-sep">至</span>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} aria-label="结束日期" />
       </div>
+
       {err ? <p className="core-err">{err}</p> : null}
-      <IntelList items={items} onCorrect={() => { /* 纠错入口：下方可逐字段提交 */ }} />
+
+      {!apiItems.length && !hasFilter ? (
+        <EmptyState
+          title="尚无采集结果"
+          sub="该项目还没有可展示的情报。采集由你的操作触发；完成后，可核实的变化会出现在这里。"
+        />
+      ) : !shown.length ? (
+        <EmptyState
+          title="当前筛选没有结果"
+          sub="换个品牌、类型或状态，或清除时间范围再试。"
+          action={<button type="button" className="btn-ghost" onClick={() => { setBrandId(''); setType(''); setStatus(''); setFrom(''); setTo(''); }}>清除筛选</button>}
+        />
+      ) : (
+        <>
+          {onlyGaps ? (
+            <p className="core-inbox-poor">当前可展示的内容以资料缺口为主：已接入维度的采集尚未产出可核实情报。补齐采集后这里会出现品牌变化。</p>
+          ) : null}
+          <IntelList items={shown} onCorrect={(it) => setFcItem(it)} />
+        </>
+      )}
+
+      {fcItem && fcItem.competitorId ? (
+        <FieldCorrectModal
+          competitorId={fcItem.competitorId}
+          onClose={() => setFcItem(null)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -74,6 +138,8 @@ export default function IntelPage() {
 function IntelInner() {
   const { state, loading } = useZhibiState();
   const searchParams = useSearchParams();
+  // 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底
+  const projectId = String(searchParams.get('projectId') || (state as { projectId?: string } | null)?.projectId || '');
   const [curId, setCurId] = useState<string | null>(null);
   const [fcField, setFcField] = useState<string | undefined>(undefined);
   const [fcOpen, setFcOpen] = useState(false);
@@ -98,60 +164,53 @@ function IntelInner() {
 
   if (loading) return <p className="hint">加载情报库…</p>;
 
-  if (!cs.length) {
-    return (
-      <div>
-        <div className="page-head">
-          <div>
-            <h2>情报库 · 竞争品牌档案</h2>
-            <p className="desc">品牌定位、价格、渠道、上新节奏与消费者反馈等竞争品牌档案，每个字段都带数据依据与来源，可逐条核对。</p>
-          </div>
-        </div>
-        <div className="empty">
-          <div className="big">尚未添加竞争品牌</div>
-          <div className="sub">发现并添加竞争品牌后，Vantage 将开始建立竞争档案。</div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div>
       <div className="page-head">
         <div>
-          <h2>情报库 · 竞争品牌档案</h2>
-          <p className="desc">品牌定位、价格、渠道、上新节奏与消费者反馈等竞争品牌档案，每个字段都带数据依据与来源，可逐条核对。</p>
-        </div>
-        <UnifiedIntelSection projectId={String((state as { projectId?: string } | null)?.projectId || '')} />
-        <div className="actions">
-          <div className="filters" style={{ marginBottom: 0 }}>
-            {cs.map((c) => (
-              <button
-                key={c.id}
-                className={'chip' + (c.id === active ? ' on' : '')}
-                type="button"
-                onClick={() => setCurId(c.id)}
-              >
-                {c.name as string}
-              </button>
-            ))}
-          </div>
+          <h2>情报库</h2>
+          <p className="desc">每天看一遍：竞争品牌发生了什么变化、哪些已核实、哪些待核实、还缺什么资料。每个字段都可逐条核对与纠错。</p>
         </div>
       </div>
 
-      <div className="intel-list">
-        {cur ? (
-          <IntelProfile
-            key={cur.id}
-            c={cur}
-            state={state!}
-            onCorrect={(field) => {
-              setFcField(field);
-              setFcOpen(true);
-            }}
-          />
-        ) : null}
-      </div>
+      {projectId ? <IntelInbox projectId={projectId} /> : (
+        <EmptyState title="请先选择项目" sub="右上角选择项目后，这里会显示该项目竞争品牌的变化收件箱。" />
+      )}
+
+      {/* 品牌逐字段档案（保留区）：六维画像与逐字段纠错 */}
+      {cs.length ? (
+        <>
+          <div className="page-head">
+            <div className="actions">
+              <div className="filters" style={{ marginBottom: 0 }}>
+                {cs.map((c) => (
+                  <button
+                    key={c.id}
+                    className={'chip' + (c.id === active ? ' on' : '')}
+                    type="button"
+                    onClick={() => setCurId(c.id)}
+                  >
+                    {c.name as string}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="intel-list">
+            {cur ? (
+              <IntelProfile
+                key={cur.id}
+                c={cur}
+                state={state!}
+                onCorrect={(field) => {
+                  setFcField(field);
+                  setFcOpen(true);
+                }}
+              />
+            ) : null}
+          </div>
+        </>
+      ) : null}
 
       {fcOpen && active ? (
         <FieldCorrectModal
