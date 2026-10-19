@@ -96,7 +96,9 @@ async function smokeTikTok() {
     try { const j = JSON.parse(tok.buffer.toString('utf8')); token = j.access_token || (j.data && j.data.access_token) || null; } catch (e) { /* parse */ }
     if (!token) { record('tiktok', 'AUTH_REJECTED', 'oauth 响应无 access_token（权限未开通）'); return; }
     // P0-2 整改 r3：官方 Query Ads 契约（Authorization: Bearer + 官方 body/fields）
-    const TT_FIELDS = 'ad.id,ad.first_shown_date,ad.last_shown_date,ad.status,advertiser.business_name';
+    // R4.14：字段清单与产品请求同源（lib/tiktok-adlib.js），不在此另写子集
+    const TikTokAdLib = require('../lib/tiktok-adlib.js');
+    const TT_FIELDS = TikTokAdLib.AD_FIELDS_CSV;
     const url = 'https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=' + encodeURIComponent(TT_FIELDS);
     const ymd = (d) => '' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0');
     const body = JSON.stringify({ filters: { ad_published_date_range: { min: ymd(new Date(Date.now() - 30 * 86400000)), max: ymd(new Date(Date.now() - 86400000)) } }, search_term: 'coffee', max_count: 1 });

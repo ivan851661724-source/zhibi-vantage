@@ -19,6 +19,10 @@
 
 const REGISTRY_VERSION = 'capreg-1';
 
+// R4.14：TikTok 覆盖国家/字段的事实唯一源（纯数据零依赖模块）。
+// 文案中的「共 N 国」必须由它派生——r3 曾在文案里手写 30，而列表实为 32。
+const TikTokAdLib = require('../lib/tiktok-adlib.js');
+
 // SC-02 §2：维度 = 产品层分组（冻结五值；映射 05 §1 Capability Map）
 const DIMENSIONS = Object.freeze([
   { code: 'website_products', displayName: '官网与商品' },
@@ -125,7 +129,7 @@ const CAPABILITIES = Object.freeze([
     autoInspect: false,
     freshnessSlaHours: 72,
     maturity: 'pending_config',
-    limitations: '仅展示 Commercial Content API 实际返回的公开广告字段（素材 URL/广告主/投放日期/状态/reach 区间标签）；覆盖范围受官方支持国家限制（EU 27 + NO/IS/LI + GB/CH，共 30 国，不含美国），未覆盖国家不代表没有广告、不得显示为「未观察到广告」；广告花费、获客成本、ROI、转化率、GMV 不可观测，不推算（00 §17 冻结）',
+    limitations: '仅展示 Commercial Content API 实际返回的公开广告字段（素材 URL/广告主/投放日期/状态/状态说明/reach 区间标签）；覆盖范围受官方支持国家限制（' + TikTokAdLib.COVERAGE_SCOPE_TEXT + '），未覆盖国家不代表没有广告、不得显示为「未观察到广告」；广告花费、获客成本、ROI、转化率、GMV 不可观测，不推算（00 §17 冻结）',
     costAttributionKey: 'infra.tiktok_commercial_content',
     collectorVersion: 'net-1',
     parserVersion: 'tiktok-adapter-1',

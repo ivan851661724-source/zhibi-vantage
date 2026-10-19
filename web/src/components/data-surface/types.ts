@@ -65,6 +65,13 @@ export interface AdCreativesSummary {
   periodStart: string | null;
   periodEnd: string | null;
   countryScope?: string | null;
+  /** 官方支持国家数量：由后端唯一事实源派生（不得在前端写死） */
+  coverageCountryCount?: number | null;
+  coverageScope?: string | null;
+  /** covered=品牌市场在官方覆盖内；out_of_coverage=官方无覆盖；unknown=市场未知 */
+  coverageState?: 'covered' | 'out_of_coverage' | 'unknown' | null;
+  brandMarket?: string | null;
+  brandMarketCovered?: boolean | null;
   coverageNote?: string | null;
   providerRecordId: string | null;
   methodologyVersion: string | null;
@@ -175,6 +182,10 @@ export interface SurfaceObservation {
   advertiser?: string | null;
   creativeUrl?: string | null;
   reach?: number | null;
+  status?: string | null;
+  /** 官方 status_statement：仅在平台实际返回时存在（缺失即 null，不用占位文案） */
+  statusStatement?: string | null;
+  lastShownDate?: string | null;
   // reviews_digest
   rating?: number | null;
   reviewCount?: number | null;

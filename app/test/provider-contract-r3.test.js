@@ -34,6 +34,7 @@ const Net = require('../research/net.js');
 const Readiness = require('../services/source-readiness.js');
 const ProviderResponse = require('../lib/provider-response.js');
 const UrlRedact = require('../lib/url-redact.js');
+const TikTokAdLib = require('../lib/tiktok-adlib.js');
 const { saveState, projFile } = require('../core/state-store.js');
 
 const TID = 'tenant:r3a', PID = 'projR3';
@@ -117,6 +118,10 @@ const mkCtx = (tag) => ({
       const fields = new URL(ad.url).searchParams.get('fields').split(',');
       const ALLOWED = ['ad.id', 'ad.first_shown_date', 'ad.last_shown_date', 'ad.status', 'ad.status_statement', 'ad.videos', 'ad.image_urls', 'ad.reach', 'advertiser.business_id', 'advertiser.business_name', 'advertiser.paid_for_by'];
       for (const fl of fields) assert.ok(ALLOWED.includes(fl), 'fields 白名单内: ' + fl);
+      // R4.14：实际请求 = 官方白名单全量（11 项），不再是「白名单 11 而请求 10」
+      assert.strictEqual(fields.length, TikTokAdLib.AD_FIELD_COUNT, 'URL fields 数 = 唯一事实源字段数');
+      assert.strictEqual(fields.length, ALLOWED.length, 'URL fields 数 = 官方文档白名单数');
+      assert.deepStrictEqual(fields, TikTokAdLib.AD_FIELDS.slice(), '请求字段顺序与事实源一致');
       const body = JSON.parse(ad.opt.body);
       assert.deepStrictEqual(Object.keys(body).sort(), ['filters', 'max_count', 'search_term'], 'body 只含官方字段');
       assert.ok(!('keyword' in body) && !('page' in body) && !('limit' in body), '旧 body 形状零残留');
@@ -134,7 +139,8 @@ const mkCtx = (tag) => ({
       assert.strictEqual(obs.reach, '11K', 'reach 用官方区间标签');
       assert.strictEqual(obs.price, null, '广告花费恒 null');
       assert.strictEqual(r.attempt.summary.measurementMethod, 'official_disclosure', '平台公开披露');
-      assert.ok(/30 国/.test(r.attempt.summary.coverageNote), '覆盖范围说明在摘要');
+      assert.ok(new RegExp(TikTokAdLib.COUNTRY_COUNT + ' 国').test(r.attempt.summary.coverageNote), '覆盖范围数量与官方列表一致');
+      assert.strictEqual(r.attempt.summary.coverageCountryCount, TikTokAdLib.COUNTRY_COUNT, '摘要投影国家数 = 唯一事实源');
     });
 
     await t('T2 零泄漏：client key / secret / token 不进 URL、Snapshot、Verification、attempt、日志', async () => {
@@ -184,7 +190,7 @@ const mkCtx = (tag) => ({
       assert.strictEqual(r.attempt.observationCount || (r.attempt.observations || []).length, 0, '零广告');
       assert.strictEqual(r.attempt.summary.creativeCount, 0);
       assert.strictEqual(r.attempt.summary.measurementMethod, 'official_disclosure');
-      assert.ok(/30 国/.test(r.attempt.summary.coverageNote || ''), '覆盖范围限制随零结果保留（不写「未观察到广告」）');
+      assert.ok(new RegExp(TikTokAdLib.COUNTRY_COUNT + ' 国').test(r.attempt.summary.coverageNote || ''), '覆盖范围限制随零结果保留（不写「未观察到广告」）');
       adScenario = 'success';
     });
 

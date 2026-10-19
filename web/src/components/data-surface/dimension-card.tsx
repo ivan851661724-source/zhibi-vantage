@@ -80,12 +80,29 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
   }
   if (summary.kind === 'ad_creatives') {
     const s = summary as Extract<SurfaceSummary, { kind: 'ad_creatives' }>;
+    // 覆盖国家数只能来自后端唯一事实源（summary.coverageCountryCount），前端不写死数字
+    const cc = s.coverageCountryCount;
+    const scopeText = cc != null
+      ? `覆盖范围受 TikTok 官方支持国家限制（当前 ${cc} 国，不含美国）`
+      : '覆盖范围受 TikTok 官方支持国家限制（不含美国）';
+    const ooc = s.coverageState === 'out_of_coverage';
     return (
       <div className="ds-card-sum">
-        公开广告素材 <b className="num">{s.creativeCount}</b> 条
+        {ooc ? (
+          <>该维度在品牌主要市场（{s.brandMarket || '未知'}）无公开来源覆盖</>
+        ) : s.creativeCount > 0 ? (
+          <>公开广告素材 <b className="num">{s.creativeCount}</b> 条</>
+        ) : (
+          <>官方覆盖范围内本轮未观察到结果</>
+        )}
         <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
+        {ooc ? (
+          <span className="ds-mm-note ds-mm-warn">
+            该公开来源当前无覆盖：TikTok 官方支持国家不含 {s.brandMarket || '该市场'}；零结果不代表该市场没有广告
+          </span>
+        ) : null}
         {s.periodStart && s.periodEnd ? <> · 投放窗口 {s.periodStart} ~ {s.periodEnd}</> : null}
-        <span className="ds-mm-note">覆盖范围受 TikTok 官方支持国家限制（30 国，不含美国）；未覆盖国家不代表没有广告</span>
+        <span className="ds-mm-note">{scopeText}；未覆盖国家不代表没有广告</span>
         <span className="ds-mm-note">广告花费 / 获客成本 / ROI / 转化率 / GMV 当前公开来源无法直接观测</span>
       </div>
     );

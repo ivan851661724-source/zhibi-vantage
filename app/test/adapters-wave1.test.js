@@ -120,7 +120,10 @@ const NORM_CTX = { competitor: BRAND };
     assert.strictEqual(out.summary.kind, 'ad_creatives');
     // P0-3 整改 r3：平台公开披露，非数据服务估算
     assert.strictEqual(out.summary.measurementMethod, 'official_disclosure');
-    assert.ok(/30 国/.test(out.summary.coverageNote || ''), '覆盖范围说明（不写未观察到广告）');
+    // R4.14：覆盖数量由唯一事实源派生（当前 32 国），文案与列表必须一致
+    const TikTokAdLib = require('../lib/tiktok-adlib.js');
+    assert.ok(new RegExp(TikTokAdLib.COUNTRY_COUNT + ' 国').test(out.summary.coverageNote || ''), '覆盖范围数量与列表长度一致');
+    assert.strictEqual(out.summary.coverageCountryCount, TikTokAdLib.COUNTRY_COUNT, '摘要投影国家数 = 唯一事实源');
     const all = JSON.stringify(out);
     for (const banned of ['spend', 'cost', 'roi', 'conversion', 'cpc', 'cpm']) {
       assert.ok(!all.toLowerCase().includes(banned), '不得出现花费/转化字段：' + banned);

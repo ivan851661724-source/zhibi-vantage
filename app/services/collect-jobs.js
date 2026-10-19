@@ -177,6 +177,8 @@ let executor = null; // (job) => Promise<outcome>，测试专用
 function setExecutorForTest(fn) { executor = fn; }
 
 // 从项目档案解析竞品（worker 脱离请求上下文，走持久档案）
+// market 回退顺序与品牌读模型一致（brand-service 同步口径）：competitor.market → intent.regions[0]
+// ——覆盖判定需要品牌主要市场；缺失时保持 null（adapter 侧记为 unknown，不替平台下结论）。
 function loadCompetitor(job) {
   try {
     const { projFile } = require('../core/state-store.js');
@@ -184,7 +186,13 @@ function loadCompetitor(job) {
     if (!f || !fs.existsSync(f)) return null;
     const st = JSON.parse(fs.readFileSync(f, 'utf8'));
     if (!st || !Array.isArray(st.competitors)) return null;
-    return st.competitors.find(c => c && c.id === job.competitorId) || null;
+    const c = st.competitors.find(x => x && x.id === job.competitorId) || null;
+    if (!c) return null;
+    if (c.market == null) {
+      const region = st.intent && Array.isArray(st.intent.regions) ? st.intent.regions[0] : null;
+      if (region) return Object.assign({}, c, { market: region });
+    }
+    return c;
   } catch (e) { return null; }
 }
 
@@ -393,4 +401,5 @@ module.exports = {
   CLAIM_TTL_MS, HEARTBEAT_INTERVAL_MS, MAX_RETRY, RUNNING_LEASE_MS,
   getDb, enqueue, claim, heartbeat, finish, reclaimExpired, reconcileAbandoned,
   executeJob, tick, startWorker, stopWorker, setExecutorForTest, list, getJob,
+  loadCompetitor, // R4.14：暴露给回归测试（市场回退口径），不对外暴露 HTTP 面
 };

@@ -60,6 +60,7 @@ function ObsRow({ o, dimension }: { o: SurfaceObservation; dimension: string }) 
           {lastShown ? <span className="ds-obs-pub"> · 至 {lastShown}</span> : null}
           {o.advertiser ? <> · {o.advertiser}</> : null}
           {reachLabel ? <> · 公开触达 {reachLabel}</> : null}
+          {o.statusStatement ? <span className="ds-obs-snippet">{o.statusStatement}</span> : null}
           {o.creativeUrl ? <a className="ds-obs-link" href={o.creativeUrl} target="_blank" rel="noreferrer noopener">素材 ↗</a> : null}
           <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
         </span>

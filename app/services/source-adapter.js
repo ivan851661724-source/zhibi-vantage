@@ -33,6 +33,7 @@ const EvidenceStore = require('../research/evidence-store.js');
 const Snapshot = require('../research/source-snapshot.js');
 const UrlRedact = require('../lib/url-redact.js');
 const ProviderResponse = require('../lib/provider-response.js');
+const TikTokAdLib = require('../lib/tiktok-adlib.js');
 const Registry = require('./capability-registry.js');
 const SurfaceStore = require('./surface-store.js');
 const fs = require('fs');
@@ -810,11 +811,17 @@ const TT_ADAPTER_VERSION = 'tiktok-adapter-1';
 // Query Ads: POST https://open.tiktokapis.com/v2/research/adlib/ad/query/?fields=<白名单>
 // Authorization: Bearer <client access token>（client key/secret 只用于 /v2/oauth/token/）
 const TT_AD_ENDPOINT = 'https://open.tiktokapis.com/v2/research/adlib/ad/query/';
-// 官方 fields 白名单（Query Ads 文档逐字）：ad.id/ad.first_shown_date/ad.last_shown_date/ad.status/
-// ad.status_statement/ad.videos/ad.image_urls/ad.reach/advertiser.business_id/advertiser.business_name/advertiser.paid_for_by
-const TT_AD_FIELDS = 'ad.id,ad.first_shown_date,ad.last_shown_date,ad.status,ad.videos,ad.image_urls,ad.reach,advertiser.business_id,advertiser.business_name,advertiser.paid_for_by';
-// 官方 Supported Countries（文档页核实）：EU 27 + EEA 补充 3 + GB/CH，共 30 国——不含美国
-const TT_SUPPORTED_COUNTRIES = Object.freeze(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','NO','IS','LI','GB','CH']);
+// 官方 fields 白名单（Query Ads 文档逐字，11 项）与「本产品实际请求字段」统一由
+// lib/tiktok-adlib.js 持有——此处只做引用，禁止在本文件再写一份字段清单/数量。
+//   白名单：ad.id / ad.first_shown_date / ad.last_shown_date / ad.status / ad.status_statement
+//           / ad.videos / ad.image_urls / ad.reach
+//           / advertiser.business_id / advertiser.business_name / advertiser.paid_for_by
+const TT_AD_FIELDS = TikTokAdLib.AD_FIELDS_CSV;
+const TT_AD_FIELD_COUNT = TikTokAdLib.AD_FIELD_COUNT;
+// 官方 Supported Countries（文档页核实）：EU 27 + EEA 3 + GB/CH = 32 国——不含美国。
+// 🔴 数量一律从 SUPPORTED_COUNTRIES.length 派生（r3 曾列表 32 项而文案写成 30）。
+const TT_SUPPORTED_COUNTRIES = TikTokAdLib.SUPPORTED_COUNTRIES;
+const TT_COUNTRY_COUNT = TikTokAdLib.COUNTRY_COUNT;
 
 const REV_ADAPTER_VERSION = 'reviews-adapter-1';
 
@@ -1343,9 +1350,11 @@ const tiktokAdapter = {
     };
   },
 
-  // 广告素材观察（P0-3 整改 r3：平台公开披露 official_disclosure）。
-  // 只映射官方响应真实字段：ad.{id,first_shown_date,last_shown_date,status,videos,image_urls,reach}、
-  // advertiser.{business_id,business_name,paid_for_by}；ad_name/reach 数字/download_url 等不存在字段一律不预设。
+  // 广告素材观察（P0-3 整改 r3：平台公开披露 official_disclosure；R4.14：字段与覆盖事实对齐）。
+  // 只映射官方响应真实字段（11 项白名单，见 lib/tiktok-adlib.js）：
+  // ad.{id,first_shown_date,last_shown_date,status,status_statement,videos,image_urls,reach}、
+  // advertiser.{business_id,business_name,paid_for_by}；ad_name/download_url/数值 reach 等一律不预设。
+  // status_statement 仅在官方实际返回非空字符串时映射，缺失即 null（不补猜、不占位）。
   normalize(raw, ctx) {
     const res = raw || {};
     const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
@@ -1361,9 +1370,13 @@ const tiktokAdapter = {
       reach: c.reachLabel || null, // 官方 reach.unique_user_seen 区间标签（"11K"），非数值推算
       lastShownDate: c.lastShownDate || null,
       status: c.status || null,
+      statusStatement: c.statusStatement || null,
     }));
     const partial = !!res.partialScan;
     const countryScope = res.countryScope || 'ALL';
+    const coverage = TikTokAdLib.marketCoverage(res.brandMarket);
+    const coverageState = res.coverageState || coverage.coverageState;
+    const brandMarket = res.brandMarket || coverage.brandMarket;
     return {
       capability: 'tiktok_commercial_content', dimension: 'ad_campaigns',
       outcome: partial ? 'partial' : 'success',
@@ -1374,7 +1387,13 @@ const tiktokAdapter = {
         measurementMethod: 'official_disclosure', // 平台公开披露，非数据服务估算
         periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
         countryScope,
-        coverageNote: 'TikTok Commercial Content API 仅覆盖官方支持国家（EU 27 + NO/IS/LI + GB/CH，共 30 国）；未覆盖国家不代表没有广告。',
+        // 覆盖事实（用户投影）：数量从唯一事实源派生，禁止在此写死数字
+        coverageCountryCount: TT_COUNTRY_COUNT,
+        coverageScope: TikTokAdLib.COVERAGE_SCOPE_TEXT,
+        coverageState, // covered | out_of_coverage | unknown
+        brandMarket,
+        brandMarketCovered: coverage.brandMarketCovered,
+        coverageNote: TikTokAdLib.coverageNoteFor(coverageState, brandMarket),
         providerRecordId: res.providerRecordId || null,
         methodologyVersion: TT_ADAPTER_VERSION,
         partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
@@ -1389,9 +1408,10 @@ const tiktokAdapter = {
       extractedValue: {
         summaryKind: 'ad_creatives', creativeCount: creatives.length,
         measurementMethod: 'official_disclosure', partialScan: partial, countryScope,
+        coverageCountryCount: TT_COUNTRY_COUNT, coverageState, brandMarket,
       },
       parserVersion: TT_ADAPTER_VERSION,
-      note: 'TikTok Commercial Content API（平台公开披露）｜覆盖范围受官方支持国家限制：' + TT_SUPPORTED_COUNTRIES.join('/') + '；client key/secret/access token 均不落快照',
+      note: 'TikTok Commercial Content API（平台公开披露）｜覆盖范围受官方支持国家限制：' + TT_SUPPORTED_COUNTRIES.join('/') + '（共 ' + TT_COUNTRY_COUNT + ' 国，不含美国）；client key/secret/access token 均不落快照',
       sourceUrl: res.sourceUrl || null,
     };
   },
@@ -1480,6 +1500,9 @@ const tiktokAdapter = {
         firstShownDate: ad.first_shown_date != null ? String(ad.first_shown_date) : null,
         lastShownDate: ad.last_shown_date != null ? String(ad.last_shown_date) : null,
         status: ad.status != null ? String(ad.status) : null,
+        // 官方白名单第 5 项：状态说明（审核/下线原因）。仅当实际返回非空字符串时映射。
+        statusStatement: (typeof ad.status_statement === 'string' && ad.status_statement.trim())
+          ? ad.status_statement.trim().slice(0, 200) : null,
         advertiser: adv.business_name != null ? String(adv.business_name) : null,
         businessId: adv.business_id != null ? String(adv.business_id) : null,
         paidForBy: adv.paid_for_by != null ? String(adv.paid_for_by) : null,
@@ -1489,10 +1512,16 @@ const tiktokAdapter = {
         region: null, // 单次查询未按国家拆分；countryScope 记录在摘要
       };
     });
+    // R4.14 覆盖范围事实：品牌主要市场是否落在官方支持国家内。
+    // 不在覆盖内时 summary.coverageState=out_of_coverage，用户侧显示「该公开来源当前无覆盖」，
+    // 绝不把官方覆盖缺失显示成「没有广告」。
+    const coverage = TikTokAdLib.marketCoverage(comp.market);
     const res = {
       ok: true, creatives, snapshotIds,
       periodStart, periodEnd,
       countryScope: 'ALL（官方支持国家范围）',
+      brandMarket: coverage.brandMarket,
+      coverageState: coverage.coverageState,
       providerRecordId: searchId ? String(searchId) : null,
       partialScan: pagingPartial, partialScanReason: pagingPartial ? '后续分页请求失败，仅保留首页结果' : null,
       sourceUrl: TT_AD_ENDPOINT,
