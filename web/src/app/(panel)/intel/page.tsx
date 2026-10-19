@@ -3,7 +3,7 @@
 // 收件箱：顶部摘要（可核实/待核实/资料缺口）+ 品牌/类型/时间/状态筛选 +
 // 情报卡（证据入口/纠错入口）；无证据的条目永不使用「已核实」样式。
 // 空状态三分：尚无采集结果 / 当前筛选无结果 / 资料不足。
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { FieldCorrectModal } from '@/components/field-correct';
@@ -42,6 +42,21 @@ function IntelInbox({ projectId }: { projectId: string }) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [fcItem, setFcItem] = useState<IntelItem | null>(null);
+
+  // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
+  // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
+  // brandId（URL 已被导航函数清除，但 state 仍在）造成「假空结果」。
+  // brandId 取切换后 URL 的现值（导航函数已清除资源参数，通常为空）。
+  const prevPidRef = useRef(projectId);
+  useEffect(() => {
+    if (prevPidRef.current === projectId) return;
+    prevPidRef.current = projectId;
+    setBrandId(sp.get('brandId') || '');
+    setType('');
+    setStatus('');
+    setFrom('');
+    setTo('');
+  }, [projectId, sp]);
 
   // API 不支持 status 参数：状态筛选在前端做（展示层行为，不改后端契约）
   useEffect(() => {

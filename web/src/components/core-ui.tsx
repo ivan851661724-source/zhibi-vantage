@@ -7,10 +7,37 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchProjects, type CoverageDimension, type ProjectInfo } from '@/lib/core-api';
 
+// ---------- 项目切换导航规则（r3：集中在一个函数，禁止散落字符串拼接） ----------
+// 跨项目切换时，项目内资源上下文不得跟着走：
+// - 资源详情页（/brands/:brandId、/report/:reportId）：brandId/reportId 属于原项目，
+//   带到新项目只会得到「顶部显示 B、内容还是 A」或 404 → 一律跳回对应列表页，只带 projectId。
+// - 列表页（/brands /intel /opportunity /report）：保留与项目无关的参数
+//   （时间范围 from/to、类型 type、状态 status 等），清除项目内资源参数
+//   （brandId、reportId、品牌详情 tab），否则会留下指向原项目的筛选造成假空结果。
+// - 非核心页面（如 /radar）：维持原行为，仅替换 projectId。
+export function projectSwitchUrl(pathname: string, searchParams: URLSearchParams, nextProjectId: string): string {
+  const seg = pathname.split('/').filter(Boolean);
+  const root = '/' + (seg[0] || '');
+  const CORE_ROOTS = ['/brands', '/intel', '/opportunity', '/report'];
+  const pid = encodeURIComponent(nextProjectId);
+  // 详情页（二级路径）→ 跳回该模块列表页，不带任何原项目资源
+  if (seg.length > 1 && CORE_ROOTS.includes(root)) {
+    return `${root}?projectId=${pid}`;
+  }
+  const sp = new URLSearchParams(searchParams.toString());
+  // 项目内资源参数不跨项目保留
+  sp.delete('brandId');
+  sp.delete('reportId');
+  sp.delete('tab');
+  sp.set('projectId', nextProjectId);
+  return root + '?' + sp.toString();
+}
+
 // ---------- 项目选择器（TopBar）：projectId 随页面跳转持续传递 ----------
 // r2 修复：projectId 以 URL 参数为第一来源（深链接打开项目 B 时，顶部显示、
-// 选中状态、页面数据必须同指项目 B）；切换项目只替换 projectId，
-// 保留当前页面全部非项目参数（tab / brandId / type / status / from / to / c 等）。
+// 选中状态、页面数据必须同指项目 B）。
+// r3 修复：切换项目按页面类型导航（见 projectSwitchUrl）——资源详情页跳回列表页，
+// 列表页清除项目内资源参数；不再「保留全部参数」造成跨项目错误上下文。
 export function ProjectPicker() {
   const router = useRouter();
   const pathname = usePathname();
@@ -36,10 +63,7 @@ export function ProjectPicker() {
 
   function pick(id: string) {
     if (id === urlPid) return; // 已是该项目，避免重复导航
-    // 只替换 projectId，其余参数（tab/brandId/type/status/from/to/c/…）原样保留
-    const sp = new URLSearchParams(searchParams.toString());
-    sp.set('projectId', id);
-    router.push(`${pathname}?${sp.toString()}`);
+    router.push(projectSwitchUrl(pathname, searchParams, id));
   }
 
   return (

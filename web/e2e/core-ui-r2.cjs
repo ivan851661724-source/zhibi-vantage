@@ -1,11 +1,16 @@
 'use strict';
-// SC-04 UI 框架轮 r2 · Playwright 验收用例（真实租户 API 链路，零 mock）
-// 覆盖（任务书 §Playwright 验收资产）：
+// SC-04 UI 框架轮 · Playwright 验收用例（真实租户 API 链路，零 mock）
+// r3 起本文件覆盖 UI 框架轮全部浏览器回归（r2 场景保留/按新规则改写）：
 //   S1 深链接打开项目 B：顶部显示项目 B，页面 API 请求也使用项目 B
-//   S2 品牌详情 ?projectId=A&tab=timeline 顶部切换项目 → 保留 tab=timeline 且 projectId 更新
+//   S2 品牌详情 ?projectId=A&tab=timeline 切换项目 → 跳 /brands?projectId=B
+//      （r3 规则 2：brandId/tab 属于原项目，不跨项目保留；改写 r2 的「保留 tab」语义）
 //   S3 带 projectId 的品牌详情点侧栏四个核心入口 → projectId 不丢失
 //   S4 失败报告点「重新生成」→ URL 切换为新报告任务（新 reportId + 同 projectId），新任务有状态
 //   S5 四项未接入维度：无 0 值、无模拟图表、无虚构来源，刷新位标注不可用
+//   S6 报告详情 ?projectId=A 切换项目 → 跳 /report?projectId=B（不保留 reportId，
+//      页面不再展示 A 的报告正文/引用/失败态，展示 B 的列表或空状态）（r3 规则 3）
+//   S7 情报库 ?projectId=A&brandId=<A品牌> 切换项目 → URL 清除 brandId，
+//      展示 B 的真实数据或真实空状态，无筛选残留造成的假空结果（r3 规则 1）
 // 用法：node core-ui-r2.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json [--shots dir]
 // 前提：见同目录 README.md（后端 + 前端已启动；seed.cjs 已跑完）。
 const fs = require('fs');
@@ -64,8 +69,8 @@ function check(name, cond, extra) {
   check('页面 API 请求使用项目 B（B=' + apiForB + ' 次，A=' + apiForA + ' 次）', apiForB > 0 && apiForA === 0, 'pids=' + JSON.stringify(apiPids));
   await page.screenshot({ path: path.join(SHOTS, 's1-deeplink-b.png'), fullPage: true });
 
-  // ---------- S2 品牌详情 ?projectId=A&tab=timeline → 切换项目保留 tab ----------
-  console.log('S2 切换项目保留非项目参数');
+  // ---------- S2 品牌详情切项目 → 跳竞品库列表页（r3 规则 2） ----------
+  console.log('S2 品牌详情切换项目 → 跳列表页（资源上下文不跨项目）');
   await page.goto(FRONT + '/brands/' + encodeURIComponent(SEED.brandA) + '?projectId=' + encodeURIComponent(SEED.projectA) + '&tab=timeline', { waitUntil: 'networkidle', timeout: 30000 });
   await page.waitForSelector('.core-tabs', { timeout: 15000 });
   await page.waitForTimeout(500);
@@ -73,11 +78,15 @@ function check(name, cond, extra) {
   // 顶部选择器切到项目 B
   await page.click('.proj-picker summary');
   await page.click('.proj-picker-menu button:has-text("' + SEED.trackB + '")');
-  await page.waitForURL(u => String(u).includes('projectId=' + SEED.projectB), { timeout: 15000 });
+  await page.waitForURL(u => { const s = String(u); return new URL(s).pathname === '/brands' && s.includes('projectId=' + SEED.projectB); }, { timeout: 15000 });
+  await page.waitForSelector('.core-brand-list .core-brand-card', { timeout: 15000 });
   const url2 = page.url();
-  check('切换后 projectId 更新为 B', url2.includes('projectId=' + SEED.projectB), url2);
-  check('切换后保留 tab=timeline（非项目参数不丢）', url2.includes('tab=timeline'), url2);
-  await page.screenshot({ path: path.join(SHOTS, 's2-switch-keep-tab.png'), fullPage: true });
+  check('URL 为 /brands?projectId=B（详情页不保留原品牌）', new URL(url2).pathname === '/brands' && url2.includes('projectId=' + SEED.projectB), url2);
+  check('不保留 tab=timeline（品牌详情上下文不跨项目）', !url2.includes('tab='), url2);
+  const body2 = await page.textContent('body');
+  check('页面展示 B 的竞品列表（AromaHouse）', body2.includes('AromaHouse'));
+  check('无错误现场（BRAND_NOT_IN_PROJECT / 无法找到）且无 A 的品牌（DollForge）', !body2.includes('BRAND_NOT_IN_PROJECT') && !body2.includes('无法找到') && !body2.includes('DollForge'));
+  await page.screenshot({ path: path.join(SHOTS, 's2-brand-switch-to-list.png'), fullPage: true });
 
   // ---------- S3 品牌详情 → 侧栏四个核心入口 projectId 不丢 ----------
   console.log('S3 侧栏四核心入口');
@@ -137,7 +146,56 @@ function check(name, cond, extra) {
   check('无伪数据词汇（不含「模拟数据」「示例数据」）', !bText.includes('模拟数据') && !bText.includes('示例数据'));
   await page.screenshot({ path: path.join(SHOTS, 's5-building-dims.png'), fullPage: true });
 
+  // ---------- S6 报告详情切项目 → 跳报告列表页（r3 规则 3） ----------
+  console.log('S6 报告详情切换项目 → 跳列表页（reportId 不跨项目）');
+  await page.goto(FRONT + '/report/' + encodeURIComponent(SEED.failedReportId) + '?projectId=' + encodeURIComponent(SEED.projectA), { waitUntil: 'networkidle', timeout: 30000 });
+  await page.waitForSelector('.core-report-detail', { timeout: 15000 });
+  await page.waitForTimeout(500);
+  const detA = await page.textContent('body');
+  check('A 报告详情可见（失败态或详情内容）', detA.includes('生成失败') || detA.includes('重新生成'), detA.slice(0, 80));
+  await page.click('.proj-picker summary');
+  await page.click('.proj-picker-menu button:has-text("' + SEED.trackB + '")');
+  await page.waitForURL(u => { const s = String(u); return new URL(s).pathname === '/report' && s.includes('projectId=' + SEED.projectB); }, { timeout: 15000 });
+  await page.waitForSelector('.core-reports-section', { timeout: 15000 });
+  await page.waitForTimeout(800);
+  const url6 = page.url();
+  check('URL 为 /report?projectId=B（不保留原 reportId）', new URL(url6).pathname === '/report' && url6.includes('projectId=' + SEED.projectB) && !url6.includes(SEED.failedReportId), url6);
+  const body6 = await page.textContent('.core-reports-section');
+  check('不再展示 A 的报告内容（无「生成失败」/「结构化事实版本」）', !body6.includes('生成失败') && !body6.includes('结构化事实版本'));
+  check('展示 B 的报告列表空状态（暂无报告）', body6.includes('暂无报告'));
+  await page.screenshot({ path: path.join(SHOTS, 's6-report-switch-to-list.png'), fullPage: true });
+
+  // ---------- S7 情报库带 A 的 brandId 筛选切项目 → 清除 brandId（r3 规则 1） ----------
+  console.log('S7 情报库 brandId 筛选切换项目 → 清除资源筛选');
+  await page.goto(FRONT + '/intel?projectId=' + encodeURIComponent(SEED.projectA) + '&brandId=' + encodeURIComponent(SEED.brandA), { waitUntil: 'networkidle', timeout: 30000 });
+  await page.waitForSelector('.core-inbox', { timeout: 15000 });
+  await page.waitForSelector('.core-intel li', { timeout: 15000 });
+  const cntA = await page.locator('.core-intel li').count();
+  check('A 项目带 brandId 筛选展示该品牌情报（' + cntA + ' 条）', cntA > 0);
+  const selA = await page.locator('.core-inbox select').first().inputValue().catch(() => '');
+  check('品牌筛选下拉当前值为 A 的品牌', selA === SEED.brandA, selA);
+  await page.click('.proj-picker summary');
+  await page.click('.proj-picker-menu button:has-text("' + SEED.trackB + '")');
+  await page.waitForURL(u => { const s = String(u); return s.includes('projectId=' + SEED.projectB) && !s.includes('brandId='); }, { timeout: 15000 });
+  const url7 = page.url();
+  check('URL 已清除 brandId 且指向项目 B', !url7.includes('brandId=') && url7.includes('projectId=' + SEED.projectB), url7);
+  // 等待数据真正切换：A 的旧卡片被替换（不再出现 DollForge）且 B 数据/空态落定。
+  // 注意不能用「li>0」单条件——组件复用时 A 的旧列表会先满足它。
+  await page.waitForFunction(() => {
+    const box = document.querySelector('.core-inbox');
+    if (!box) return false;
+    const t = box.textContent || '';
+    if (t.includes('DollForge')) return false; // 仍是项目 A 的旧数据
+    return t.includes('尚无采集结果') || t.includes('当前筛选没有结果') || document.querySelectorAll('.core-intel li').length > 0;
+  }, undefined, { timeout: 15000 });
+  const body7 = await page.textContent('.core-inbox');
+  const cntB = await page.locator('.core-intel li').count();
+  check('展示 B 的真实数据或真实空状态（' + (cntB > 0 ? cntB + ' 条情报' : '空状态') + '）', cntB > 0 || body7.includes('尚无采集结果'));
+  check('无筛选残留假空标志「当前筛选没有结果」', !body7.includes('当前筛选没有结果'));
+  check('无 A 项目情报内容（DollForge）', !body7.includes('DollForge'));
+  await page.screenshot({ path: path.join(SHOTS, 's7-intel-clear-brandid.png'), fullPage: true });
+
   await browser.close();
-  console.log(failures === 0 ? '[e2e] ALL PASS（5 场景，截图目录 ' + SHOTS + '）' : '[e2e] ' + failures + ' FAIL');
+  console.log(failures === 0 ? '[e2e] ALL PASS（7 场景，截图目录 ' + SHOTS + '）' : '[e2e] ' + failures + ' FAIL');
   process.exit(failures === 0 ? 0 : 1);
 })().catch(e => { console.error('[e2e] FATAL', e && e.stack || e); process.exit(1); });

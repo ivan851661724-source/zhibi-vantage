@@ -3,7 +3,7 @@
 // 最近有证据动态 / 维度与缺口计数 / 搜索与筛选 / 三种空状态分别表达。
 // 术语纪律：「尚未采集」不写成「没有数据」；「未接入」不写成「未发现」。
 import Link from 'next/link';
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchBrands, type BrandListItem } from '@/lib/core-api';
@@ -38,6 +38,17 @@ function BrandsInner() {
   const [kw, setKw] = useState('');
   const [cover, setCover] = useState<'' | BrandCoverState>('');
   const [rel, setRel] = useState('');
+
+  // r3 修复：跨项目切换时重置搜索与筛选。搜索词/覆盖状态/竞争关系是原项目的
+  // 浏览上下文，残留到目标项目会造成「假空结果」。
+  const prevPidRef = useRef(projectId);
+  useEffect(() => {
+    if (prevPidRef.current === projectId) return;
+    prevPidRef.current = projectId;
+    setKw('');
+    setCover('');
+    setRel('');
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) { setLoading(false); return; }
