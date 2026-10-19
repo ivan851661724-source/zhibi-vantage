@@ -3,14 +3,18 @@
 // 纪律：不出现后端术语（adapter/attempt/payload 等）；
 // 未接入维度只显示「尚未接入」，不显示 0、空图、模拟图表或占位样本。
 import { useEffect, useState, type ReactNode } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchProjects, type CoverageDimension, type ProjectInfo } from '@/lib/core-api';
 
 // ---------- 项目选择器（TopBar）：projectId 随页面跳转持续传递 ----------
+// r2 修复：projectId 以 URL 参数为第一来源（深链接打开项目 B 时，顶部显示、
+// 选中状态、页面数据必须同指项目 B）；切换项目只替换 projectId，
+// 保留当前页面全部非项目参数（tab / brandId / type / status / from / to / c 等）。
 export function ProjectPicker() {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { state } = useZhibiState();
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -23,12 +27,19 @@ export function ProjectPicker() {
     return () => { alive = false; };
   }, []);
 
-  const curId = (state as { projectId?: string } | null)?.projectId || '';
+  const urlPid = searchParams.get('projectId') || '';
+  const statePid = (state as { projectId?: string } | null)?.projectId || '';
+  // URL 优先：深链接/跳转上下文指向的项目即当前项目；state 仅兜底
+  const curId = urlPid || statePid;
   const cur = (projects || []).find((p) => p.id === curId);
-  const curLabel = cur?.track || (state && typeof state.track === 'string' && state.track) || '选择项目';
+  const curLabel = cur?.track || (urlPid ? '当前项目' : (state && typeof state.track === 'string' && state.track) || '选择项目');
 
   function pick(id: string) {
-    router.push(`${pathname}?projectId=${encodeURIComponent(id)}`);
+    if (id === urlPid) return; // 已是该项目，避免重复导航
+    // 只替换 projectId，其余参数（tab/brandId/type/status/from/to/c/…）原样保留
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.set('projectId', id);
+    router.push(`${pathname}?${sp.toString()}`);
   }
 
   return (

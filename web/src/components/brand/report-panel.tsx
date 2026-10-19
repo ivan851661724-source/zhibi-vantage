@@ -2,7 +2,10 @@
 // 调研报告：列表 + 显式触发生成（可选品牌/时间范围/章节）+ 状态轮询 + 详情与下载（SC-04 UI 框架轮）。
 // 纪律：生成只由用户点击触发（页面加载绝不调用生成接口）；
 // 报告使用生成时刻冻结的事实包；LLM 不可用的结构化回退必须如实标记，不伪装成完整 AI 分析。
+// r2 修复：重新生成 = 创建新报告后立即跳转新任务页（不再重读旧失败报告停留原页）；
+// 提交期间按钮禁用，防连续点击重复创建。
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { renderMarkdown } from '@/lib/md';
 import {
   createReport, fetchBrands, fetchReport, fetchReports,
@@ -11,6 +14,17 @@ import {
 import {
   REPORT_DEFAULT_SECTIONS, REPORT_SECTIONS, REPORT_STATUS_TEXT, reportUiStatus,
 } from '@/lib/core-logic';
+
+// 重生成提交后跳转新报告任务页；保留当前 URL 全部非项目参数，仅同步 projectId
+function useRegenerateNav() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  return useCallback((newReportId: string, projectId: string) => {
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.set('projectId', projectId);
+    router.push(`/report/${encodeURIComponent(newReportId)}?${sp.toString()}`);
+  }, [router, searchParams]);
+}
 
 function formSectionsLabel(codes?: string[] | null): string {
   if (!codes || !codes.length) return REPORT_DEFAULT_SECTIONS.map(c => REPORT_SECTIONS.find(s => s.code === c)?.label || c).join('、');
@@ -23,6 +37,7 @@ export function ReportPanel({ projectId, brandIds, onOpen }: {
   brandIds?: string[];
   onOpen?: (id: string) => void;
 }) {
+  const navigateToNew = useRegenerateNav();
   const [reports, setReports] = useState<ReportListItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -86,14 +101,15 @@ export function ReportPanel({ projectId, brandIds, onOpen }: {
   async function regenerate(r: ReportListItem) {
     setBusy(true); setErr(null);
     try {
-      await createReport({
+      const res = await createReport({
         projectId,
         brandIds: brandIds || r.scope.brandIds || [],
         from: r.scope.from || null,
         to: r.scope.to || null,
         sections: r.scope.sections && r.scope.sections.length ? r.scope.sections : undefined,
       });
-      await load();
+      // r2：立即跳转新报告任务页，让用户看到新任务的状态与轮询（不停留旧列表）
+      navigateToNew(res.reportId, projectId);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   }
@@ -193,21 +209,27 @@ export function ReportDetailView({ reportId }: { reportId: string }) {
   const [d, setD] = useState<ReportDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [brandNames, setBrandNames] = useState<Record<string, string>>({});
-  useEffect(() => {
-    let alive = true;
-    const ctrl = new AbortController();
-    const load = async () => {
-      try { const r = await fetchReport(reportId, ctrl.signal); if (alive) setD(r); }
-      catch (e) { if (alive) setErr(e instanceof Error ? e.message : String(e)); }
-    };
-    load();
-    // 轮询仅在任务未达终态时继续（成功/失败停止）
-    const t = setInterval(() => {
-      setD(cur => { if (cur && (cur.status === 'success' || cur.status === 'failed')) { clearInterval(t); } return cur; });
-      void load();
-    }, 3000);
-    return () => { alive = false; ctrl.abort(); clearInterval(t); };
+  const [busy, setBusy] = useState(false);
+  const navigateToNew = useRegenerateNav();
+
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try { const r = await fetchReport(reportId, signal); setD(r); setErr(null); }
+    catch (e) { if (!signal?.aborted) setErr(e instanceof Error ? e.message : String(e)); }
   }, [reportId]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void load(ctrl.signal);
+    return () => ctrl.abort();
+  }, [load]);
+
+  // 轮询仅在任务未达终态时继续（成功/失败停止；queued/running/retrying 均持续刷新）
+  useEffect(() => {
+    if (!d) return;
+    if (d.status === 'success' || d.status === 'failed') return;
+    const t = setInterval(() => { void load(); }, 3000);
+    return () => clearInterval(t);
+  }, [d, load]);
 
   // 品牌名解析（scope 展示用；失败不阻塞详情）
   const pid = d?.projectId || '';
@@ -244,18 +266,20 @@ export function ReportDetailView({ reportId }: { reportId: string }) {
   }
 
   async function regenerate() {
-    if (!d) return;
+    if (!d || busy) return;
+    setBusy(true); setErr(null);
     try {
-      await createReport({
+      const res = await createReport({
         projectId: d.projectId,
         brandIds: scope.brandIds || [],
         from: scope.from || null,
         to: scope.to || null,
         sections: scope.sections && scope.sections.length ? scope.sections : undefined,
       });
-      const r = await fetchReport(reportId);
-      setD(r);
+      // r2：不再重读旧报告停留原页——立即跳转新报告任务页（URL 同步 projectId、保留其它参数）
+      navigateToNew(res.reportId, d.projectId);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -278,7 +302,7 @@ export function ReportDetailView({ reportId }: { reportId: string }) {
       {d.status === 'failed' ? (
         <p className="core-err">
           {d.errorText || '生成失败。'}
-          <button type="button" className="btn-mini" onClick={regenerate}>重新生成</button>
+          <button type="button" className="btn-mini" disabled={busy} onClick={regenerate}>{busy ? '提交中…' : '重新生成'}</button>
         </p>
       ) : null}
       {d.status === 'queued' || d.status === 'running' ? (
