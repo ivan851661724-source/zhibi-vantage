@@ -3001,6 +3001,15 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .ds-mm-warn{color:#8a6d1a}
 .ds-note-config{color:#8a6d1a}
 .ds-badge.ds-pending-config{border-color:#b58b2a;color:#8a6d1a}
+/* SC-07：逐品牌真实采集状态徽章（排队/采集/有数据/空/失败/来源待配置） */
+.core-coll-badge{display:inline-block;padding:0 6px;border:1px solid var(--line2);border-radius:999px;font-size:11px;color:var(--ink2);white-space:nowrap}
+.core-coll-has_data{border-color:#1D9E75;color:#1D9E75}
+.core-coll-queued,.core-coll-collecting{border-color:#b58b2a;color:#8a6d1a}
+.core-coll-failed{border-color:#c0392b;color:#c0392b}
+.core-coll-source_pending,.core-coll-not_started{border-color:var(--line2);color:var(--ink3)}
+.core-coll-empty{border-color:var(--line2);color:var(--ink2)}
+/* SC-07：监控意向（正在建立来源）——中性色，绝不用「监控中」的绿色 */
+.watch-badge.is-pending{border-color:#b58b2a;color:#8a6d1a}
 /* SC-06 r2：待验证（能力就绪、尚无真实成功采集）——中性灰，不用「已采集」的绿色语义 */
 .ds-badge.ds-pending-verify{border-color:var(--line2);color:var(--ink3)}
 .ds-obs-link{margin-left:6px;font-size:11.5px}

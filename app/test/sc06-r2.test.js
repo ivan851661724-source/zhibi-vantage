@@ -279,11 +279,14 @@ test('G6 official_site_profile 随正常调研自动入队；public_site_product
   assert.strictEqual(n, 1, '不产生重复采集任务');
   assert.ok(again.enqueued === false || again.reason === 'in_progress_or_recent');
 
-  // public_site_products（未验证）绝不被自动大规模抓取
+  // SC-07 §1 规则变更：公开商品页从「按能力成熟度」改为「按运行态真实验证」——
+  // 只有 operational（发生过一次真实成功采集）才允许自动首采；pending_verification 一律 0。
+  const rdProd = Readiness.getReadiness('public_site_products');
   const nProducts = CollectJobs.getDb().prepare(
     "SELECT COUNT(*) AS n FROM collection_jobs WHERE tenant_id=? AND project_id=? AND capability='public_site_products'"
   ).get(TID, projectId).n;
-  assert.strictEqual(nProducts, 0, '未验证能力不得自动抓取');
+  assert.strictEqual(nProducts, rdProd.state === 'operational' ? 1 : 0,
+    '只有真实验证通过（operational）才自动首采；当前 readiness=' + rdProd.state + '，任务数=' + nProducts);
 
   // 没有官网地址 → 不入队（不猜）
   writeState(TID, 'projR2D', mkState('projR2D', [{ id: 'compAuto2', name: 'NoUrl', url: '', status: 'done' }]));

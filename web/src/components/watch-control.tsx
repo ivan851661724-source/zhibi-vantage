@@ -6,6 +6,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/lib/api';
 
+interface WatchIntent {
+  intentId: string;
+  competitorId: string;
+  state: 'establishing' | 'source_failed' | 'promoted' | 'cancelled';
+  stateText: string;
+  reasonText?: string | null;
+  monitoring: boolean;
+}
+
 interface WatchTarget {
   watchTargetId: string;
   competitorId: string;
@@ -21,13 +30,16 @@ const SIGNAL_ZH: Record<string, string> = { price: '价格', launch: '上新', s
 
 export function WatchControl({ competitorId }: { competitorId: string }) {
   const [target, setTarget] = useState<WatchTarget | null>(null);
+  const [intent, setIntent] = useState<WatchIntent | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const r = await apiGet<{ targets: WatchTarget[] }>('/api/watch-targets');
+      const r = await apiGet<{ targets: WatchTarget[]; intents?: WatchIntent[] }>('/api/watch-targets');
       setTarget((r.targets || []).find((t) => t.competitorId === competitorId) || null);
+      // SC-07 §2：监控意向与正式监控严格分开——意向不等于「监控中」
+      setIntent((r.intents || []).find((i) => i.competitorId === competitorId && i.state !== 'cancelled') || null);
     } catch {
       /* 未登录/网络异常：按钮退化为未监控态 */
     }
@@ -80,7 +92,45 @@ export function WatchControl({ competitorId }: { competitorId: string }) {
     }
   };
 
+  const cancelIntent = async () => {
+    if (!intent) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiDelete('/api/watch-intents/' + encodeURIComponent(intent.intentId));
+      setIntent(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '退出监控意向失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!target) {
+    // 已保存意向但尚无正式监控：如实显示「正在建立监控来源 / 来源建立失败」，绝不说「监控中」
+    if (intent) {
+      const failed = intent.state === 'source_failed';
+      return (
+        <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
+          <div className="watch-line">
+            <span className={'watch-badge ' + (failed ? 'is-paused' : 'is-pending')}>
+              {failed ? '来源建立失败' : '正在建立监控来源'}
+            </span>
+            <span className="watch-meta">
+              {failed
+                ? (intent.reasonText || '暂无可核验的商品来源，稍后会自动重试')
+                : '已记录你的监控意向：正在建立可重复抓取的公开商品来源；完成两次可比较采集后才会进入正式监控'}
+            </span>
+          </div>
+          <div className="watch-actions">
+            <button className="watch-btn watch-remove" type="button" disabled={busy} onClick={cancelIntent}>
+              退出监控意向
+            </button>
+            {err ? <span className="watch-err">{err}</span> : null}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="watch-ctl" onClick={(e) => e.stopPropagation()}>
         <button className="watch-btn watch-join" type="button" disabled={busy} onClick={join}>

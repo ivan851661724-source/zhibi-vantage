@@ -216,4 +216,32 @@ async function adminCapabilities(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { overview, dimension, refresh, refreshPolicy, adminCapabilities };
+// ---------- POST /api/data-surface/bootstrap（项目首轮采集补建） ----------
+// SC-07 §1：已有项目的一次性基线补建入口（有界、可重复执行）。
+// 不做「让用户点 N 次」：一次调用按品牌逐个入队，搜索型采集限量，
+// 幂等/冷却/额度由既有采集链路承担；重复调用不会重复产生任务。
+async function bootstrap(ctx, req, res, url, p) {
+  if (p !== '/api/data-surface/bootstrap' || req.method !== 'POST') return false;
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const ap = ctx.getAuthPayload(req);
+  if (!ap) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' }); return true; }
+  const tid = (ap.payload && ap.payload.tid) || null;
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '缺少租户上下文。' }); return true; }
+  const projectId = typeof body.projectId === 'string' && body.projectId.trim()
+    ? body.projectId.trim()
+    : (ctx.loadState() && ctx.loadState().projectId) || '';
+  if (!projectId) { ctx.sendJSON(res, 400, { error: 'PROJECT_REQUIRED', message: '缺少项目。' }); return true; }
+  const db = require('../../services/db.js');
+  if (!db.getProject(tid, projectId)) { ctx.sendJSON(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在或不属于当前租户。' }); return true; }
+  const Plan = require('../../services/collection-plan.js');
+  const out = Plan.bootstrapProject({
+    tenantId: tid, projectId,
+    limit: body.limit, maxReviews: body.maxReviews, dryRun: !!body.dryRun, trigger: 'schedule',
+  });
+  if (!out.ok) { ctx.sendJSON(res, 400, { error: out.error, message: '项目状态不可用。' }); return true; }
+  ctx.sendJSON(res, 202, out);
+  return true;
+}
+
+module.exports = { overview, dimension, refresh, refreshPolicy, adminCapabilities, bootstrap };

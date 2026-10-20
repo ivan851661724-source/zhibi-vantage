@@ -410,6 +410,15 @@ function getAttempt(tenantId, attemptId) {
   return rowToAttempt(r);
 }
 // 最近 N 次 attempt（租户硬过滤）
+// 按竞品列出全部能力的 attempt（品牌级状态派生用；capability 不参与过滤）
+function listAttemptsByCompetitor(tenantId, projectId, competitorId, limit) {
+  const n = Math.max(1, Math.min(Number(limit) || 20, 100));
+  return getDb().prepare(`SELECT * FROM collection_attempts WHERE tenant_id=? AND project_id=? AND competitor_id=?
+    ORDER BY started_at DESC LIMIT ?`)
+    .all(String(tenantId || ''), String(projectId || ''), String(competitorId || ''), n)
+    .map(rowToAttempt);
+}
+
 function listAttempts(tenantId, projectId, competitorId, capability, limit) {
   const n = Math.max(1, Math.min(Number(limit) || 10, 50));
   return getDb().prepare(`SELECT * FROM collection_attempts WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=?
@@ -427,5 +436,5 @@ module.exports = {
   RESOLUTION_DEDUPE_MS, OBSERVATION_CAP,
   getDb, closeDb, buildRefreshKey,
   upsertIdentity, getIdentity, listIdentities,
-  createAttempt, completeAttempt, getAttempt, listAttempts, latestAttempt,
+  createAttempt, completeAttempt, getAttempt, listAttempts, listAttemptsByCompetitor, latestAttempt,
 };

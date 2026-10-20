@@ -66,6 +66,31 @@ function dueWindows(target, nowMs) {
   return out;
 }
 
+// ---------- 非 Shopify：公开商品页直采（仅供已升级的正式监控使用） ----------
+// 走 official_site_products adapter：robots/SSRF/快照/证据链与手动刷新完全一致；
+// attempt 以 schedule 记账（03 §20 枚举内），窗口幂等仍由 watch_windows 保证。
+async function collectPublicSiteProducts(comp, tid, pid) {
+  const Adapters = require('./source-adapter.js');
+  const ad = Adapters.getAdapter('official_site_products');
+  if (!ad) return { ok: false, error: 'adapter_missing' };
+  let r = null;
+  try { r = await ad.collect({ tenantId: tid, projectId: pid, competitor: comp, trigger: 'schedule' }); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  const att = r && r.attempt;
+  if (!att) return { ok: false, error: (r && (r.error || r.errorClass)) || 'fetch_failed' };
+  if (att.status !== 'success' && att.status !== 'partial') {
+    return {
+      ok: false,
+      status: att.sourceStatus === 'rate_limited' ? 429 : (att.sourceStatus === 'blocked' ? 403 : null),
+      error: att.errorClass || 'fetch_failed',
+    };
+  }
+  const obs = Array.isArray(att.observations) ? att.observations : [];
+  const items = obs.filter(o => o && o.id && typeof o.price === 'number')
+    .map(o => ({ id: o.id, repPrice: o.price, currency: o.currency || null, title: o.title || null, soldOut: false }));
+  return { ok: true, items, currency: (obs.map(o => o && o.currency).filter(Boolean)[0] || null), partialScan: att.status === 'partial' };
+}
+
 // ---------- 单目标单窗口执行（返回窗口级 Coverage 结果） ----------
 // deps（全部可注入，测试用替身）：fetchFn / productPricesFn / productPriceSaveFn /
 //   stockLoadFn / stockSaveFn / alertsPushFn
@@ -102,8 +127,56 @@ async function executeWindow(target, windowId, deps, nowMs) {
     // 竞品档案缺失（项目被删/竞品被移出）→ 信号不可执行：显式失败，不产生 quiet
     for (const s of signals) attempt(s, false, 'not_supported');
   } else if (!shopifyReady) {
-    // 非 Shopify 直采通道未接入（05 冻结 capability 边界）→ not_supported，不冒充 no_change
-    for (const s of signals) attempt(s, false, 'not_supported');
+    // 非 Shopify：只有「监控意向已升级为正式 Target」才会到这里（意向本身不被调度）。
+    // 走公开商品页直采；未升级的意向永远不会进这张表（见 watch-intent.js）。
+    const unsupported = signals.filter(s => s !== 'price');
+    for (const s of unsupported) attempt(s, false, 'not_supported'); // 上新/断货无发布时间与库存字段可核验
+    if (!signals.includes('price')) {
+      // 无可执行信号：如实失败，不产生 quiet
+    } else {
+      let pres = null;
+      try { pres = await (deps.publicSiteFn || collectPublicSiteProducts)(comp, tid, pid); }
+      catch (e) { pres = { ok: false, error: String((e && e.message) || e) }; }
+      if (!pres || !pres.ok) {
+        const reason = pres && pres.status === 429 ? 'rate_limited'
+          : (pres && (pres.status === 403 || pres.status === 401) ? 'blocked' : 'fetch_failed');
+        attempt('price', false, reason);
+      } else {
+        partialScan = !!pres.partialScan;
+        try {
+          const onSale = pres.items.filter(x => x && x.id != null && typeof x.repPrice === 'number' && x.repPrice > 0);
+          const nowIsoS = new Date(now).toISOString();
+          const currency = String(pres.currency || comp.currency || 'USD').toUpperCase();
+          const prevList = productPricesFn(tid, pid, comp.id) || [];
+          const byKey = new Map(prevList.map(p => [String(p.subjectId) + '|' + String(p.currency).toUpperCase(), p]));
+          for (const it of onSale) {
+            const prev = byKey.get(String(it.id) + '|' + currency) || null;
+            const entry = {
+              subjectId: String(it.id), currency,
+              specSignature: WPrice.specSignatureOf(it),
+              price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
+            };
+            const r2 = WPrice.applyProductSnapshot(prev, entry);
+            if (r2.event && r2.event.kind === 'changed') {
+              eventsVerified++;
+              try {
+                alertsPushFn(tid, {
+                  type: 'price-change', projectId: pid,
+                  competitorId: comp.id, competitorName: comp.name, subjectId: r2.event.subjectId,
+                  title: r2.event.title,
+                  text: (r2.event.title ? r2.event.title + '：' : '') + PH.describeChange(r2.event, () => ''),
+                  old: r2.event.old, new: r2.event.new,
+                  deltaPct: r2.event.deltaPct != null ? r2.event.deltaPct : null,
+                  currency: r2.event.currency, sourceUrl: it.id || comp.url || null, basis: 'verified',
+                });
+              } catch (e) { /* 推送失败不影响窗口落账 */ }
+            }
+            try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
+          }
+          attempt('price', true);
+        } catch (e) { attempt('price', false, 'parse_failed'); }
+      }
+    }
   } else {
     let res = null;
     try { res = await fetchFn(comp.url, { trigger: 'monitor', tenantId: tid }); }

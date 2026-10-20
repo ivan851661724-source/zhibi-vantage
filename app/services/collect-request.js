@@ -105,39 +105,41 @@ function requestCollection(input) {
 }
 
 /**
- * 调研完成后的自动采集（SC-06 r2 评审 §三.1/§三.2）。
- * 只自动采集「无需凭据、已真实验证过」的官网公开资料；public_site_products
- * 尚未验证，绝不因为代码存在就自动大规模抓取（§三.2）。
+ * 调研完成后的首轮采集（SC-07 §1 扩展）。
+ * 官方资料只是第一项：有 Shopify 目录就安排商品采集；公开商品页能力只有
+ * 运行态 operational（真实验证过）才安排；公开评论只在搜索链实际可用时安排。
+ * 逐项决策理由由 services/collection-plan.js 记录（不静默跳过）。
  * 任何异常都被吞掉——自动采集失败不能影响调研主链路。
  *
- * @returns {{enqueued: boolean, reason?: string, capability?: string, jobId?: string, attemptId?: string}}
+ * @returns {{enqueued: boolean, capability: string, reason: ?string, planned: Array}}
  */
 function autoCollectAfterResearch({ tenantId, projectId, comp, who }) {
-  const out = { enqueued: false, capability: 'official_site_profile', reason: null };
+  const out = { enqueued: false, capability: 'official_site_profile', reason: null, planned: [] };
   try {
     if (!tenantId || !projectId || !comp || !comp.id) { out.reason = 'missing_context'; return out; }
     if (!comp.url || !/^https?:\/\//i.test(String(comp.url))) { out.reason = 'no_official_url'; return out; }
-    const cap = Registry.getCapability(out.capability);
-    if (!cap || cap.maturity !== 'ga') { out.reason = 'capability_not_verified'; return out; }
-    const r = requestCollection({
-      tenantId, projectId, competitorId: comp.id, capability: out.capability,
-      comp: { url: comp.url, isShopify: comp.isShopify, name: comp.name },
-      trigger: 'schedule', // 系统发起（03 §20 枚举内，不新增规格外触发值）
-      tickNow: true,
-    });
-    out.result = r.status;
-    if (r.status === 'accepted' || r.status === 'deduped') {
-      out.enqueued = r.status === 'accepted';
-      out.jobId = r.jobId || null;
-      out.attemptId = r.attempt ? r.attempt.attemptId : null;
-      out.reason = r.reason || null;
+    // 延迟 require：collection-plan 依赖本模块，避免循环依赖在加载期互相卡住
+    const Plan = require('./collection-plan.js');
+    const planned = Plan.planForCompetitor({ tenantId, projectId, comp, trigger: 'schedule' });
+    out.planned = planned.decisions || [];
+    const site = out.planned.find(d => d.capability === 'official_site_profile') || null;
+    const accepted = out.planned.filter(d => d.decision === 'enqueued');
+    out.enqueued = accepted.length > 0;
+    if (accepted.length) out.capability = accepted[0].capability;
+    if (site) {
+      out.result = site.decision;
+      out.jobId = site.jobId || null;
+      out.attemptId = site.attemptId || null;
+      out.reason = site.decision === 'enqueued' ? null : (site.reason || site.decision);
     } else {
-      out.reason = r.code || r.status;
+      out.result = 'skipped';
+      out.reason = out.reason || 'no_official_url';
     }
     try {
       require('./logger.js').info('auto_collect_after_research', {
         who: who || 'research', tenantId, projectId, competitorId: comp.id,
-        capability: out.capability, status: r.status, reason: out.reason || null,
+        capability: out.capability, status: out.result || null, reason: out.reason || null,
+        planned: out.planned.map(d => d.capability + ':' + d.decision).join(','),
       });
     } catch (e2) { /* 日志失败不影响主链路 */ }
     return out;

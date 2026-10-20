@@ -210,7 +210,11 @@ const CAPABILITIES = Object.freeze([
     supportedObjects: { objectTypes: ['official_domain', 'public_review_page'], platforms: ['public_web'], markets: 'public_web' },
     access: 'public_web_page',
     requiresServerCredential: false,
+    // 🔴 SC-07 §1：搜索链是「任选其一」——Serper / Tavily / Brave / Bocha 任一可用即可，
+    // 不是四个全配。此前就绪门控把 configKeys 当 all-of，只配一个 Serper 也会被判
+    // 「数据服务暂不可用」，而实际搜索链可用（真实发现能跑，评论采集却被挡）。
     configKeys: ['SERPER_API_KEY', 'TAVILY_API_KEY', 'BRAVE_API_KEY', 'BOCHA_API_KEY'],
+    credentialMode: 'any_of',
     measurementMethod: 'public_source_observation',
     manualRefresh: true,
     autoInspect: false,

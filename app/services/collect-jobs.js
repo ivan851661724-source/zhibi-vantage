@@ -415,6 +415,15 @@ async function tick(options) {
   try {
     const out = await executeJob(job);
     finish(job.jobId, job.claimToken, 'done');
+    // SC-07 §2：公开商品采集完成后，若该品牌有「建立来源中」的监控意向，
+    // 检查是否满足升级条件（两次可比较采集 + 可计算 Diff）；不满足则保持意向状态。
+    try {
+      if (job.capability === 'public_site_products') {
+        require('./watch-intent.js').tryPromote({
+          tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+        });
+      }
+    } catch (e) { /* 升级判定失败不影响采集结果 */ }
     return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: !!(out && out.deduped) };
   } catch (e) {
     const msg = String((e && e.message) || e);

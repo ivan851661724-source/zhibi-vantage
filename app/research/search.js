@@ -35,10 +35,13 @@ function providerMain(config) {
 }
 function providerConfigured(config, name) {
   const sc = (config && config.search) || {};
-  if (name === 'serper') return normalizeSerperKeys(sc).length > 0;
-  if (name === 'brave') return !!sc.braveKey;
-  if (name === 'bocha') return !!sc.bochaKey;
-  if (name === 'tavily') return !!(sc.tavilyKey || sc.apiKey);
+  // SC-07 §1：配置来源有两处——运行配置文件与部署环境变量。
+  // 搜索调用链与就绪门控必须用同一判定，否则会出现「搜索跑得动、评论采集被判未配置」。
+  const env = process.env;
+  if (name === 'serper') return normalizeSerperKeys(sc).length > 0 || !!String(env.SERPER_API_KEY || '').trim();
+  if (name === 'brave') return !!sc.braveKey || !!String(env.BRAVE_API_KEY || '').trim();
+  if (name === 'bocha') return !!sc.bochaKey || !!String(env.BOCHA_API_KEY || '').trim();
+  if (name === 'tavily') return !!(sc.tavilyKey || sc.apiKey) || !!String(env.TAVILY_API_KEY || '').trim();
   if (name === 'wigolo') return !!(String(sc.wigoloUrl || '').trim() || String(process.env.WIGOLO_URL || '').trim());
   return false;
 }

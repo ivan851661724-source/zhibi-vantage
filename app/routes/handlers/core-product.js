@@ -119,6 +119,12 @@ async function intelligence(ctx, req, res, url) {
     // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径；
     // 独立字段，不与采集观察 items 混排）
     voiceChanges: VoiceUnified.buildProjectVoiceSummary(tid, rp.projectId, { brandId }),
+    // SC-07 §3：没有实际观察的品牌不再逐条出卡，改由项目级覆盖摘要承载
+    //（零结果 / 失败 / 未采集分别计数；失败可查品牌与原因）
+    voiceCoverage: VoiceUnified.buildProjectVoiceCoverage(tid, rp.projectId),
+    collectionCoverage: (() => {
+      try { return require('../../services/brand-service.js').buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
+    })(),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,

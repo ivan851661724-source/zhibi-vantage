@@ -9,6 +9,7 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchBrands, type BrandListItem } from '@/lib/core-api';
+import { apiPost } from '@/lib/api';
 import { BRAND_COVER_TEXT, brandCoverState, brandsEmptyKind, allBrandsNotCollected, type BrandCoverState } from '@/lib/core-logic';
 import { EmptyState } from '@/components/core-ui';
 
@@ -38,6 +39,28 @@ function BrandsInner() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState('');
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootMsg, setBootMsg] = useState<string | null>(null);
+
+  // SC-07 §1：一次补齐首轮采集（不要求用户逐个点 15 次）；
+  // 有界、可重复，幂等/冷却/额度由采集链路保证，重复点击不会重复产生任务。
+  const startBootstrap = async () => {
+    setBootstrapping(true);
+    setBootMsg(null);
+    try {
+      const r = await apiPost<{ counts?: Record<string, number>; brands?: number }>(
+        '/api/data-surface/bootstrap', { projectId, maxReviews: 5 },
+      );
+      const c = (r && r.counts) || {};
+      setBootMsg(`已入队 ${c.enqueued || 0} 项 / 去重 ${c.deduped || 0} 项 / 跳过 ${c.skipped || 0} 项（共 ${(r && r.brands) || 0} 个品牌）`);
+      const fresh = await fetchBrands(projectId);
+      setItems(fresh.brands || []);
+    } catch (e) {
+      setBootMsg(e instanceof Error ? e.message : '入队失败');
+    } finally {
+      setBootstrapping(false);
+    }
+  };
   const [cover, setCover] = useState<'' | BrandCoverState>('');
   const [rel, setRel] = useState('');
 
@@ -112,6 +135,8 @@ function BrandsInner() {
         <span className="core-brand-count">{filtered.length} / {items.length} 个品牌</span>
       </div>
 
+      {bootMsg ? <p className="hint">{bootMsg}</p> : null}
+
       {!items.length ? (
         <EmptyState
           title="尚未添加竞争品牌"
@@ -120,8 +145,9 @@ function BrandsInner() {
         />
       ) : allBrandsNotCollected(items) && !hasFilter ? (
         <EmptyState
-          title="已添加品牌，尚未开始采集"
-          sub={`已登记 ${items.length} 个竞争品牌，但还没有任何维度采集到数据。采集由你的操作触发，不会自动开始；此状态不代表这些品牌没有数据。`}
+          title="已登记品牌，首轮采集尚未开始"
+          sub={`已登记 ${items.length} 个竞争品牌。系统会按公开来源逐项入队采集（官网资料 / Shopify 公开目录 / 公开评论）；此状态不代表这些品牌没有数据。`}
+          action={<button type="button" className="btn primary" disabled={bootstrapping} onClick={startBootstrap}>{bootstrapping ? '正在入队…' : '补齐首轮采集'}</button>}
         />
       ) : !filtered.length ? (
         <EmptyState
@@ -142,6 +168,11 @@ function BrandsInner() {
                   {b.category ? <span>{b.category}</span> : null}
                   <span className="core-brand-rel">{b.relation || '竞品'}</span>
                   <span className={`core-cover-badge core-cover-${cs}`}>{BRAND_COVER_TEXT[cs]}</span>
+                  {b.collection ? (
+                    <span className={`core-coll-badge core-coll-${b.collection.state}`} title={b.collection.reason || undefined}>
+                      {b.collection.stateText}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="core-brand-cov">
                   <span className={'core-site-badge core-site-' + (b.officialSite ? b.officialSite.status : 'not_collected')}>{b.officialSite ? b.officialSite.statusText : '官网未采集'}</span>
