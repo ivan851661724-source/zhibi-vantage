@@ -86,8 +86,12 @@ async function discoverSnapshots(input) {
     const msg = String((e && e.message) || e);
     // 失败分类要诚实：本地设施故障（数据库/文件不可写）不是「来源不可用」，
     // 不能把自家问题写成对方不提供数据。
+    // 🔴 r3 实测补充：代理出站环境下，代理拒绝到 archive.org 的隧道会抛
+    // ERR_PROXY_TUNNEL（"Failed to establish tunnel ... 502 Bad Gateway"），
+    // 属**目标不可达**而非本地故障——此前未匹配关键词被误判 internal，
+    // 导致用户侧文案与重试语义都不对。隧道失败/网络不可达一律归 unreachable。
     const cls = /SSRF_BLOCKED/.test(msg) ? 'blocked'
-      : /TOO_MANY_REDIRECTS|timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|ECONNRESET|Failed to connect/i.test(msg) ? 'unreachable'
+      : /TOO_MANY_REDIRECTS|timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|EPIPE|EHOSTUNREACH|ENETUNREACH|socket hang up|Failed to connect|ERR_PROXY_TUNNEL|Failed to establish tunnel|ERR_TUNNEL_CONNECTION_FAILED/i.test(msg) ? 'unreachable'
         : 'internal';
     FetchGate.recordResult(REPLAY_HOST, false);
     return { ok: false, rows: [], failureClass: cls, error: msg.slice(0, 160) };

@@ -274,10 +274,40 @@ Tab：概览 / 商品与价格 / 历史时间线 / 数据覆盖与来源 / 相�
 
 ### 9.2 限制与合并阻断项（🔴 不得改写为已完成）
 
-1. **历史回补成功路径未验证（合并阻断项）**：本出站环境 archive.org 不可达（DNS 解析到 199.59.148.222 后 TCP 443 超时）。回补任务真实请求后如实终态 `source_unavailable`（failureClass=unreachable）+ 0 导入，失败分类 / 可重试 / 覆盖缺口均正确。但「CDX 候选 → 原始存档字节 → Snapshot → Evidence → 时序事实 → history-coverage 出现该月 archived_observation」的完整成功闭环**未在任何环境跑通**。解除条件：在可访问 archive.org 的环境对任一品牌完成一次真实回补并验证上述链路。
+1. **历史回补成功路径未验证（合并阻断项，r3 复验仍未解除）**：r3 在两个真实环境做了出口矩阵实测（详见 §9.4），archive.org 均被平台级阻断（DNS 污染 + 出口黑洞），回补任务真实终态 `source_unavailable`（failureClass=unreachable）+ 0 导入，分类 / 可重试 / 覆盖缺口 / 幂等均正确。但「CDX 候选 → 原始存档字节 → Snapshot → Evidence → 时序事实 → history-coverage 出现该月 archived_observation」的完整成功闭环**仍未在任何环境跑通**。解除条件：在能真实访问 archive.org 的机器上，对任一公开 Shopify 品牌完成一次真实回补并核验上述链路（本仓库 `web/e2e/archive-diagnose.cjs` 可直接复用）。
 2. 存档观察的币种可确定性存档场景下，是否需要回补 /cart.js 以确认币种（影响可比性判定）——待产品裁决（Open Decision）。
 3. 情报库 items 当前仍为采集观察；memory 事件以独立字段（memoryEvents）并列展示——是否把 items 收敛为只读时序事件，待产品裁决。
 4. fixture 说明：seed-memory.cjs 的目录观察经真实 Snapshot+Evidence 落盘（摘要由生产 adapter 生成），回补任务真实请求 archive.org；memory-cmf 的价格点数据是受控 fixture，明确标记，不作为存档来源验收。
+
+
+### 9.4 r3 真实回补通道验证记录（2026-10-20，结论：未通过）
+
+本轮唯一目标是跑通真实存档回补闭环。两个真实环境的出口矩阵实测结果如下，全部为真实网络请求，无 mock。
+
+| 探测项 | 本机（受限代理出口） | 云端实例（sites 沙箱） |
+|---|---|---|
+| `https://web.archive.org/cdx/...` | 代理 CONNECT 502 `upstream connect failed: connection timed out` | ETIMEDOUT 20s |
+| `https://archive.org/robots.txt` | CONNECT 502 | ETIMEDOUT 20s |
+| `http://web.archive.org/...`（80） | 502 | ETIMEDOUT |
+| 直连解析出的 IP（443） | 超时（无直连出站） | ETIMEDOUT |
+| DNS 解析结果 | 108.160.166.61 / 69.171.229.73（Facebook 网段，被污染） | 93.179.102.140 / 69.63.176.59（同样非 archive 网段） |
+| 绕代理直连 | 超时（沙箱禁止直连） | — |
+| DoH（dns.google / cloudflare-dns.com） | 均被出口拦截 | — |
+| **对照域名**：`https://www.allbirds.com/products.json` | 200 | 403（源站 WAF），TCP/TLS/HTTP 均成功，694ms |
+| **对照域名**：`https://api.github.com/rate_limit` | 200 | 403（缺 UA），连接成功 301ms |
+
+结论：两环境都**具备一般出网能力**（对照域名连通），唯独 archive.org 域名级不可达，且 DNS 被解析到无关网段——属平台/网络策略阻断，不是代码缺陷，也无法通过修改应用代码绕过（亦不允许绕过）。
+
+生产路径在同一环境下的诚实行为（真实 HTTP 提交，非 service 直调）：
+
+- `POST /api/brands/:brandId/history-backfill` → 202，持久任务 `bfj_*`，tenant/project/brand 三重校验；
+- 同范围重复提交 → 同一 `jobId`、`deduped=true`（幂等复用，不重复抓取）；
+- worker 真实发起 CDX 请求 → 终态 `source_unavailable`，`failureClass=unreachable`，`counts={discovered:0,fetched:0,imported:0,skipped:0}`，用户文案「公开网页存档当前无法访问，本次未补入历史。可稍后重试。」；
+- `history-coverage` 保持 `not_started`、`memory` 零事实、`timeline` 零条目——**没有把失败写成「已回补」**。
+
+#### r3 修复的代码缺陷（真实复现后修复）
+
+代理出站环境下，代理拒绝隧道时 Node 抛 `ERR_PROXY_TUNNEL`（`Failed to establish tunnel ... 502 Bad Gateway`），旧分类正则未覆盖 → 被误判为 `internal`（本地故障），任务落 `failed` 且用户文案错误。已修为归 `unreachable`（目标不可达），并补 `app/test/memory-archive-r3.test.js` A1-A7 七项回归（受控 fixture，明确标注，不替代真实验收）：代理隧道/超时/DNS 失败 → unreachable，本地设施故障仍 internal，SSRF/robots 仍 blocked，CDX 成功响应解析与「存档时间精度到日」。
 
 ### 9.3 冲突融合记录（以当前 main 语义为准）
 
