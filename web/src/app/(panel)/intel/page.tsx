@@ -4,6 +4,7 @@
 // 情报卡（证据入口/纠错入口）；无证据的条目永不使用「已核实」样式。
 // 空状态三分：尚无采集结果 / 当前筛选无结果 / 资料不足。
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { FieldCorrectModal } from '@/components/field-correct';
@@ -11,7 +12,7 @@ import { IntelProfile } from '@/components/intel-profile';
 import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
-import { fetchIntelligence, type ConstructionDimension, type IntelItem } from '@/lib/core-api';
+import { fetchIntelligence, type ConstructionDimension, type IntelItem, type MemoryEventItem } from '@/lib/core-api';
 import { intelSummary } from '@/lib/core-logic';
 
 const INTEL_TYPES: { value: string; label: string }[] = [
@@ -44,6 +45,8 @@ function IntelInbox({ projectId }: { projectId: string }) {
   const [fcItem, setFcItem] = useState<IntelItem | null>(null);
   // r4.10：项目级建设中维度（后端独立字段，不再混入情报列表）
   const [construction, setConstruction] = useState<ConstructionDimension[]>([]);
+  // SC-05：项目级时序变化事件（后端独立字段；与采集观察分开呈现，不把推导当直接观察）
+  const [memoryEvents, setMemoryEvents] = useState<MemoryEventItem[]>([]);
 
   // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
   // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
@@ -66,7 +69,7 @@ function IntelInbox({ projectId }: { projectId: string }) {
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
@@ -114,11 +117,41 @@ function IntelInbox({ projectId }: { projectId: string }) {
 
       {err ? <p className="core-err">{err}</p> : null}
 
-      {!apiItems.length && !hasFilter ? (
+      {/* SC-05：时序变化（derived_timeline_events 投影）——独立区块，不与采集观察混排；
+          每条都能回到品牌档案的对应时间与证据。 */}
+      {memoryEvents.length ? (
+        <section className="core-mem-events">
+          <h3>时序变化（系统推导）</h3>
+          <p className="hint">由已验证的时序事实确定性计算得出，不是新的来源；点击可打开品牌档案中对应时间段与证据。</p>
+          <ul className="core-mem-event-list">
+            {memoryEvents.slice(0, 40).map(ev => (
+              <li key={ev.id}>
+                <div className="core-mem-event-top">
+                  <span className="mem-time">{String(ev.at).slice(0, 10)}</span>
+                  <span className="mem-badge mem-badge-derived-event">{ev.sourceKindText}</span>
+                  <span className="core-mem-event-brand">{ev.brandName || '—'}</span>
+                  <span className="core-mem-event-text">{ev.eventText}{ev.entityName ? '：' + ev.entityName : ''}</span>
+                  <span className="mem-precision">{ev.timePrecisionText}</span>
+                </div>
+                {ev.summary ? <div className="core-mem-event-sum">{ev.summary}</div> : null}
+                {ev.link ? (
+                  <Link className="core-mem-event-link" href={`/brands/${encodeURIComponent(ev.link.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=products`}>
+                    在品牌档案查看 →
+                  </Link>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {!apiItems.length && !memoryEvents.length && !hasFilter ? (
         <EmptyState
           title="尚无采集结果"
           sub="该项目还没有可展示的情报。采集由你的操作触发；完成后，可核实的变化会出现在这里。"
         />
+      ) : !shown.length && memoryEvents.length ? (
+        <p className="hint">采集观察暂无条目；上方「时序变化（系统推导）」来自已核验的时序事实，单独呈现，不计入上面的三个计数。</p>
       ) : !shown.length ? (
         <EmptyState
           title="当前筛选没有结果"

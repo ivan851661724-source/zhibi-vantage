@@ -101,6 +101,13 @@ function buildCoverage(tenantId, projectId, competitor) {
   const comp = competitor || {};
   const compId = comp.id || null;
   const dims = [];
+  // SC-05：时序档案里已有的已核验事实也算「有数据」——否则顶部会写「有数据 0 个」，
+  // 与下方时序覆盖的「有可核验证据」自相矛盾。只读投影，不写库。
+  let memStats = null;
+  try {
+    if (compId) memStats = require('./competitive-memory-store.js').coverageStats(tenantId, projectId, compId);
+  } catch (e) { memStats = null; }
+  const memDimOf = (code) => (code === 'website_products' ? (memStats && (memStats.product || memStats.catalog)) : null);
   for (const d of Registry.listDimensions()) {
     const caps = Registry.capabilitiesByDimension(d.code);
     const ga = caps.filter(c => c.maturity === 'ga');
@@ -160,7 +167,10 @@ function buildCoverage(tenantId, projectId, competitor) {
         if (a.status === 'failed') latestFailed = true;
       }
     }
-    const finalState = hasAttempt ? state : 'unknown';
+    let finalState = hasAttempt ? state : 'unknown';
+    const memDim = memDimOf(d.code);
+    // 没有任何采集 attempt，但时序档案里有已核验事实（历史采集/存档回补）→ 不能说「未采集」
+    if (!hasAttempt && memDim && memDim.factCount > 0) finalState = 'ok';
     let lastObservedAt = null;
     if (aggregated && Array.isArray(aggregated.aggregations)) {
       for (const a of aggregated.aggregations) {
@@ -172,6 +182,9 @@ function buildCoverage(tenantId, projectId, competitor) {
     // 🔴 诚实备注：「保留旧数据」只在确有上次成功数据（ok/partial/stale）时允许出现；
     //    首次采集失败（failed，无历史成功）只说失败，不声称保留任何数据。
     const notes = [];
+    if (!hasAttempt && memDim && memDim.factCount > 0) {
+      notes.push('当前没有本次采集记录；展示的是时序档案中已核验的历史记录（最早 ' + String(memDim.firstAt).slice(0, 10) + '）。');
+    }
     if (['ok', 'partial', 'stale'].includes(finalState) && latestFailed) {
       notes.push('最近一次更新失败，当前展示上次成功数据。');
     }

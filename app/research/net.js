@@ -196,6 +196,7 @@ function mapShopifyItems(products, cap) {
     return {
       title: p.title, type: p.product_type || '',
       id: p.id != null ? p.id : null,
+      handle: p.handle || null, // SC-05：商品稳定键来源（id 缺失时用 handle + 已核验域名）
       variantCount: variants.length, // 规格签名代理：变体集变化 → 价格不可直接比较（lib/watch-price §6）
       minPrice,
       maxPrice: prices.length ? Math.max(...prices) : (nums.length ? 0 : null),
@@ -255,6 +256,11 @@ const SAFE_FETCH_MAX_BYTES = 2 * 1024 * 1024; // shopify products.json 单页上
 // IP 字面量 host 不经过本函数（node 直连 IP 不回调 lookup），IP 形态已在
 // assertPublicUrl 逐跳判定。
 function safeLookup(hostname, options, cb) {
+  // 🔴 Node ≥ 20 的 net 连接层可能以 { all: true } 调用 lookup，期望回调第二个参数是
+  // **数组**；若只走 (err, address, family) 三参形式，Node 22 会因拿不到数组
+  // 抛 "Invalid IP address: undefined" → 所有真实出站请求在连接阶段即失败。
+  // 两种签名都支持：all:true 交数组，否则交单条（语义与 SSRF 校验完全不变）。
+  const wantAll = !!(options && options.all === true);
   dnsMod.lookup(hostname, { all: true }, (err, addrs) => {
     if (err) { cb(err); return; }
     const list = (Array.isArray(addrs) ? addrs : [addrs]).filter(Boolean);
@@ -267,6 +273,10 @@ function safeLookup(hostname, options, cb) {
     const first = list[0];
     const address = String(first.address);
     const family = first.family === 6 || (first.family == null && address.includes(':')) ? 6 : 4;
+    if (wantAll) {
+      cb(null, [{ address, family }]);
+      return;
+    }
     cb(null, address, family);
   });
 }

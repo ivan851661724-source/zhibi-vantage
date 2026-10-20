@@ -41,6 +41,18 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
             <li>本次判断未使用的维度（建设中）：{(db.pendingConfig || []).length + db.notIntegrated.length ? [...(db.pendingConfig || []), ...db.notIntegrated].join('、') : '无'}</li>
           </>
         ) : null}
+        {/* SC-05：可用历史跨度与本次判断使用的时间范围（来自时序事实，不是采集次数） */}
+        {v.historyBasis ? (
+          <>
+            <li>
+              可用历史跨度：{v.historyBasis.availableHistoryDays > 0
+                ? v.historyBasis.availableHistoryDays + ' 天（' + String(v.historyBasis.earliestAvailableAt || '').slice(0, 10) + ' 起，' + v.historyBasis.factCount + ' 条时序事实，其中 ' + (v.historyBasis.comparableCount || 0) + ' 条可比）'
+                : '尚无可用时序历史'}
+            </li>
+            <li>本次判断使用的时间范围：{v.historyBasis.earliestAvailableAt ? String(v.historyBasis.earliestAvailableAt).slice(0, 10) + ' 至今' : '—（无历史区间）'}</li>
+            <li>{v.historyBasis.note}</li>
+          </>
+        ) : null}
         <li>机会状态：{v.statusText}</li>
         {v.note ? <li>{v.note}</li> : null}
       </ul>

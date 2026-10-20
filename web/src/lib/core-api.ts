@@ -102,6 +102,44 @@ export interface ConstructionDimension {
   configKeys?: string[];
 }
 
+// SC-05：情报库「时序变化」独立字段（derived_timeline_events 投影，与采集观察不混排）
+export interface MemoryEventItem {
+  id: string;
+  brandId: string | null;
+  brandName: string | null;
+  competitorId: string | null;
+  entityId: string;
+  entityName: string | null;
+  eventType: string;
+  eventText: string;
+  summary: string | null;
+  fromValue: number | null;
+  toValue: number | null;
+  currency: string | null;
+  unit: string | null;
+  at: string;
+  atBasis: string;
+  timePrecision: string;
+  timePrecisionText: string;
+  sourceKind: 'derived_event';
+  sourceKindText: string;
+  evidenceIds: string[];
+  snapshotIds: string[];
+  derivedFromFactIds: string[];
+  link?: { brandId: string; tab: string; from: string; to: string } | null;
+}
+
+export interface OpportunityHistoryBasis {
+  brandsWithHistory: number;
+  factCount: number;
+  comparableCount?: number;
+  earliestAvailableAt: string | null;
+  latestObservedAt: string | null;
+  availableHistoryDays: number;
+  enoughForTrend: boolean;
+  note: string;
+}
+
 export interface OpportunityView {
   status: 'ok' | 'insufficient';
   statusText: string;
@@ -112,6 +150,7 @@ export interface OpportunityView {
   }[];
   sample: { brandCount: number; brandsWithData: number; required?: number };
   dimensionBasis?: { integrated: string[]; pendingConfig?: string[]; notIntegrated: string[]; covered: string[] };
+  historyBasis?: OpportunityHistoryBasis | null; // SC-05：可用历史跨度 + 本次使用的时间范围
   limits: string[];
   note?: string | null;
 }
@@ -149,6 +188,20 @@ export interface ReportDetail extends ReportListItem {
     coverage?: { brandId: string; name: string; summary: CoverageSummary }[];
     gaps?: { brandId: string; displayName?: string; dimension?: string; kind?: string; text?: string }[];
     opportunities?: unknown[];
+    // SC-05：冻结的时序事实基线（事实 id / 版本 id / 双时间 / 证据引用）
+    memoryBasis?: {
+      from?: string | null;
+      to?: string | null;
+      factCount?: number;
+      facts?: {
+        factId: string; versionId: string; entityId: string; brandId?: string | null;
+        factType: string; value: string | number | null; currency?: string | null;
+        sourceKind?: string; timePrecision?: string;
+        effectiveAt?: string | null; observedAt?: string | null; at?: string; atBasis?: string;
+        evidenceIds?: string[]; snapshotIds?: string[];
+      }[];
+      note?: string;
+    } | null;
   } | null;
   gaps: { brandId: string; displayName?: string; dimension?: string; kind?: string; text?: string }[] | null;
   opportunities: unknown[];
@@ -205,7 +258,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {

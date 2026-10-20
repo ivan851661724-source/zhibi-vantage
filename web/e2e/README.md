@@ -13,7 +13,7 @@
 | S5 未接入维度诚实呈现 | 品牌详情 coverage tab 建设中区域：列出 社媒内容/广告活动/口碑与评论/搜索与热度 四维度，标注「尚未接入」「刷新：不可用」，区域内无 `<svg>` 图表、无 0 值徽章、无虚构来源 |
 | S6 报告详情切项目（r3 规则 3） | 报告详情 `?projectId=A` → 顶部选择器切到 B → URL 变为 `/report?projectId=B`（**不保留** reportId）→ 页面不再展示 A 的报告内容（无「生成失败」「结构化事实版本」），展示 B 的报告列表空状态「暂无报告」 |
 | S7 情报库 brandId 清理（r3 规则 1） | `/intel?projectId=A&brandId=<A品牌>` 筛选生效（展示该品牌情报）→ 顶部选择器切到 B → URL **清除 brandId** → 页面展示 B 的真实数据或真实空状态，无「当前筛选没有结果」假空、无 A 项目情报内容 |
-| S8 情报库噪音修复（r4.10） | `/intel?projectId=A`：主列表无「XX：未接入」卡片（未接入维度是项目级覆盖状态，不是情报事件）；真实采集项（成功/部分完成）保留；底部「数据覆盖与建设中维度」折叠区域恰 4 项、每维度恰一次、统一文案「尚未接入，当前不生成数据、估算或结论。」、无时间戳/来源链接/Evidence/「待核实」/「资料不足」/svg 图表 |
+| S8 情报库噪音修复（r4.10） | `/intel?projectId=A`：主列表无「XX：未接入」卡片（未接入维度是项目级覆盖状态，不是情报事件）；真实采集项（成功/部分完成）保留；底部「数据覆盖与建设中维度」折叠区域恰 4 项、每维度恰一次、统一文案「尚未接入，当前不生成数据、估算或结论。」、无时间戳/来源链接/Evidence/「待核实」/「资料不足」/svg 图表（d3e8b303 起：某维度已有 Evidence+Snapshot 真实数据后不再显示建设中，seed 场景下为 3 项） |
 
 ## 用例清单（tiktok-coverage-r5.cjs · TikTok 覆盖范围浏览器级验证）
 
@@ -78,3 +78,32 @@ node core-ui-r2.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json
 - `seed.cjs` 通过真实 HTTP 注册租户、创建报告（`POST /api/reports` → 202 → 轮询终态）；项目行与品牌/证据/时间线数据通过服务层直插**真实 SQLite**（`seed-svc.cjs`，走 brand-store / surface-store / evidence-store 真值链），与线上同构，无任何伪造 API 响应。
 - S4 的「失败报告」由真实成功报告经 SQL 置为 `failed`（`error_text` 注明 e2e 注入现场），「重新生成」点击后的创建、跳转、轮询全部走真实 HTTP。
 - 用例断言中明确检查：未接入维度区域无 0 值、无模拟图表、无虚构来源；URL 侧 `projectId` 全程不丢；跨项目切换后 URL 与页面均不残留原项目的资源 id 或筛选（r3）。
+
+## SC-05 Competitive Memory 场景（memory-cmf.cjs）
+
+时序档案的浏览器验收，独立于上面的 UI 框架场景：
+
+```bash
+# 1) 后端（新数据目录）
+ZB_DATA_DIR=/tmp/zhibi-mem PORT=3301 node app/server.js
+# 2) 前端（BACKEND_URL 指向该后端）
+cd web && BACKEND_URL=http://127.0.0.1:3301 npm run build && npx next start -p 3101
+# 3) 数据（真实注册 + 真值链写入 + 真实跑一次历史回补）
+cd web/e2e && node seed-memory.cjs --data-dir /tmp/zhibi-mem --backend http://127.0.0.1:3301
+# 4) 用例（需 NODE_PATH 指向安装了 playwright 的 node_modules）
+NODE_PATH=<node_modules> node memory-cmf.cjs --front http://127.0.0.1:3101 --seed .e2e-memory.json
+```
+
+覆盖（40 断言）：
+
+- 两个可比价格点 → 画线并显示涨跌；单点 → 明确「还不足以判断价格变化」且**不画线**；
+- 不可比观察点（存档币种未确认）以空心点**照实画出**，不参与连线；
+- 价格点可打开证据抽屉；时间线含 直接观察 / 历史存档观察 / 系统推导事件；
+- 存档条目显示「精确到日」；直接观察显示「观察到」；
+- 覆盖面板有「有可核验证据 / 无法确认」段与图例，且不写「没有变化」；
+- 历史回补卡显示**真实终态**（本环境 archive.org 不可达 → 来源不可用）与 0 导入，不写「已回补」；
+- 情报库「时序变化（系统推导）」区块存在且可跳转到品牌档案；
+- 页面无路径 / token / 栈泄漏。
+
+数据诚实性：`seed-memory.cjs` 的三次目录观察都经 `Snapshot.record` + `EvidenceStore.recordEvidence`
+真实落盘，摘要由生产 `adapter.summarize` + `mapShopifyItems` 生成；回补任务真实请求 archive.org。

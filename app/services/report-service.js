@@ -19,6 +19,7 @@ const Report = require('../research/report.js');
 const { computeWhiteSpace, assessPositioning } = require('../research/whitespace.js');
 const { evidenceDistribution } = require('../lib/evidence-dist.js');
 const { computeOpportunityMap } = require('../lib/opportunity.js');
+const MemView = require('./memory-view.js'); // SC-05：报告冻结时序事实基线（只读投影）
 
 let workerTimer = null;
 let running = false;
@@ -197,9 +198,14 @@ function buildFactPack(tenantId, projectId, state, scope) {
     }
   } catch (e) { opportunities = []; }
 
+  // SC-05：冻结时序事实基线（事实 id / 版本 id / 双时间 / 证据引用），执行期不再读实时 Memory
+  let memoryBasis = null;
+  try { memoryBasis = MemView.buildMemoryBasis(tenantId, projectId, linkRefs, norm.from, norm.to, 120); } catch (e) { memoryBasis = null; }
+
   return {
     generatedAt: new Date().toISOString(),
     scope: { brandIds: norm.brandIds, from: norm.from, to: norm.to, sections: norm.sections },
+    memoryBasis,
     brandIds: linkRefs.map(x => x.bid),
     brandNames,
     track: (state && state.track) || null,

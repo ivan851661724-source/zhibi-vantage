@@ -26,6 +26,53 @@ const SurfaceStore = require('./surface-store.js');
 const Registry = require('./capability-registry.js');
 const Adapters = require('./source-adapter.js');
 
+// SC-05：采集成功后追加写入 Competitive Memory。
+// 🔴 只在「attempt 已落终态、Evidence/Snapshot 已齐备」之后调用——复用既有真值，
+//    **不二次抓取、不生成第二份原始快照**。Memory 失败不影响采集结果（如实记日志）。
+function memoryIngestAfterCollect(job, comp, raw, standardOut, fin) {
+  try {
+    if (!fin || !fin.attempt) return null;
+    const status = fin.attempt.status;
+    if (status !== 'success' && status !== 'partial') return null;
+    const evIds = Array.isArray(fin.attempt.evidenceIds) ? fin.attempt.evidenceIds : [];
+    const snapIds = Array.isArray(fin.attempt.snapshotIds) ? fin.attempt.snapshotIds : [];
+    if (!evIds.length || !snapIds.length) return null; // 无证据不入已核实历史
+    const r = raw || {};
+    const so = standardOut || {};
+    const items = Array.isArray(r.items) ? r.items : [];
+    if (!items.length) return null;
+    const summary = so.summary || (fin.attempt && fin.attempt.summary) || {};
+    const Memory = require('./competitive-memory.js');
+    const res = Memory.ingestCatalogObservation({
+      tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+      domain: Memory.domainOf(comp && comp.url),
+      brandName: (comp && comp.name) || null,
+      items,
+      summary,
+      snapshotIds: snapIds,
+      evidenceIds: evIds,
+      observedAt: fin.attempt.endedAt || new Date().toISOString(),
+      recordedAt: new Date().toISOString(),
+      sourceKind: 'live_observation',
+      timePrecision: 'captured_only',
+      effectiveAt: null,
+      parserVersion: so.parserVersion || (fin.attempt && fin.attempt.parserVersion) || Memory.MEMORY_PARSER_VERSION,
+      sourceUrl: so.sourceUrl || r.url || null,
+    });
+    try {
+      require('./logger.js').info('competitive_memory_ingest', {
+        competitorId: job.competitorId, capability: job.capability,
+        versions: res && res.versionsCreated, facts: res && res.factsCreated,
+        events: res && res.eventsCreated, skipped: res && res.skipped ? res.reason : null,
+      });
+    } catch (e2) {}
+    return res;
+  } catch (e) {
+    try { require('./logger.js').warn('competitive_memory_ingest_failed', { competitorId: job.competitorId, err: String(e && e.message || e).slice(0, 160) }); } catch (e2) {}
+    return null;
+  }
+}
+
 // CLAIM_TTL_MS：认领租期（heartbeat 每 25s 续租）。env ZB_COLLECT_CLAIM_TTL_MS
 // 可覆盖（确定性进程测试缩短租约窗口；生产默认 60s）。
 const CLAIM_TTL_MS = (() => {
@@ -275,7 +322,13 @@ async function executeJob(job) {
       return null; // 视为该 provider 失败，链可继续
     }
     const fin = await Adapters.commitProviderTerminal(baseCtx, run, r.out, r.ident);
-    return Object.assign({ adapterCode: code, providerResults, externalCalls: executed.length }, fin);
+    // SC-05：终态 + Evidence 落账之后写入 Competitive Memory（复用本次快照，不重抓）
+    let memory = null;
+    if (fin && fin.attempt && (fin.attempt.status === 'success' || fin.attempt.status === 'partial')
+      && job.capability === 'shopify_catalog') {
+      memory = memoryIngestAfterCollect(job, comp, r.raw, r.out, fin);
+    }
+    return Object.assign({ adapterCode: code, providerResults, externalCalls: executed.length, memory }, fin);
   };
 
   if (chain.strategy === 'fanout') {

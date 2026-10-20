@@ -12,7 +12,8 @@
 //   S7 情报库 ?projectId=A&brandId=<A品牌> 切换项目 → URL 清除 brandId，
 //      展示 B 的真实数据或真实空状态，无筛选残留造成的假空结果（r3 规则 1）
 //   S8 情报库噪音修复（r4.10）：主列表无「XX：未接入」卡片；底部「数据覆盖
-//      与建设中维度」区域恰 4 项、无时间戳/「暂无可打开来源」/「待核实」；
+//      与建设中维度」区域恰 3 项（d3e8b303：广告活动已有 Evidence+Snapshot 真实
+//      数据后不再显示建设中）、无时间戳/「暂无可打开来源」/「待核实」；
 //      统一文案；真实采集项（成功/部分完成）保留
 // 用法：node core-ui-r2.cjs --front http://127.0.0.1:3100 --seed .e2e-seed.json [--shots dir]
 // 前提：见同目录 README.md（后端 + 前端已启动；seed.cjs 已跑完）。
@@ -77,7 +78,8 @@ function check(name, cond, extra) {
   await page.goto(FRONT + '/brands/' + encodeURIComponent(SEED.brandA) + '?projectId=' + encodeURIComponent(SEED.projectA) + '&tab=timeline', { waitUntil: 'networkidle', timeout: 30000 });
   await page.waitForSelector('.core-tabs', { timeout: 15000 });
   await page.waitForTimeout(500);
-  check('时间线 Tab 处于激活态（tab=timeline 生效，标签「竞争动态」）', await page.locator('.core-tab.on', { hasText: '竞争动态' }).count() > 0);
+  // SC-05：该分区由「竞争动态」升级为「历史时间线」（tab key 仍为 timeline）
+  check('时间线 Tab 处于激活态（tab=timeline 生效，标签「历史时间线」）', await page.locator('.core-tab.on', { hasText: '历史时间线' }).count() > 0);
   // 顶部选择器切到项目 B
   await page.click('.proj-picker summary');
   await page.click('.proj-picker-menu button:has-text("' + SEED.trackB + '")');
@@ -220,20 +222,23 @@ function check(name, cond, extra) {
   const lisA = await page.locator('.core-intel li').count();
   check('真实情报项保留（成功/部分完成，A 项目恰 2 条）', lisA === 2, '实际 ' + lisA);
   check('「采集完成」项在列表中', bodyA.includes('采集完成'));
-  // 底部建设中区域：折叠面板恰 4 项
+  // 底部建设中区域：折叠面板（d3e8b303 新语义：某维度已有 Evidence+Snapshot 支持的
+  // 真实数据后，不再显示建设中——seed 给广告活动种了完整真值链，故剩 3 项）
   await page.click('.core-building-fold > summary');
   await page.waitForTimeout(200);
   const fold = page.locator('.core-building-fold');
   check('底部建设中区域存在（唯一、可折叠）', (await fold.count()) === 1);
   const foldLis = await page.locator('.core-building-fold .core-building-list > li').count();
-  check('建设中区域恰 4 项（每维度一条，不随品牌数重复）', foldLis === 4, '实际 ' + foldLis);
+  check('建设中区域恰 3 项（每维度一条，不随品牌数重复；广告活动已有真实证据不再列出）', foldLis === 3, '实际 ' + foldLis);
   const foldText = await fold.textContent();
-  for (const dim of ['社媒内容', '广告活动', '口碑与评论', '搜索与热度']) {
+  // d3e8b303 验收：广告活动已有真实证据（verified Evidence + Snapshot + success attempt）→ 不显示建设中
+  check('广告活动已有真实证据时不再显示建设中', !foldText.includes('广告活动'));
+  for (const dim of ['社媒内容', '口碑与评论', '搜索与热度']) {
     check('建设中区域列出「' + dim + '」恰一次', (foldText.match(new RegExp(dim, 'g')) || []).length === 1);
   }
   // r2：pending_config 用户侧口径——「数据服务暂不可用…当前不生成数据、估算或结论。」
-  check('「数据服务暂不可用」出现（每项，≥4 次）', (foldText.match(/数据服务暂不可用/g) || []).length >= 4);
-  check('「当前不生成数据、估算或结论」出现（含 hint，≥4 次）', (foldText.match(/当前不生成数据、估算或结论/g) || []).length >= 4);
+  check('「数据服务暂不可用」出现（每项，≥3 次）', (foldText.match(/数据服务暂不可用/g) || []).length >= 3);
+  check('「当前不生成数据、估算或结论」出现（含 hint，≥3 次）', (foldText.match(/当前不生成数据、估算或结论/g) || []).length >= 3);
   check('用户页面零凭据变量名', !/YOUTUBE_API_KEY|DATAFORSEO_|TIKTOK_CLIENT|SERPER_API_KEY/.test(foldText));
   check('无时间戳（不含日期格式）', !/\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/.test(foldText));
   check('无「待核实」徽章', !foldText.includes('待核实'));

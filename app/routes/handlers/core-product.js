@@ -19,6 +19,7 @@ const db = require('../../services/db.js');
 const BrandStore = require('../../services/brand-store.js');
 const BrandSvc = require('../../services/brand-service.js');
 const ReportSvc = require('../../services/report-service.js');
+const MemView = require('../../services/memory-view.js'); // SC-05：时序事件最小接入（只读投影）
 
 function tidOf(ctx, req) {
   const ap = ctx.getAuthPayload(req);
@@ -71,36 +72,6 @@ async function brandDetail(ctx, req, res, url, p) {
   return true;
 }
 
-async function brandTimeline(ctx, req, res, url, p) {
-  const tid = tidOf(ctx, req);
-  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
-  const brandId = String(p.split('/')[3] || '');
-  const brand = brandInTenant(tid, brandId);
-  if (!brand) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
-  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
-  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
-  const link = BrandStore.getLink(tid, brand.brandId, rp.projectId);
-  if (!link) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_IN_PROJECT', message: '该品牌未关联到当前项目。' }); return true; }
-  let comp = null;
-  if (link.competitorRef) {
-    const st = BrandSvc.loadProjectState(tid, rp.projectId);
-    comp = BrandSvc.findCompetitor(st, link.competitorRef);
-  }
-  BrandSvc.rebuildTimeline(tid, brand.brandId, rp.projectId, comp);
-  const kind = q(url, 'kind'); const nature = q(url, 'nature');
-  const from = q(url, 'from'); const to = q(url, 'to');
-  const limit = Math.max(1, Math.min(Number(q(url, 'limit')) || 50, 200));
-  const events = BrandSvc.timelineView(tid, brand.brandId, { kind, nature, from, to, limit });
-  ctx.sendJSON(res, 200, {
-    brandId: brand.brandId,
-    projectId: rp.projectId,
-    firstObservedAt: BrandSvc.firstObservedAt(tid, brand.brandId),
-    note: '无历史存档接入：只展示 Vantage 开始观察之后的记录，不暗示拥有更早历史。',
-    events,
-  });
-  return true;
-}
-
 async function brandCoverage(ctx, req, res, url, p) {
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
@@ -140,6 +111,10 @@ async function intelligence(ctx, req, res, url) {
     projectId: rp.projectId, items, count: items.length,
     // r4.10：项目级建设中维度（未接入维度不再混入 items，改由本字段独立承载）
     constructionDimensions: BrandSvc.constructionDimensions(tid, rp.projectId, selectedBrand ? selectedBrand.brandId : null),
+    // SC-05：项目级「时序变化」事件（derived_timeline_events 投影）。
+    // 独立字段承载：items 仍是采集观察（SC-04 语义不变），memory 事件是确定性派生，
+    // 二者不混排——避免把「系统推导」伪装成「来源直接记录」。
+    memoryEvents: MemView.buildProjectMemoryEvents(tid, rp.projectId, { brandId, from: q(url, 'from'), to: q(url, 'to') }),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,
@@ -157,7 +132,10 @@ async function opportunities(ctx, req, res, url) {
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const view = ReportSvc.buildOpportunities(tid, rp.projectId);
-  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId }, view));
+  // SC-05：机会判断的数据基础补「可用历史跨度」与「本次使用的时间范围」
+  let historyBasis = null;
+  try { historyBasis = MemView.projectHistoryBasis(tid, rp.projectId); } catch (e) { historyBasis = null; }
+  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis }, view));
   return true;
 }
 
@@ -218,7 +196,7 @@ async function reportDetail(ctx, req, res, url, p) {
 }
 
 module.exports = {
-  brandsList, brandDetail, brandTimeline, brandCoverage,
+  brandsList, brandDetail, brandCoverage,
   intelligence, opportunities,
   reportsList, reportsCreate, reportDetail,
 };
