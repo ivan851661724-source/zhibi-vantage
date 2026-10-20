@@ -284,10 +284,25 @@ async function executeJob(job) {
     try { chk = adapter.supports ? adapter.supports(brandCtx) : chk; } catch (e) { chk = { supported: true }; }
     if (chk && chk.supported === false) { providerResults.push({ code, skipped: true, reason: chk.reasonCode || 'unsupported' }); return { skipped: true }; }
     let r = null;
-    try { r = await adapter.collect(runCtx); }
-    catch (e) {
+    try {
+      // SC-06 修复：attempt 级超时护栏。fetchPage 挂死（对方慢速滴漏字节）
+      // 曾让 adapter.collect 永不返回、永久占用 worker——所有后续采集饿死。
+      // 超时按「来源暂不可达」诚实落终态（INTERNAL_COLLECT_TIMEOUT 分类由
+      // failAttempt 走 unavailable 文案，不伪装成功也不暴露内部栈）。
+      const COLLECT_TIMEOUT_MS = Number(process.env.ZB_COLLECT_TIMEOUT_MS) || 10 * 60 * 1000;
+      let timer = null;
+      r = await Promise.race([
+        adapter.collect(runCtx),
+        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('collect_timeout')), COLLECT_TIMEOUT_MS); }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+    } catch (e) {
       if (e && e.fenced) return { fenced: true };
       executed.push(code);
+      if (String(e && e.message || e) === 'collect_timeout') {
+        // 超时 → 沿「链耗尽」路径落统一 failed 终态（unavailable 文案）
+        providerResults.push({ code, failed: true, errorClass: 'unavailable', error: 'collect_timeout' });
+        return { providerFailed: true };
+      }
       providerResults.push({ code, failed: true, error: String(e && e.message || e).slice(0, 120) });
       return { providerFailed: true };
     }

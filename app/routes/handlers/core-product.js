@@ -19,7 +19,8 @@ const db = require('../../services/db.js');
 const BrandStore = require('../../services/brand-store.js');
 const BrandSvc = require('../../services/brand-service.js');
 const ReportSvc = require('../../services/report-service.js');
-const MemView = require('../../services/memory-view.js'); // SC-05：时序事件最小接入（只读投影）
+const MemView = require('../../services/memory-view.js');
+const VoiceUnified = require('../../services/voice-unified.js'); // SC-05：时序事件最小接入（只读投影）
 
 function tidOf(ctx, req) {
   const ap = ctx.getAuthPayload(req);
@@ -115,6 +116,9 @@ async function intelligence(ctx, req, res, url) {
     // 独立字段承载：items 仍是采集观察（SC-04 语义不变），memory 事件是确定性派生，
     // 二者不混排——避免把「系统推导」伪装成「来源直接记录」。
     memoryEvents: MemView.buildProjectMemoryEvents(tid, rp.projectId, { brandId, from: q(url, 'from'), to: q(url, 'to') }),
+    // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径；
+    // 独立字段，不与采集观察 items 混排）
+    voiceChanges: VoiceUnified.buildProjectVoiceSummary(tid, rp.projectId, { brandId }),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,

@@ -1,6 +1,8 @@
 'use client';
-// 竞品库（SC-04 UI 框架轮）：品牌数据库入口——覆盖状态徽章 / 最近成功观察 /
-// 最近有证据动态 / 维度与缺口计数 / 搜索与筛选 / 三种空状态分别表达。
+// 竞品数据库（SC-06 一）：项目内竞争品牌的统一数据库首页——官网确认状态 /
+// 数据覆盖 / 最近可核验变化 / 时间积累起点，逐项可核。
+// SC-06 信息架构：原「竞品库」列表即竞品数据库首页（不新建重复一级页面）；
+// /brands 深链接与旧 URL 完全兼容。
 // 术语纪律：「尚未采集」不写成「没有数据」；「未接入」不写成「未发现」。
 import Link from 'next/link';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
@@ -12,7 +14,7 @@ import { EmptyState } from '@/components/core-ui';
 
 export default function BrandsPage() {
   return (
-    <Suspense fallback={<p className="hint">加载竞品库…</p>}>
+    <Suspense fallback={<p className="hint">加载竞品数据库…</p>}>
       <BrandsInner />
     </Suspense>
   );
@@ -85,15 +87,15 @@ function BrandsInner() {
   const hasFilter = !!(kw.trim() || cover || rel);
 
   if (!projectId) return <p className="hint">请先创建或选择项目（右上角可切换项目）。</p>;
-  if (loading) return <p className="hint">加载竞品库…</p>;
+  if (loading) return <p className="hint">加载竞品数据库…</p>;
   if (err) return <p className="core-err">{err}</p>;
 
   return (
     <div className="core-brands">
       <div className="page-head">
         <div>
-          <h2>竞品库</h2>
-          <p className="desc">项目内全部竞争品牌的统一档案：数据覆盖到什么程度、最近观察到什么，逐项可核。</p>
+          <h2>竞品数据库</h2>
+          <p className="desc">项目内全部竞争品牌的统一数据库：官网确认状态、数据覆盖、最近可核验变化与时间积累起点，逐项可核。</p>
         </div>
         <Link className="btn-ghost" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>
       </div>
@@ -142,9 +144,11 @@ function BrandsInner() {
                   <span className={`core-cover-badge core-cover-${cs}`}>{BRAND_COVER_TEXT[cs]}</span>
                 </div>
                 <div className="core-brand-cov">
+                  <span className={'core-site-badge core-site-' + (b.officialSite ? b.officialSite.status : 'not_collected')}>{b.officialSite ? b.officialSite.statusText : '官网未采集'}</span>
                   <span>有数据 {b.coverageSummary.dimensionsWithData}/{b.coverageSummary.totalDimensions} 维度</span>
                   <span>资料缺口 {b.gaps.length} 项</span>
                   <span>最近成功观察：{b.lastObservedAt ? new Date(b.lastObservedAt).toLocaleString() : '尚未采集'}</span>
+                  <span>时间积累起点：{b.firstObservedAt ? new Date(b.firstObservedAt).toLocaleDateString() : '尚无记录'}</span>
                 </div>
                 {b.lastChange ? (
                   <p className="core-brand-change">最近动态：{b.lastChange.title || b.lastChange.kindText}（{new Date(b.lastChange.at).toLocaleString()}）</p>

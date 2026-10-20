@@ -12,7 +12,7 @@ import { IntelProfile } from '@/components/intel-profile';
 import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
-import { fetchIntelligence, type ConstructionDimension, type IntelItem, type MemoryEventItem } from '@/lib/core-api';
+import { fetchIntelligence, type ConstructionDimension, type IntelItem, type MemoryEventItem, type VoiceChangeItem } from '@/lib/core-api';
 import { intelSummary } from '@/lib/core-logic';
 
 const INTEL_TYPES: { value: string; label: string }[] = [
@@ -47,6 +47,8 @@ function IntelInbox({ projectId }: { projectId: string }) {
   const [construction, setConstruction] = useState<ConstructionDimension[]>([]);
   // SC-05：项目级时序变化事件（后端独立字段；与采集观察分开呈现，不把推导当直接观察）
   const [memoryEvents, setMemoryEvents] = useState<MemoryEventItem[]>([]);
+  // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径，独立区块）
+  const [voiceChanges, setVoiceChanges] = useState<VoiceChangeItem[]>([]);
 
   // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
   // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
@@ -69,7 +71,7 @@ function IntelInbox({ projectId }: { projectId: string }) {
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setVoiceChanges(r.voiceChanges || []); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
@@ -138,6 +140,42 @@ function IntelInbox({ projectId }: { projectId: string }) {
                   <Link className="core-mem-event-link" href={`/brands/${encodeURIComponent(ev.link.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=products`}>
                     在品牌档案查看 →
                   </Link>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {voiceChanges.length ? (
+        <section className="core-voice-changes">
+          <h3>用户声音与公开评论（统一读模型）</h3>
+          <p className="hint">
+            只有一套口径：公开评论页采集（来源 URL + 快照与证据引用 + 观察时间）。
+            样本不足的品牌只列状态，不做「满意/不满意」群体结论。
+          </p>
+          <ul className="core-voice-changes-list">
+            {voiceChanges.map(v => (
+              <li key={v.brandId}>
+                <div className="core-voice-changes-top">
+                  <Link href={`/brands/${encodeURIComponent(v.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=voice`}>{v.brandName || v.brandId}</Link>
+                  {v.status === 'sufficient' ? (
+                    <span>样本 {v.sampleSize} 条 · {v.sourceCount} 个来源页</span>
+                  ) : (
+                    <span className="hint">资料不足，暂不形成群体结论。</span>
+                  )}
+                </div>
+                {v.recentItems.length ? (
+                  <ul className="core-voice-changes-items">
+                    {v.recentItems.map((it, i) => (
+                      <li key={i}>
+                        {it.sourceUrl ? <a href={it.sourceUrl} target="_blank" rel="noopener noreferrer nofollow">{it.title || it.sourceUrl}</a> : (it.title || '公开评论页')}
+                        {typeof it.rating === 'number' ? <span> · 评分 {it.rating}</span> : null}
+                        {typeof it.reviewCount === 'number' ? <span> · {it.reviewCount} 条评价</span> : null}
+                        <span className="hint">（观察 {String(it.observedAt || '').slice(0, 10) || '—'}）</span>
+                      </li>
+                    ))}
+                  </ul>
                 ) : null}
               </li>
             ))}

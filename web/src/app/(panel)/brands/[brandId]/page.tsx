@@ -22,13 +22,16 @@ import { ProductMemoryList, type EvidenceRef } from '@/components/memory/price-t
 import { MemoryTimelineList } from '@/components/memory/memory-timeline';
 import { CoverageLegend, CoverageTimeline } from '@/components/memory/coverage-timeline';
 import { BackfillCard } from '@/components/memory/backfill-card';
+import { VoicePanel } from '@/components/brand/voice-panel';
 
+// SC-06 一：品牌长期数据库分区（六区块对齐任务书；reports 为附加入口）
 const TABS: { key: string; label: string }[] = [
   { key: 'overview', label: '概览' },
-  { key: 'products', label: '商品与价格' },
-  { key: 'timeline', label: '历史时间线' },
+  { key: 'timeline', label: '时间线' },
+  { key: 'products', label: '官网与商品' },
+  { key: 'voice', label: '用户声音与公开评论' },
+  { key: 'intel', label: '内容与广告' },
   { key: 'coverage', label: '数据覆盖与来源' },
-  { key: 'intel', label: '相关情报' },
   { key: 'reports', label: '相关报告' },
 ];
 
@@ -102,11 +105,11 @@ function BrandDetailInner() {
     router.replace(`/brands/${brandId}?${qs.toString()}`, { scroll: false });
   }
 
-  if (!projectId) return <p className="core-err">缺少项目参数：请从竞品库进入品牌详情。</p>;
+  if (!projectId) return <p className="core-err">缺少项目参数：请从竞品数据库进入品牌详情。</p>;
   if (err) return (
     <div>
       <p className="core-err">{err}</p>
-      <p className="hint"><Link href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品库</Link></p>
+      <p className="hint"><Link href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品数据库</Link></p>
     </div>
   );
   if (!d) return <p className="hint">加载品牌档案…</p>;
@@ -128,7 +131,7 @@ function BrandDetailInner() {
 
   return (
     <div className="core-brand-detail">
-      <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品库</Link></p>
+      <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品数据库</Link></p>
       <h2>{b.name}</h2>
 
       <nav className="core-tabs" role="tablist" aria-label="品牌档案分区">
@@ -150,7 +153,7 @@ function BrandDetailInner() {
         <section className="core-sec">
           <h3>概览</h3>
           <ul>
-            <li>官网：{b.officialDomain || '未核实'}</li>
+            <li>官网：{b.officialDomain || '未核实'}{d.officialSite ? <span className={'core-site-badge core-site-' + d.officialSite.status}>（{d.officialSite.statusText}）</span> : null}</li>
             <li>市场：{b.market || '—'}　品类：{b.category || '—'}</li>
             <li>关系：{b.relation || '竞品'}</li>
             <li>开始观察：{b.firstObservedAt ? new Date(b.firstObservedAt).toLocaleString() : '尚未采集'}</li>
@@ -165,7 +168,31 @@ function BrandDetailInner() {
 
       {tab === 'products' && (
         <section className="core-sec">
-          <h3>商品与价格</h3>
+          <h3>官网与商品</h3>
+          {d.officialSite ? (
+            <div className={'core-site-status core-site-' + d.officialSite.status}>
+              {d.officialSite.status === 'confirmed' ? (
+                <>
+                  <b>官网已确认</b>
+                  <p className="hint">
+                    {d.officialSite.canonical ? <>确认地址：<a href={d.officialSite.canonical} target="_blank" rel="noopener noreferrer nofollow">{d.officialSite.canonical}</a>　</> : null}
+                    {d.officialSite.lastCollectedAt ? <>采集时间：{new Date(d.officialSite.lastCollectedAt).toLocaleString()}　</> : null}
+                    确认依据：公开页面成功采集（含快照与证据引用）。
+                  </p>
+                </>
+              ) : d.officialSite.status === 'unavailable' ? (
+                <>
+                  <b>官网来源暂不可达</b>
+                  <p className="hint">最近一次官网采集未成功，稍后可重试；此状态不代表官网不存在或不支持。</p>
+                </>
+              ) : (
+                <>
+                  <b>官网资料未采集</b>
+                  <p className="hint">还没有对官网公开资料发起过采集；可在「数据覆盖与来源」中发起。</p>
+                </>
+              )}
+            </div>
+          ) : null}
           {rangePicker}
           {loadErr ? <p className="core-err">{loadErr}</p> : null}
           {mem ? <ProductMemoryList facts={mem.facts} onEvidence={setEvRefs} /> : <p className="hint">加载中…</p>}
@@ -198,9 +225,15 @@ function BrandDetailInner() {
         </section>
       )}
 
+      {tab === 'voice' && (
+        <section className="core-sec">
+          <VoicePanel voice={d.unifiedVoice} onEvidence={setEvRefs} />
+        </section>
+      )}
+
       {tab === 'timeline' && (
         <section className="core-sec">
-          <h3>历史时间线</h3>
+          <h3>时间线</h3>
           {rangePicker}
           {loadErr ? <p className="core-err">{loadErr}</p> : null}
           {tl ? <MemoryTimelineList data={tl} onEvidence={setEvRefs} /> : <p className="hint">加载中…</p>}
@@ -240,10 +273,26 @@ function BrandDetailInner() {
 
       {tab === 'intel' && (
         <section className="core-sec">
-          <h3>相关情报</h3>
-          <IntelList items={d.intelligence || []} />
+          <h3>内容与广告</h3>
+          {(() => {
+            const dims = (d.coverage && d.coverage.dimensions || []).filter(x => x.code === 'social_content' || x.code === 'ad_campaigns');
+            if (!dims.length) return <p className="hint">尚无内容与广告维度的覆盖状态。</p>;
+            return (
+              <ul className="core-voice-limits">
+                {dims.map(x => (
+                  <li key={x.code}>
+                    <b>{x.displayName}</b>：{x.stateText}
+                    {x.notes && x.notes.length ? <span className="hint">（{x.notes.join('；')}）</span> : null}
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
           <p className="hint">
-            <Link href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>在情报库中查看该品牌的全部情报 →</Link>
+            社媒内容与广告活动维度由系统数据服务承载：凭据可用并通过真实验证后，这里会展示公开内容与广告素材的可核验观察；当前不生成数据、估算或结论。
+          </p>
+          <p className="hint">
+            <Link href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>在情报库中查看该品牌的全部动态 →</Link>
           </p>
         </section>
       )}

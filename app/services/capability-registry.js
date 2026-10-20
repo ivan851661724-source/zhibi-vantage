@@ -86,6 +86,59 @@ const CAPABILITIES = Object.freeze([
     refreshPolicy: { cooldownMinutes: 5, dailyQuota: null },
   },
   {
+    // SC-06 二：通用官网公开资料（canonical/标题/简介/OpenGraph/JSON-LD
+    // Organization），与 shopify_catalog 分离——Shopify 目录接口不可用时
+    // 官网资料仍可独立采集与确认。公开网页抓取：无凭据，走同一安全门
+    // （Net.fetchPage：SSRF/DNS rebinding/FetchGate/robots/逐跳重定向校验）。
+    // maturity=ga 的依据：SC-06 r1 已对公开非 Shopify 官网完成一次真实
+    // 成功采集（真实 Snapshot+Evidence，见 SC-06 交付报告 §真实采集验证）。
+    code: 'official_site_profile',
+    displayName: '官网资料（公开页面）',
+    dimension: 'website_products',
+    adapter: 'official_site_profile',
+    adapters: ['official_site_profile'],
+    provider: 'public_site_profile_fetch',
+    supportedObjects: { objectTypes: ['official_domain'], platforms: ['public_web'], markets: 'public_web' },
+    access: 'public_web_page',
+    requiresServerCredential: false,
+    measurementMethod: 'public_source_observation',
+    manualRefresh: true,
+    autoInspect: false,
+    freshnessSlaHours: 72,
+    maturity: 'ga',
+    limitations: '仅展示公开页面真实出现的内容：canonical、站点标题、品牌简介、OpenGraph 与 JSON-LD 公开的组织信息；不从文案/结构推断销量、GMV、转化率、广告花费或用户画像（00 §17 冻结）',
+    costAttributionKey: 'infra.official_site_profile',
+    collectorVersion: 'net-1',
+    parserVersion: 'site-profile-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 30, dailyQuota: null },
+  },
+  {
+    // SC-06 二：公开商品页发现与公开价格/评分观察（非 Shopify 目录接口）。
+    // 发现路径：JSON-LD Product → robots 声明的 sitemap → 首页内链商品 URL；
+    // 只记录公开页面实际出现的价格/币种/评分/评价数，每条带来源 URL 与快照。
+    code: 'public_site_products',
+    displayName: '官网公开商品（非目录接口）',
+    dimension: 'website_products',
+    adapter: 'official_site_products',
+    adapters: ['official_site_products'],
+    provider: 'public_site_products_fetch',
+    supportedObjects: { objectTypes: ['official_domain'], platforms: ['public_web'], markets: 'public_web' },
+    access: 'public_web_page',
+    requiresServerCredential: false,
+    measurementMethod: 'public_source_observation',
+    manualRefresh: true,
+    autoInspect: false,
+    freshnessSlaHours: 72,
+    maturity: 'ga',
+    limitations: '仅展示公开商品页实际出现的名称/价格/币种/评分/评价数（JSON-LD 公开字段）与可安全识别的商品 URL；样本受发现路径限制并明示；不推断销量与转化（00 §17 冻结）',
+    costAttributionKey: 'infra.public_site_products',
+    collectorVersion: 'net-1',
+    parserVersion: 'site-profile-1',
+    adapterStrategy: 'single',
+    refreshPolicy: { cooldownMinutes: 30, dailyQuota: null },
+  },
+  {
     // Wave 1：YouTube 官方 Data API v3 公开内容（官方 REST 契约直连，零 npm 依赖）。
     // pending_config：结构/契约就绪，凭据（YOUTUBE_API_KEY）真实可用并完成一次
     // 真实 staging 成功请求前，禁止升级 ga（live-source-smoke 负责验证）。
@@ -227,7 +280,16 @@ function supportsForBrand(capabilityCode, brandCtx) {
   const b = brandCtx || {};
   if (cap.code === 'shopify_catalog' || cap.code === 'shopify_collections') {
     if (!b.url) return { supported: false, reasonCode: 'not_applicable', reasonText: '该品牌没有可采集的官网地址' };
-    if (!b.isShopify) return { supported: false, reasonCode: 'not_supported', reasonText: '该官网暂未识别出 Shopify 公开目录接口，此维度暂不支持' };
+    if (!b.isShopify) {
+      // SC-06：专项目录接口不可用 ≠「官网不支持」。官网资料能力独立存在，
+      // 这里只如实说明 Shopify 公开商品目录接口这一专项能力当前不可用。
+      return { supported: false, reasonCode: 'not_supported', reasonText: 'Shopify 公开商品目录不可用' };
+    }
+    return { supported: true, reasonCode: null, reasonText: null };
+  }
+  if (cap.code === 'official_site_profile' || cap.code === 'public_site_products') {
+    // 通用官网公开页面能力：任何有官网地址的品牌都可尝试（不要求 Shopify）
+    if (!b.url) return { supported: false, reasonCode: 'not_applicable', reasonText: '该品牌没有可采集的官网地址' };
     return { supported: true, reasonCode: null, reasonText: null };
   }
   return { supported: false, reasonCode: 'not_supported', reasonText: '该能力暂不支持此对象类型' };

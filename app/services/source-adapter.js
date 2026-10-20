@@ -115,6 +115,9 @@ const SUMMARY_KINDS = Object.freeze({
   trend_series: ['dataforseo_trends'],
   ad_creatives: ['tiktok_commercial_content'],
   reviews_digest: ['public_reviews'],
+  // SC-06：通用官网公开资料形状（与 Shopify 目录摘要严格分离）
+  official_site_profile: ['official_site_profile'],
+  official_site_products: ['public_site_products'],
 });
 
 // normalize 输出 outcome 冻结词表（§七.2：词表外一律拒绝）
@@ -471,6 +474,14 @@ function recordIdentity(ctx, ident, outcome, evidenceIds, snapshotIds) {
 }
 
 // 幂等开 attempt（handler 202+持久任务场景由 collect-jobs 传入 attemptId）
+// SC-06：fetchPage 失败 → 用户文案分类（blocked=robots/SSRF 主动拒绝；
+// 其余网络类=来源暂不可达；两者都不伪装成「官网不支持」）
+function AdaptersClassify(fr) {
+  const err = String((fr && fr.error) || '');
+  if (/ROBOTS_DISALLOWED|SSRF_BLOCKED|FETCH_CIRCUIT_OPEN/.test(err)) return 'blocked';
+  return 'unreachable';
+}
+
 function openAttempt(ctx, capability) {
   const cap = Registry.getCapability(capability);
   let attemptId = ctx.attemptId || null;
@@ -824,6 +835,8 @@ const TT_SUPPORTED_COUNTRIES = TikTokAdLib.SUPPORTED_COUNTRIES;
 const TT_COUNTRY_COUNT = TikTokAdLib.COUNTRY_COUNT;
 
 const REV_ADAPTER_VERSION = 'reviews-adapter-1';
+// SC-06：通用官网公开资料解析器（零 IO；网络由 Net.fetchPage 完成）
+const SiteProfile = require('../research/site-profile.js');
 
 // 失败文案（Wave 1 定制：配置缺失是系统状态，不是来源拒绝；04 §20 产品化）
 const WAVE1_FAILURE_TEXT = Object.freeze({
@@ -1710,10 +1723,324 @@ const reviewsAdapter = {
   },
 };
 
+// ============================================================
+// SC-06 二：通用官网公开资料 adapter（非 Shopify 目录接口）
+// ------------------------------------------------------------
+// 只采集公开页面真实出现的内容（canonical/标题/简介/OG/JSON-LD
+// Organization）；网络全部经 Net.fetchPage（SSRF/DNS rebinding/
+// FetchGate/robots/逐跳重定向校验/快照落账）。失败如实登记，
+// 不从文案或结构猜测销量、GMV、转化、广告花费或用户画像。
+// ============================================================
+const OSITE_VERSION = 'official-site-1';
+
+const officialSiteProfileAdapter = {
+  code: 'official_site_profile',
+  displayName: '官网资料（公开页面）',
+  version: OSITE_VERSION,
+  summaryKinds: ['official_site_profile'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('official_site_profile', brandCtx);
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'public_web',
+      officialDomain: d || null,
+      platformAccountId: d || null,
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: OSITE_VERSION,
+    };
+  },
+
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const prof = res.profile || {};
+    const canonical = prof.canonical || null;
+    const observations = [{
+      id: 'official_site_profile',
+      title: prof.siteName || prof.title || null,
+      price: null, currency: null, available: true,
+      publishedAt: null,
+      snippet: prof.brandIntro ? String(prof.brandIntro).slice(0, 200) : null,
+      sourceUrl: canonical,
+    }];
+    return {
+      capability: 'official_site_profile', dimension: 'website_products',
+      outcome: 'success',
+      observations,
+      summary: {
+        kind: 'official_site_profile',
+        canonical: canonical,
+        siteName: prof.siteName || null,
+        pageTitle: prof.title || null,
+        brandIntro: prof.brandIntro || null,
+        hasOpenGraph: !!(prof.og && (prof.og.title || prof.og.description || prof.og.siteName)),
+        hasOrganization: !!(prof.organization && prof.organization.name),
+        organizationName: prof.organization ? prof.organization.name : null,
+        sameAsCount: prof.organization && Array.isArray(prof.organization.sameAs) ? prof.organization.sameAs.length : 0,
+        measurementMethod: 'public_source_observation',
+        methodologyVersion: OSITE_VERSION,
+        parserVersion: prof.parserVersion || SITE_PROFILE_PARSER_VERSION,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'public_web', evidenceProvider: 'public_site_profile_fetch',
+      claimField: 'site.profile', claimScope: 'public_site_profile_observation',
+      entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
+      entityRef: { kind: 'official_site', domain: ident.officialDomain || null },
+      extractedValue: {
+        summaryKind: 'official_site_profile',
+        canonical, siteName: prof.siteName || null,
+        hasOrganization: !!(prof.organization && prof.organization.name),
+      },
+      parserVersion: OSITE_VERSION,
+      note: 'official site public profile (robots-respecting fetch; raw homepage snapshot)',
+      sourceUrl: canonical,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'official_site_profile');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+    if (!comp.url) return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌没有可采集的官网地址。' });
+
+    // 首页抓取：SSRF/FetchGate/robots/重定向全在 Net.fetchPage 内强制执行
+    const fr = await Net.fetchPage(comp.url, 15000, { trigger, tenantId: ctx.tenantId, includeHtml: true });
+    if (!fr || fr.ok !== true) {
+      const cls = AdaptersClassify(fr);
+      return failAttempt(ctx, { ok: false, error: fr && fr.error || 'unavailable', snapshotId: fr && fr.snapshotId },
+        { errorUserText: cls === 'blocked' ? '对方官网拒绝了本次访问。' : '来源暂不可达，稍后可重试。' });
+    }
+    const snapshotIds = [];
+    if (fr.snapshotId) snapshotIds.push(fr.snapshotId);
+    const profile = SiteProfile.parseSiteProfile(fr.html || '', fr.url || comp.url);
+    if (!profile.observed.hasTitle && !profile.observed.hasCanonical && !profile.observed.hasIntro) {
+      // 页面取到但没有任何可解析的公开资料：诚实空结果（非失败）
+      const res = { ok: true, profile: { parserVersion: profile.parserVersion, canonical: null, title: null, siteName: null, brandIntro: null, og: {}, organization: null, products: [], observed: profile.observed }, snapshotIds, sourceUrl: fr.url || null };
+      const out = this.normalize(res, ctx);
+      if (suppress) return { providerOk: true, ident, raw: res, out };
+      let fin;
+      try { fin = await finalizeOutput(ctx, res, out); }
+      catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+      if (fin.invalid || fin.evidenceFailed) return fin;
+      return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey, emptyWindow: true });
+    }
+    const res = { ok: true, profile, snapshotIds, sourceUrl: profile.canonical || fr.url || null };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    try { recordIdentity(ctx, ident, 'success', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString() };
+  },
+};
+
+// SC-06 二：公开商品页发现（非目录接口）。发现路径依次：
+//   ① 首页 JSON-LD Product；② robots 声明的 sitemap（含 1 层 index 展开）；
+//   ③ 首页内链商品 URL。商品页只读取 JSON-LD 公开的名称/价格/币种/评分。
+const officialSiteProductsAdapter = {
+  code: 'official_site_products',
+  displayName: '官网公开商品（非目录接口）',
+  version: OSITE_VERSION,
+  summaryKinds: ['official_site_products'],
+
+  supports(brandCtx) {
+    return Registry.supportsForBrand('public_site_products', brandCtx);
+  },
+
+  resolveIdentity(brandCtx) {
+    const b = brandCtx || {};
+    const d = Net.domainOf(b.url || '');
+    return {
+      platform: 'public_web',
+      officialDomain: d || null,
+      platformAccountId: d || null,
+      identityStatus: 'unresolved',
+      originNote: null,
+      resolverVersion: OSITE_VERSION,
+    };
+  },
+
+  normalize(raw, ctx) {
+    const res = raw || {};
+    const ident = this.resolveIdentity({ url: ctx.competitor && ctx.competitor.url });
+    const products = (Array.isArray(res.products) ? res.products : []).slice(0, SurfaceStore.OBSERVATION_CAP).map(p => ({
+      id: String(p.url || p.name || ''),
+      title: String(p.name || '').slice(0, 120),
+      price: typeof p.price === 'number' ? p.price : null,
+      currency: p.currency || null,
+      available: p.availability ? !/outofstock|soldout|discontinued/i.test(p.availability) : true,
+      publishedAt: null,
+      rating: typeof p.rating === 'number' ? p.rating : null,
+      reviewCount: typeof p.reviewCount === 'number' ? p.reviewCount : null,
+      snippet: null,
+      sourceUrl: p.url || null,
+    }));
+    const partial = !!res.partialScan;
+    return {
+      capability: 'public_site_products', dimension: 'website_products',
+      outcome: partial ? 'partial' : 'success',
+      observations: products,
+      summary: {
+        kind: 'official_site_products',
+        productCount: products.length,
+        priceObservedCount: products.filter(p => p.price != null).length,
+        currencies: res.currencies || [],
+        ratingObservedCount: products.filter(p => p.rating != null).length,
+        discoveryPath: res.discoveryPath || null, // 'jsonld' | 'sitemap' | 'homepage_links' | null
+        urlCandidatesFound: res.urlCandidatesFound != null ? res.urlCandidatesFound : null,
+        measurementMethod: 'public_source_observation',
+        methodologyVersion: OSITE_VERSION,
+        sampleNote: '样本为公开页面可安全识别的商品（发现路径受限），非全量商品清单，不推断销量',
+        partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+      },
+      snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
+      currency: (res.currencies && res.currencies.length === 1) ? res.currencies[0] : null,
+      currencySnapshotId: null, currencyStatus: (res.currencies && res.currencies.length === 1) ? 'confirmed' : 'unknown',
+      identityStatus: 'unresolved',
+      evidenceSource: 'public_web', evidenceProvider: 'public_site_products_fetch',
+      claimField: 'site.products', claimScope: 'public_site_products_observation',
+      entityKey: ident.officialDomain || (ctx.competitor && ctx.competitor.url) || null,
+      entityRef: { kind: 'official_site_products', domain: ident.officialDomain || null },
+      extractedValue: {
+        summaryKind: 'official_site_products',
+        productCount: products.length,
+        priceObservedCount: products.filter(p => p.price != null).length,
+        discoveryPath: res.discoveryPath || null,
+      },
+      parserVersion: OSITE_VERSION,
+      note: 'public product pages (robots-respecting fetch; per-page raw snapshots)',
+      sourceUrl: res.sourceUrl || null,
+    };
+  },
+
+  async collect(ctx) {
+    const comp = ctx.competitor || {};
+    const trigger = ctx.trigger === 'schedule' ? 'schedule' : 'manual';
+    const suppress = !!ctx.suppressTerminal;
+    const opened = suppress ? { deduped: false, attemptId: ctx.attemptId } : openAttempt(ctx, 'public_site_products');
+    if (opened.deduped) return { deduped: true, attempt: opened.attempt };
+    ctx.attemptId = opened.attemptId;
+    const ident = this.resolveIdentity({ url: comp.url });
+    try { if (!suppress) recordIdentity(ctx, ident, 'unconfirmed', [], []); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; }
+    if (!comp.url) return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌没有可采集的官网地址。' });
+
+    const snapshotIds = [];
+    const fetchOpts = { trigger, tenantId: ctx.tenantId, includeHtml: true };
+    const home = await Net.fetchPage(comp.url, 15000, fetchOpts);
+    if (!home || home.ok !== true) {
+      return failAttempt(ctx, { ok: false, error: home && home.error || 'unavailable', snapshotId: home && home.snapshotId },
+        { errorUserText: '来源暂不可达，稍后可重试。' });
+    }
+    if (home.snapshotId) snapshotIds.push(home.snapshotId);
+    const homeProfile = SiteProfile.parseSiteProfile(home.html || '', home.url || comp.url);
+    let products = homeProfile.products.slice();
+    let discoveryPath = products.length ? 'jsonld' : null;
+    let urlCandidatesFound = products.length;
+    let partialScan = false; let partialScanReason = null;
+
+    // ② robots sitemap 路径：首页商品不足时展开（robots + sitemap 各限 1 跳 index + 1 个子文件）
+    if (products.length < 3) {
+      const robotsUrl = new URL('/robots.txt', home.url || comp.url).toString();
+      const rb = await Net.fetchPage(robotsUrl, 10000, { trigger, tenantId: ctx.tenantId });
+      if (rb && rb.ok === true) {
+        if (rb.snapshotId) snapshotIds.push(rb.snapshotId);
+        const smUrls = SiteProfile.parseSitemapsFromRobots(rb.htmlLower || rb.text || '');
+        if (smUrls.length) {
+          let sm = await Net.fetchPage(smUrls[0], 15000, fetchOpts);
+          if (sm && sm.ok === true) {
+            if (sm.snapshotId) snapshotIds.push(sm.snapshotId);
+            let locs = SiteProfile.parseSitemapLocs(sm.html || '');
+            // sitemap index：按序展开子 sitemap 直到发现商品 URL（上限 8 个子文件，
+            // 防爬取面失控——多区域站点的首个子文件常是无关区域语言区）
+            let urls = SiteProfile.sampleProductUrls(locs);
+            if (!urls.length) {
+              // 并发抓取子 sitemap（上限 8，抓取面与串行一致；FetchGate 同域节流仍生效），
+              // 取首个发现商品 URL 的子文件——多区域站点子文件顺序无关商品分布
+              const subIdxs = locs.filter(u => /\.xml$/i.test(u)).slice(0, 8);
+              const results = await Promise.all(subIdxs.map(async u => {
+                const r = await Net.fetchPage(u, 15000, fetchOpts);
+                if (r && r.ok === true) return { u, html: r.html, snapshotId: r.snapshotId };
+                return null;
+              }));
+              for (const r of results) {
+                if (!r) continue;
+                if (r.snapshotId) snapshotIds.push(r.snapshotId);
+                if (!urls.length) urls = SiteProfile.sampleProductUrls(SiteProfile.parseSitemapLocs(r.html || ''));
+              }
+            }
+            urlCandidatesFound = Math.max(urlCandidatesFound, urls.length);
+            if (urls.length) {
+              discoveryPath = discoveryPath || 'sitemap';
+              // 逐页抓取上限 12：公开观察抽样（样本明示），不是全量枚举
+              for (const u of urls.slice(0, 12)) {
+                const pr = await Net.fetchPage(u, 12000, fetchOpts);
+                if (!pr || pr.ok !== true) { partialScan = true; partialScanReason = partialScanReason || 'some_product_pages_unreachable'; continue; }
+                if (pr.snapshotId) snapshotIds.push(pr.snapshotId);
+                const pp = SiteProfile.parseSiteProfile(pr.html || '', pr.url || u);
+                for (const p of pp.products) {
+                  if (!products.some(x => (x.url || x.name) === (p.url || p.name))) products.push(p);
+                }
+              }
+              if (urls.length > 12) { partialScan = true; partialScanReason = 'product_url_sample_limited'; }
+            }
+          }
+        }
+      }
+    }
+
+    const currencies = Array.from(new Set(products.map(p => p.currency).filter(Boolean)));
+    const res = {
+      ok: true, products, snapshotIds,
+      currencies,
+      discoveryPath, urlCandidatesFound,
+      partialScan: products.length === 0 ? false : partialScan,
+      partialScanReason: products.length === 0 ? null : partialScanReason,
+      sourceUrl: home.url || comp.url,
+    };
+    const out = this.normalize(res, ctx);
+    if (suppress) return { providerOk: true, ident, raw: res, out };
+    let fin;
+    try { fin = await finalizeOutput(ctx, res, out); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
+    if (fin.invalid || fin.evidenceFailed) return fin;
+    try { recordIdentity(ctx, ident, 'success', fin.attempt.evidenceIds, fin.attempt.snapshotIds); }
+    catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: fin.attempt }; }
+    return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey });
+  },
+
+  health() {
+    return { ok: true, adapter: this.code, version: this.version, checkedAt: new Date().toISOString() };
+  },
+};
+
 const ADAPTERS = Object.freeze({
   shopify: shopifyAdapter, shopify_collections: shopifyCollectionsAdapter,
   youtube: youtubeAdapter, dataforseo: dataforseoAdapter,
   tiktok: tiktokAdapter, reviews: reviewsAdapter,
+  official_site_profile: officialSiteProfileAdapter,
+  official_site_products: officialSiteProductsAdapter,
 });
 
 module.exports = {

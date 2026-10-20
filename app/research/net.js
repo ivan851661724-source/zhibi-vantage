@@ -97,7 +97,8 @@ async function assertPublicUrl(rawUrl) {
 async function fetchPage(url, timeoutMs, opts) {
   const o = opts || {};
   const tenant = tenantOf(o);
-  const ck = tenant ? 't:' + tenant + '|' + url : url; // P0-2：缓存键租户隔离
+  // SC-06：includeHtml 参与缓存键——先有普通缓存命中再要 HTML 会拿不到原始字节
+  const ck = (tenant ? 't:' + tenant + '|' : '') + (o.includeHtml ? 'h1|' : '') + url;
   const hit = Cache.get('fetch-page', ck);
   if (hit) return Snapshot.decorateCacheHit(hit);
   const fetchedAt = new Date().toISOString();
@@ -128,7 +129,7 @@ async function fetchPage(url, timeoutMs, opts) {
       // Wave 1：受控自定义头（如 DataForSEO Basic auth）——仅合并进请求，
       // 绝不进快照/日志/错误信息（凭据红线）；method 支持 JSON API POST。
       const extraHeaders = (o.headers && typeof o.headers === 'object') ? o.headers : {};
-      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, method: o.method || 'GET', body: o.body != null ? o.body : undefined, headers: Object.assign({ 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' }, extraHeaders) });
+      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, signal: ctrl.signal, method: o.method || 'GET', body: o.body != null ? o.body : undefined, headers: Object.assign({ 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' }, extraHeaders) });
       if (res.status >= 300 && res.status < 400 && res.headers && res.headers.location) {
         hops++;
         if (hops > 3) { const sid = recFail(Snapshot.SOURCE_STATUS.UNAVAILABLE, 'too_many_redirects', res.status, current, hops); return { ok: false, error: 'too_many_redirects', snapshotId: sid }; }
@@ -157,7 +158,10 @@ async function fetchPage(url, timeoutMs, opts) {
       else prov = s;
     } catch (e) { loggerError('fetchPage', e, url); }
     const html = buf.toString('utf8');
+    // SC-06：需要原始 HTML 解析（JSON-LD/canonical 大小写敏感）的调用方显式
+    // 声明 includeHtml；默认不返回（控制既有调用方的内存足迹）。上限 2MB。
     const out = { ok: true, url: current || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
+    if (o.includeHtml) out.html = html.slice(0, 2 * 1024 * 1024);
     Cache.set('fetch-page', ck, out);
     return out;
   } catch (e) {
@@ -311,6 +315,14 @@ async function safeRequestOnce(rawUrl, opts) {
     });
     req.on('timeout', () => req.destroy(new Error('SAFE_FETCH_TIMEOUT')));
     req.on('error', reject);
+    // SC-06 修复：上层 AbortController（fetchPage 总超时）必须能打断请求——
+    // 否则对方服务器慢速滴漏字节时 socket timeout 永不触发，请求永久挂死
+    // （SC-06 实测 VAUDE 复现：8s 超时设置下 30s 无返回）。
+    if (o.signal) {
+      const onAbort = () => req.destroy(new Error('SAFE_FETCH_ABORTED'));
+      if (o.signal.aborted) onAbort();
+      else o.signal.addEventListener('abort', onAbort, { once: true });
+    }
     // Wave 1：受控请求体（JSON API POST；凭据在 Authorization 头，体不进快照/日志）
     if (o.body != null) req.write(o.body);
     req.end();

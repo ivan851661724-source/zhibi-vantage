@@ -19,6 +19,7 @@ const SurfaceStore = require('./surface-store.js');
 const EvidenceStore = require('../research/evidence-store.js');
 const Snapshot = require('../research/source-snapshot.js');
 const DomainEvent = require('../research/domain-event.js');
+const VoiceUnified = require('./voice-unified.js');
 
 // 数据性质（nature）→ 用户语言
 const NATURE_TEXT = Object.freeze({
@@ -432,6 +433,31 @@ function constructionDimensions(tenantId, projectId, brandId) {
   return out;
 }
 
+// ---------- 官网确认状态（SC-06 二） ----------
+// 语义：official_site_profile（通用官网公开资料）有真实成功采集 → 「官网已确认」；
+// 只有失败无成功 → 「来源暂不可达」（不是「官网不支持」）；从未采集 → 「未采集」。
+// Shopify 目录接口是否可用不影响本状态（两能力分离）。
+function buildOfficialSiteStatus(tenantId, projectId, competitor) {
+  const comp = competitor || {};
+  if (!comp.id) return { status: 'not_collected', statusText: '未采集' };
+  let atts = [];
+  try { atts = SurfaceStore.listAttempts(tenantId, projectId, comp.id, 'official_site_profile', 10); } catch (e) { atts = []; }
+  const usable = atts.find(a => a.status === 'success' || a.status === 'partial');
+  if (usable) {
+    const sum = usable.summary || {};
+    return {
+      status: 'confirmed', statusText: '官网已确认',
+      lastCollectedAt: usable.endedAt || usable.startedAt || null,
+      canonical: sum.canonical || null,
+      siteName: sum.siteName || null,
+      hasOrganization: !!sum.hasOrganization,
+      sampleNote: '确认依据：公开页面成功采集（含快照与证据引用）',
+    };
+  }
+  if (atts.length) return { status: 'unavailable', statusText: '来源暂不可达', lastAttemptAt: atts[0].startedAt || null };
+  return { status: 'not_collected', statusText: '未采集' };
+}
+
 // ---------- 品牌视图 ----------
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
@@ -449,6 +475,8 @@ function listBrandViews(tenantId, projectId) {
       competitorId: b.competitorRef,
       coverageSummary: cov.summary,
       coverageDimensions: cov.dimensions,
+      officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
+      firstObservedAt: firstObservedAt(tenantId, b.brandId),
       lastObservedAt: last ? last.at : null,
       lastChange: last ? { at: last.at, kind: last.kind, kindText: INTEL_TYPE_TEXT[last.kind] || last.kind, title: last.title } : null,
       gaps: cov.dimensions.filter(d => d.state === 'unsupported' || d.state === 'unknown')
@@ -497,6 +525,8 @@ function getBrandView(tenantId, brandId, projectId) {
     projectId,
     links,
     coverage: cov,
+    officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
+    unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, comp: comp || {} }),
     products,
     timeline: timelineView(tenantId, brandId, { limit: 100 }),
     intelligence: comp ? buildBrandIntelligence(tenantId, projectId, brandId, comp, {}) : [],
@@ -512,5 +542,5 @@ module.exports = {
   syncProjectBrands, loadProjectState, findCompetitor, domainOfUrl,
   buildCoverage, rebuildTimeline, timelineView, firstObservedAt,
   listIntelligence, buildBrandIntelligence, constructionDimensions,
-  listBrandViews, getBrandView,
+  listBrandViews, getBrandView, buildOfficialSiteStatus,
 };

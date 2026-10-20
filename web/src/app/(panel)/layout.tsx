@@ -41,7 +41,7 @@ const NAV_GROUPS: {
     items: [
       {
         href: '/brands',
-        label: '竞品库',
+        label: '竞品数据库',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h16M4 12h16M4 17h10" strokeLinecap="round" /><circle cx="19" cy="17" r="2" /></svg>
         ),
@@ -67,13 +67,8 @@ const NAV_GROUPS: {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 2h9l5 5v15H6z" /><path d="M9 12h6M9 16h6M9 8h2" strokeLinecap="round" /></svg>
         ),
       },
-      {
-        href: '/sector',
-        label: '赛道档案',
-        icon: (
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 4h16v16H4zM4 9h16M9 4v16" strokeLinecap="round" /></svg>
-        ),
-      },
+      // SC-06 信息架构收敛：/sector（赛道档案）与竞品数据库职责重叠，从主导航
+      // 移除重复入口；路由与页面保留（旧深链接不 404），可从竞品数据库内到达。
     ],
   },
   {
@@ -101,7 +96,7 @@ const NAV_GROUPS: {
 const PANEL_TITLES: Record<string, string> = {
   '/': '工作台',
   '/radar': '竞品雷达',
-  '/brands': '竞品库',
+  '/brands': '竞品数据库',
   '/intel': '情报库',
   '/opportunity': '机会视图',
   '/report': '调研报告',
@@ -111,7 +106,7 @@ const PANEL_TITLES: Record<string, string> = {
   '/demo': '产品演示',
 };
 
-// r2 修复：四个核心情报入口（竞品库/情报库/机会视图/调研报告）在当前 URL
+// r2 修复：四个核心情报入口（竞品数据库/情报库/机会视图/调研报告）在当前 URL
 // 存在 projectId 时携带同一 projectId——侧栏、顶部选择器、页面数据三者一致；
 // 没有 projectId 时保持原始链接，不制造空参数。
 const CORE_PID_HREFS = new Set(['/brands', '/intel', '/opportunity', '/report']);

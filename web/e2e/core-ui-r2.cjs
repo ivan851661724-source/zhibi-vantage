@@ -79,7 +79,7 @@ function check(name, cond, extra) {
   await page.waitForSelector('.core-tabs', { timeout: 15000 });
   await page.waitForTimeout(500);
   // SC-05：该分区由「竞争动态」升级为「历史时间线」（tab key 仍为 timeline）
-  check('时间线 Tab 处于激活态（tab=timeline 生效，标签「历史时间线」）', await page.locator('.core-tab.on', { hasText: '历史时间线' }).count() > 0);
+  check('时间线 Tab 处于激活态（tab=timeline 生效，SC-06 标签「时间线」）', await page.locator('.core-tab.on', { hasText: '时间线' }).count() > 0);
   // 顶部选择器切到项目 B
   await page.click('.proj-picker summary');
   await page.click('.proj-picker-menu button:has-text("' + SEED.trackB + '")');
@@ -98,7 +98,8 @@ function check(name, cond, extra) {
   await page.goto(FRONT + '/brands/' + encodeURIComponent(SEED.brandA) + '?projectId=' + encodeURIComponent(SEED.projectA), { waitUntil: 'networkidle', timeout: 30000 });
   await page.waitForSelector('.side-nav', { timeout: 15000 });
   const sideTargets = [
-    ['竞品库', '/brands'], ['情报库', '/intel'], ['机会视图', '/opportunity'], ['调研报告', '/report'],
+    // SC-06：主导航「竞品库」→「竞品数据库」；「赛道档案」从一级导航移除（深链接保留）
+    ['竞品数据库', '/brands'], ['情报库', '/intel'], ['机会视图', '/opportunity'], ['调研报告', '/report'],
   ];
   for (const [label, href] of sideTargets) {
     // href 前缀匹配（避免 /brands 命中 /brands/[brandId] 语义混淆——导航链接是固定 path）

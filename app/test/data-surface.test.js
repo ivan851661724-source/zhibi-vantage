@@ -191,13 +191,13 @@ function okFetchResult(tid, url, opts) {
     const ig = Registry.assertRegistryIntegrity();
     assert.ok(ig.ok, 'registry integrity: ' + ig.errors.join(';'));
     assert.strictEqual(Registry.listDimensions().length, 5);
-    assert.strictEqual(Registry.listCapabilities().length, 6, 'shopify_catalog + shopify_collections + 4 占位');
+    assert.strictEqual(Registry.listCapabilities().length, 8, 'shopify_catalog + shopify_collections + SC-06 official_site_profile/public_site_products + 4 占位');
     const shop = Registry.getCapability('shopify_catalog');
     assert.strictEqual(shop.maturity, 'ga');
     assert.notStrictEqual(shop.parserVersion, shop.collectorVersion, 'SC-01：parser ≠ collector');
     assert.ok(shop.refreshPolicy.cooldownMinutes > 0, 'ga 能力必须有 cooldown 保护');
     const wpCaps = Registry.capabilitiesByDimension('website_products');
-    assert.strictEqual(wpCaps.length, 2, 'website_products = catalog + collections 双能力');
+    assert.strictEqual(wpCaps.length, 4, 'website_products = catalog + collections + SC-06 官网资料/公开商品 四能力');
     assert.deepStrictEqual(Registry.adaptersForCapability('shopify_catalog'), ['shopify']);
     assert.deepStrictEqual(Registry.adaptersForCapability('shopify_collections'), ['shopify_collections']);
     for (const code of ['youtube_content', 'tiktok_commercial_content', 'public_reviews', 'dataforseo_trends']) {
@@ -514,9 +514,9 @@ function okFetchResult(tid, url, opts) {
     } finally { stC.restore(); }
     const ov = Surface.buildOverview({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', comp, nowMs: NOW + 3600e3 });
     const wp = ov.dimensions.find(d => d.code === 'website_products');
-    assert.strictEqual(wp.aggregations.length, 2, '双能力聚合块');
+    assert.strictEqual(wp.aggregations.length, 4, 'SC-06：四能力聚合块（catalog + collections + official_site_profile + public_site_products）');
     const codes = wp.aggregations.map(a => a.capability.code).sort();
-    assert.deepStrictEqual(codes, ['shopify_catalog', 'shopify_collections']);
+    assert.deepStrictEqual(codes, ['official_site_profile', 'public_site_products', 'shopify_catalog', 'shopify_collections']);
     const catAgg = wp.aggregations.find(a => a.capability.code === 'shopify_catalog');
     const colAgg = wp.aggregations.find(a => a.capability.code === 'shopify_collections');
     assert.strictEqual(catAgg.summary.kind, 'storefront_catalog');
@@ -524,7 +524,8 @@ function okFetchResult(tid, url, opts) {
     assert.notStrictEqual(catAgg.summary.kind, colAgg.summary.kind, '摘要不共用固定模板');
     // 明细维度返回双 capability 视图
     const det = Surface.buildDimensionDetail({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', dimension: 'website_products', offset: 0, limit: 10, comp });
-    assert.strictEqual(det.capabilities.length, 2);
+    // SC-06：website_products 维度 = catalog + collections + official_site_profile + public_site_products
+    assert.strictEqual(det.capabilities.length, 4);
     assert.ok(det.capabilities.every(c => c.capabilityCode), '明细按 capability 维度组织');
   });
 

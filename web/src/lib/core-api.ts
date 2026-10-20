@@ -13,6 +13,8 @@ export interface CoverageDimension {
   lastObservedAt: string | null;
   reason?: string | null;
   note?: string | null;
+  // SC-05 起后端 buildCoverage 返回多条备注（notes[]）；note 为旧字段兼容
+  notes?: string[] | null;
 }
 export interface CoverageSummary {
   totalDimensions: number;
@@ -36,6 +38,9 @@ export interface BrandListItem {
   competitorId: string | null;
   coverageSummary: CoverageSummary;
   coverageDimensions: CoverageDimension[];
+  // SC-06：竞品数据库首页新增——官网确认状态与时间积累起点
+  officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; lastCollectedAt?: string | null } | null;
+  firstObservedAt?: string | null;
   lastObservedAt: string | null;
   lastChange: { at: string; kind: string; kindText: string; title: string | null } | null;
   gaps: { code: string; displayName: string; state: CoverState; stateText: string }[];
@@ -103,6 +108,16 @@ export interface ConstructionDimension {
 }
 
 // SC-05：情报库「时序变化」独立字段（derived_timeline_events 投影，与采集观察不混排）
+// SC-06 三：情报库「用户声音与公开评论」项目级投影（统一读模型 voice-unified.js）
+export interface VoiceChangeItem {
+  brandId: string;
+  brandName: string | null;
+  status: 'sufficient' | 'insufficient';
+  sampleSize: number;
+  sourceCount: number;
+  recentItems: { title: string | null; sourceUrl: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null; evidenceId: string | null; snapshotId: string | null }[];
+}
+
 export interface MemoryEventItem {
   id: string;
   brandId: string | null;
@@ -210,6 +225,28 @@ export interface ReportDetail extends ReportListItem {
   jobs: { jobId: string; reportId: string; status: string; retry: number; attempts: number; lastError?: string | null }[];
 }
 
+// SC-06 三：「用户声音与公开评论」统一读模型（后端 voice-unified.js 投影）
+export interface UnifiedVoice {
+  version: string;
+  title: string;
+  status: 'sufficient' | 'insufficient';
+  insufficientText: string;
+  verified: {
+    items: {
+      kind: string; title: string | null; snippet: string | null; sourceUrl: string | null;
+      rating: number | null; reviewCount: number | null; observedAt: string | null;
+      brandId: string | null; evidenceId: string | null; snapshotId: string | null;
+      sentiment: string | null; sentimentBasis: string | null;
+    }[];
+    summary: {
+      sampleSize: number; sourceCount: number;
+      periodStart: string | null; periodEnd: string | null;
+      measurementMethod: string; sampleNote: string; limitations: string[];
+    } | null;
+  };
+  legacy: { items: { kind: string; platform: string | null; text: string | null; url: string | null; date: string | null; brandId: string | null; note: string | null }[]; note: string | null };
+}
+
 export interface BrandDetail {
   brand: {
     brandId: string; name: string; officialDomain: string | null;
@@ -218,6 +255,10 @@ export interface BrandDetail {
   };
   links: { linkId: string; projectId: string; competitorRef: string | null }[];
   coverage: Coverage;
+  // SC-06 二：官网确认状态（confirmed/unavailable/not_collected，非「官网不支持」语义）
+  officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
+  // SC-06 三：统一「用户声音与公开评论」读模型
+  unifiedVoice?: UnifiedVoice | null;
   products: {
     observations: ProductObservation[];
     summary: Record<string, unknown> | null;
@@ -258,7 +299,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {
