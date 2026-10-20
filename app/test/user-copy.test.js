@@ -111,12 +111,14 @@ t('B1 material-engine：材料标题用「竞争品牌」，材料契约字段�
 // SC-06 r2：机会算法输入改为「统一评论事实链合格条目」（带 polarity + sentimentBasis +
 // 来源 URL + 观察时间 + 品牌归属）。旧 reviews/painPoints/voiceItems 不再能撑起机会图——
 // 本用例只改输入装配，术语与评分公式断言保持原样。
-function qualifiedVoice(brandId, text, polarity) {
+function qualifiedVoice(competitorId, text, polarity) {
   return {
-    brandId, text, polarity, field: 'public_reviews.verified_item',
+    // 品牌库主键与项目内 competitorId 必须可不同，机会算法成员资格只认后者。
+    brand: '品牌-' + competitorId, brandId: 'brand-' + competitorId, competitorId,
+    text, polarity, field: 'public_reviews.verified_item',
     sentimentBasis: 'deterministic_rule', sentimentBasisNote: '来源页面公开评分 + 固定词表规则',
-    url: 'https://example.com/reviews/' + brandId, observedAt: '2026-10-01T00:00:00.000Z',
-    evidenceId: 'ev_' + brandId, snapshotId: 'snap_' + brandId,
+    url: 'https://example.com/reviews/' + competitorId, observedAt: '2026-10-01T00:00:00.000Z',
+    evidenceId: 'ev_' + competitorId, snapshotId: 'snap_' + competitorId,
   };
 }
 

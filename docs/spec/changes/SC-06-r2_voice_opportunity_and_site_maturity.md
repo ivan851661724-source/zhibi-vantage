@@ -32,7 +32,7 @@
 - `collectVoiceItems(comps)`（读 `c.reviews / c.painPoints / c.voiceItems`）与 `hasVoice` **已删除**，替换为 `collectUnifiedItems(opts)`——只接受 `opts.voiceItems`（统一事实链已过闸的条目），并在本层再做一次守门（polarity / sentimentBasis / 依据说明 / 来源 URL / 观察时间 / 品牌归属）。
 - 满意度 `satisfaction = pos / (pos + neg)`，分母只含已分类提及；`neu` 与未分类永不进入。
 - 无合格输入 → `hidden: true, reason: 'no_evidence_backed_polarity'`，`preliminaryThemes: []`（**不再拿旧主题撑「初步机会」**），并给出 `voiceBasis: { collected, qualified, brandsWithVoice, gate, note }`。
-- 品牌广度分母按「条目品牌键 ∩ 本项目已就绪品牌」计算，跨项目条目不计入。
+- 品牌广度分母按「条目 competitorId ∩ 本项目已就绪竞争品牌」计算。品牌库主键 brandId 仅用于关联档案，不能替代项目内竞品归属；跨项目、未知或缺失 competitorId 的条目不计入。展示端只使用竞争品牌名称，不泄漏内部 ID。
 
 ### 1.4 调用方改造
 

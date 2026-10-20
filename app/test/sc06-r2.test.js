@@ -440,3 +440,32 @@ test('G10 候选商品页存在但一页都读不到（429）→ attempt failed 
     assert.notStrictEqual(st.status, 'verified', '没有任何商品观察 → 不得显示已采集');
   } finally { Net.fetchPage = origFetch; }
 });
+
+
+// ---------- G11：品牌库 ID 与项目竞品 ID 不可混用 ----------
+test('G11 机会输入按 competitorId 归属：brandId 不同仍统计，未知或缺失 competitorId 一律排除', () => {
+  const comps = threeDoneComps('projR2H');
+  const valid = comps.map((c, i) => ({
+    brand: c.name,
+    brandId: 'brand-record-' + c.id,       // 与项目内 c.id 明确不同
+    competitorId: c.id,
+    text: '发货太慢',
+    polarity: i === 0 ? 'pos' : 'neg',
+    sentimentBasis: 'deterministic_rule',
+    sentimentBasisNote: '来源公开评分 + 固定规则',
+    url: 'https://reviews.example.com/' + c.id,
+    observedAt: '2026-10-02T00:00:00.000Z',
+    evidenceId: 'ev-' + c.id,
+    snapshotId: 'snap-' + c.id,
+  }));
+  const map = OPP.computeOpportunityMap(comps, { voiceItems: valid, voiceCollected: valid.length });
+  assert.strictEqual(map.hidden, false, 'brandId 与 competitorId 不同的合格评论仍应进入机会图');
+  assert.strictEqual(map.brandsWithVoice, 3, '分母按三个项目内 competitorId 去重');
+  assert.deepStrictEqual(map.themes[0].brands.sort(), comps.map(c => c.name).sort(), '展示使用品牌名，不泄漏内部 ID');
+
+  const unknown = Object.assign({}, valid[0], { competitorId: 'other-project-competitor' });
+  const noCompetitor = Object.assign({}, valid[1], { competitorId: null });
+  const rejected = OPP.computeOpportunityMap(comps, { voiceItems: [unknown, noCompetitor], voiceCollected: 2 });
+  assert.strictEqual(rejected.hidden, true, '跨项目或无 competitorId 的条目不得进入机会计算');
+  assert.strictEqual(rejected.brandsWithVoice, 0);
+});

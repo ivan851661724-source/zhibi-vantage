@@ -100,18 +100,20 @@ function collectUnifiedItems(opts) {
     if (!polarity) continue;                                   // neu / 未分类 → 不进分子也不进分母
     if (!v.sentimentBasis || !String(v.sentimentBasisNote || '').trim()) continue; // 依据不可解释 → 丢弃
     if (!v.url || !v.observedAt) continue;                     // 不可核验 → 丢弃
-    const brandKey = v.brandId || v.competitorId || v.brand;
-    if (!brandKey) continue;                                   // 无品牌归属 → 不分母
+    // 项目成员资格只能由 competitorId 确认。brandId 是品牌库主键，不能与项目内竞品 ID 混用。
+    const competitorId = itemCompetitorId(v);
+    if (!competitorId) continue;                               // 无项目竞品归属 → 不进分母
     const text = String(v.text == null ? '' : v.text).trim();
     if (!text) continue;
-    const key = brandKey + '|' + polarity + '|' + normTheme(text);
+    const key = competitorId + '|' + polarity + '|' + normTheme(text);
     if (seen.has(key)) continue;                               // 同品牌同极性去重，避免刷高广度
     seen.add(key);
     items.push({
       text: text.slice(0, 60),
-      brand: v.brand || brandKey,
+      // 展示只使用人可读品牌名；内部 ID 不得作为品牌名泄漏到机会视图。
+      brand: v.brand || v.brandName || null,
       brandId: v.brandId || null,
-      competitorId: v.competitorId || null,
+      competitorId,
       polarity,
       field: v.field || 'public_reviews.verified_item',
       basis: v.sentimentBasis,
@@ -125,7 +127,10 @@ function collectUnifiedItems(opts) {
   return items;
 }
 
-function itemBrandKey(m) { return (m && (m.brandId || m.competitorId || m.brand)) || null; }
+// brandId（品牌库主键）与 competitorId（项目内竞争品牌主键）是两套 ID。
+// 机会的成员资格、广度去重与分母只认 competitorId；brandId 不能作为回退。
+function itemCompetitorId(m) { return (m && m.competitorId) || null; }
+function itemBrandKey(m) { return itemCompetitorId(m); }
 
 // 贪心聚类：按出现频次从高到低，逐条并入首个足够相似的簇，否则自立门户。
 // 确定性（同输入同输出），且保留全部原始成员供前端展示「合并自：…」。
@@ -162,8 +167,8 @@ function round1(v) { return Math.round(v * 10) / 10; }
 
 // 单簇打分。brandsWithVoice = 分母（有合格用户声音事实的对手家数）
 function scoreCluster(cl, brandsWithVoice) {
-  const brandSet = new Set(cl.mentions.map(m => itemBrandKey(m)));
-  const brands = Array.from(new Set(cl.mentions.map(m => m.brand)));
+  const brandSet = new Set(cl.mentions.map(itemCompetitorId).filter(Boolean));
+  const brands = Array.from(new Set(cl.mentions.map(m => m.brand).filter(Boolean)));
   const pos = cl.mentions.filter(m => m.polarity === 'pos').length;
   const neg = cl.mentions.filter(m => m.polarity === 'neg').length;
   const denom = Math.max(1, brandsWithVoice);
@@ -248,10 +253,10 @@ function computeOpportunityMap(competitors, opts) {
   const compIds = new Set(comps.map(c => c.id).filter(Boolean));
   // 只收本项目已就绪品牌的合格条目（跨项目/已排除品牌的条目不得进分母）
   const items = collectUnifiedItems(opts).filter(it => {
-    const k = itemBrandKey(it);
-    return !comps.length || compIds.has(k) || !k;
+    const competitorId = itemCompetitorId(it);
+    return Boolean(competitorId && compIds.has(competitorId));
   });
-  const brandsWithVoice = new Set(items.map(itemBrandKey).filter(Boolean)).size;
+  const brandsWithVoice = new Set(items.map(itemCompetitorId).filter(Boolean)).size;
   const coverage = doneBrands ? brandsWithVoice / doneBrands : 0;
   const coveragePct = Math.round(coverage * 100);
   const collected = Number.isFinite(Number(opts.voiceCollected)) ? Number(opts.voiceCollected) : 0;
@@ -339,6 +344,6 @@ function computeOpportunityMap(competitors, opts) {
 module.exports = {
   CONF_CAP, MIN_BRANDS_WITH_VOICE, COVERAGE_OK, SIM_THRESHOLD, CAVEATS, METHOD_LABEL,
   ZONE_UNDERSERVED, ZONE_MODERATE, SENTIMENT_BASIS_KINDS,
-  normTheme, bigrams, similarity, collectUnifiedItems, itemBrandKey,
+  normTheme, bigrams, similarity, collectUnifiedItems, itemCompetitorId, itemBrandKey,
   clusterThemes, scoreCluster, computeOpportunityMap
 };

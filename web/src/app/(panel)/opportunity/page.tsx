@@ -96,7 +96,7 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
           <p className="core-opp-insufficient-title">用户声音已采集，但尚不足以形成满意度机会判断</p>
           <ul>
             <li>已采集的可核验公开评论观察：{v.voiceBasis ? v.voiceBasis.collected : 0} 条</li>
-            <li>合格输入（带 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 品牌归属）：{v.voiceBasis ? v.voiceBasis.qualified : 0} 条</li>
+            <li>合格输入（带 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 项目内竞品归属（competitorId））：{v.voiceBasis ? v.voiceBasis.qualified : 0} 条</li>
             <li>缺的不是评论条数，而是可解释的正负分类依据；中性/未分类评论不进满意度分子或分母，因此不出「满意度 × 重要性」散点图，也不按相对百分位标「重点机会」。</li>
           </ul>
           {v.nextSteps && v.nextSteps.length ? (
@@ -513,7 +513,7 @@ function OpportunityInner() {
           </p>
           <ul>
             <li>已采集的可核验公开评论观察：{vb.collected || 0} 条</li>
-            <li>合格输入：{vb.qualified || 0} 条（需要 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 品牌归属）</li>
+            <li>合格输入：{vb.qualified || 0} 条（需要 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 项目内竞品归属（competitorId））</li>
             <li>中性或未分类评论既不当作正面也不当作负面，不进满意度分子或分母——「暂不形成判断」是诚实的结论，不是缺数据。</li>
           </ul>
           <p className="hint">

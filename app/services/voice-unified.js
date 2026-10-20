@@ -77,7 +77,7 @@ function normalizeClassification(o) {
 }
 
 // 单条已核实评论的规范化（字段来自采集观察 + Evidence 引用，缺失即 null）
-function toVerifiedItem(o, evRefs, brandId, competitorId) {
+function toVerifiedItem(o, evRefs, brandId, competitorId, brandName) {
   const src = o || {};
   const ev = (evRefs && evRefs[0]) || {};
   const cls = normalizeClassification(src);
@@ -89,6 +89,7 @@ function toVerifiedItem(o, evRefs, brandId, competitorId) {
     rating: typeof src.rating === 'number' ? src.rating : null,
     reviewCount: typeof src.reviewCount === 'number' ? src.reviewCount : null,
     observedAt: src.publishedAt || null,
+    brand: brandName || null,
     brandId: brandId || null,
     competitorId: competitorId || null,
     evidenceId: ev.evidenceId || null,
@@ -132,7 +133,7 @@ function isOpportunityEligible(it) {
   if (!String(x.sentimentBasisNote || '').trim()) return false;
   if (!x.evidenceId || !x.snapshotId) return false;   // 无 Evidence/Snapshot → 不可核验
   if (!x.sourceUrl || !x.observedAt) return false;     // 无来源/无观察时间 → 不可核验
-  if (!x.brandId && !x.competitorId) return false;     // 无品牌归属 → 不分母
+  if (!x.competitorId) return false;                    // 无项目竞品归属 → 不分母（brandId 不能替代）
   return true;
 }
 
@@ -164,7 +165,7 @@ function buildUnifiedVoice({ tenantId, projectId, brandId, competitorId, comp })
   } catch (e) { /* 维度不可读：按样本不足处理，不填充 */ }
 
   const verifiedItems = obs
-    .map(o => toVerifiedItem(o, evRefs, brandId, competitorId || c.id || null))
+    .map(o => toVerifiedItem(o, evRefs, brandId, competitorId || c.id || null, c.name || null))
     // 无 Evidence/Snapshot 引用的观察不进入「已核实」集合（SC-06 验收 6）
     .filter(x => x.evidenceId || x.snapshotId);
 
@@ -224,7 +225,7 @@ function buildOpportunityInput(unified) {
       collectedItems: collected,
       qualifiedItems: qualified.length,
       minQualified: MIN_QUALIFIED_ITEMS,
-      sampleNote: '合格输入 = 带 polarity + sentimentBasis + Evidence/Snapshot + 来源 URL + 观察时间 + 品牌归属的公开评论',
+      sampleNote: '合格输入 = 带 polarity + sentimentBasis + Evidence/Snapshot + 来源 URL + 观察时间 + 项目内竞品归属（competitorId）的公开评论',
     },
   };
 
@@ -255,7 +256,7 @@ function toOpportunityItem(x) {
   return {
     field: 'public_reviews.verified_item',
     text: String(x.snippet || x.title || '').slice(0, 120),
-    brand: x.brandId || x.competitorId || null,
+    brand: x.brand || null,
     brandId: x.brandId || null,
     competitorId: x.competitorId || null,
     polarity: x.polarity,

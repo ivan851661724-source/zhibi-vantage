@@ -343,7 +343,7 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
     brandsWithQualifiedVoice: vi.brandsWithVoice,
     gate: vi.reason,
     gateText: vi.reasonText,
-    sampleNote: '合格输入 = 带 polarity + sentimentBasis + Evidence/Snapshot + 来源 URL + 观察时间 + 品牌归属的公开评论',
+    sampleNote: '合格输入 = 带 polarity + sentimentBasis + Evidence/Snapshot + 来源 URL + 观察时间 + 项目内竞品归属（competitorId）的公开评论',
   };
   const nextSteps = vi.eligible ? [] : [
     '在「用户声音与公开评论」中补齐更多公开评论页的采集（来源、快照与证据会一并留痕）',
