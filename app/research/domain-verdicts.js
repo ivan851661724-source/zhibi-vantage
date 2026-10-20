@@ -15,10 +15,19 @@ function voiceVerdict(st) {
   const brandsWithVoice = opp.brandsWithVoice || 0;
   const MIN_BRANDS = 3;
   if (!themes.length || brandsWithVoice < MIN_BRANDS) {
+    // SC-06 r2：把「没采到评论」与「采到了但没有带依据的正负分类」分开说，
+    // 不把「未分类」说成「没有用户声音」
+    const vb = opp.voiceBasis || null;
+    const gate = vb && vb.gate ? String(vb.gate) : null;
+    const note = gate === 'no_evidence_backed_polarity'
+      ? '用户声音已采集，但尚不足以形成满意度机会判断（缺带依据的正负分类），不出群体口碑结论'
+      : (gate === 'no_public_reviews'
+        ? '尚未采集到可核验的公开评论，不出群体口碑结论'
+        : '有用户声音的竞争品牌 ' + brandsWithVoice + ' 家（<' + MIN_BRANDS + '），不出群体口碑结论；机会视图仅展示初步信号');
     return {
       subjectCount: themes.length, items: [],
       basis: 'unverified', confidence: 'low', level: 'undetected',
-      note: '有用户声音的竞争品牌 ' + brandsWithVoice + ' 家（<' + MIN_BRANDS + '），不出群体口碑结论；机会视图仅展示初步信号',
+      note,
     };
   }
   const items = themes.slice(0, 8).map(t => ({

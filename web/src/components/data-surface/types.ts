@@ -2,7 +2,8 @@
 // 数据面共享类型（对齐 GET /api/data-surface/overview|dimension 响应，SC-02 §8）
 // 2026-10-18 整改轮：summary 判别联合（可扩展摘要协议）+ currency 贯通 +
 // latestAttempt / latestUsable / isRefreshing 状态三拆 + 多 Evidence 引用。
-export type SurfaceState = 'ok' | 'loading' | 'failed' | 'empty' | 'partial' | 'stale' | 'unsupported' | 'pending_config';
+// SC-06 r2：pending_verification = 能力已实现、尚无真实成功采集（待验证，不是已采集）
+export type SurfaceState = 'ok' | 'loading' | 'failed' | 'empty' | 'partial' | 'stale' | 'unsupported' | 'pending_config' | 'pending_verification';
 
 // ---------- 摘要判别联合（SC-02 §4 整改：禁止跨维度共用固定模板） ----------
 export interface StorefrontCatalogSummary {
@@ -213,6 +214,8 @@ export interface SurfaceDimension {
   evidenceRefs?: SurfaceEvidenceRef[];
   /** 多能力聚合（同维度并行）；未接入维度为空数组 */
   aggregations?: SurfaceCapabilityBlock[];
+  /** SC-06 r2：本维度内「能力已实现、尚无真实成功采集」的项（不混进已采集结果） */
+  pendingVerification?: { code: string; displayName: string; maturity: string; stateText: string }[];
   pagination?: { total: number };
 }
 

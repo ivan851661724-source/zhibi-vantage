@@ -24,6 +24,14 @@ import { CoverageLegend, CoverageTimeline } from '@/components/memory/coverage-t
 import { BackfillCard } from '@/components/memory/backfill-card';
 import { VoicePanel } from '@/components/brand/voice-panel';
 
+// SC-06 r2：公开商品的发现路径（只描述「怎么找到的」，不暗示覆盖率更高）
+function discoveryPathText(p: string): string {
+  if (p === 'jsonld') return '商品页 JSON-LD';
+  if (p === 'sitemap') return 'robots 声明的 sitemap';
+  if (p === 'homepage_links') return '首页内链商品页';
+  return p;
+}
+
 // SC-06 一：品牌长期数据库分区（六区块对齐任务书；reports 为附加入口）
 const TABS: { key: string; label: string }[] = [
   { key: 'overview', label: '概览' },
@@ -189,6 +197,33 @@ function BrandDetailInner() {
                 <>
                   <b>官网资料未采集</b>
                   <p className="hint">还没有对官网公开资料发起过采集；可在「数据覆盖与来源」中发起。</p>
+                </>
+              )}
+            </div>
+          ) : null}
+          {/* SC-06 r2：官网公开商品（非目录接口）与「官网已确认」分离——
+              能力已实现但尚未完成一次真实商品页采集时显示「待验证」，绝不写「已采集」 */}
+          {d.publicProducts ? (
+            <div className="core-site-status core-site-wrap">
+              {d.publicProducts.status === 'verified' ? (
+                <>
+                  <b>官网公开商品：已采集到公开商品页观察</b>
+                  <p className="hint">
+                    {d.publicProducts.observedCount != null ? <>观察条数：{d.publicProducts.observedCount}　</> : null}
+                    {d.publicProducts.lastCollectedAt ? <>采集时间：{new Date(d.publicProducts.lastCollectedAt).toLocaleString()}　</> : null}
+                    {d.publicProducts.discoveryPath ? <>发现路径：{discoveryPathText(d.publicProducts.discoveryPath)}　</> : null}
+                    {d.publicProducts.sampleNote || ''}
+                  </p>
+                </>
+              ) : d.publicProducts.status === 'unavailable' ? (
+                <>
+                  <b>官网公开商品：最近一次采集未成功</b>
+                  <p className="hint">{d.publicProducts.failureText || '来源暂不可达，稍后可重试。'} {d.publicProducts.note || ''}</p>
+                </>
+              ) : (
+                <>
+                  <b>官网公开商品：待验证</b>
+                  <p className="hint">{d.publicProducts.note || '该能力已实现但尚无一次真实成功采集验证；验证完成前不展示商品数据。'}</p>
                 </>
               )}
             </div>

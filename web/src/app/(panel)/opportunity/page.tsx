@@ -37,8 +37,9 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
           <>
             <li>已接入维度：{db.integrated.length ? db.integrated.join('、') : '—'}</li>
             <li>当前实际有数据的维度：{db.covered.length ? db.covered.join('、') : '暂无（尚未采集到可用数据）'}</li>
+            {db.pendingVerification && db.pendingVerification.length ? <li>待验证维度（能力已实现、尚无真实成功采集）：{db.pendingVerification.join('、')}</li> : null}
             {db.pendingConfig && db.pendingConfig.length ? <li>需要系统数据服务配置的维度：{db.pendingConfig.join('、')}</li> : null}
-            <li>本次判断未使用的维度（建设中）：{(db.pendingConfig || []).length + db.notIntegrated.length ? [...(db.pendingConfig || []), ...db.notIntegrated].join('、') : '无'}</li>
+            <li>本次判断未使用的维度（建设中）：{(db.pendingVerification || []).length + (db.pendingConfig || []).length + db.notIntegrated.length ? [...(db.pendingVerification || []), ...(db.pendingConfig || []), ...db.notIntegrated].join('、') : '无'}</li>
           </>
         ) : null}
         {/* SC-05：可用历史跨度与本次判断使用的时间范围（来自时序事实，不是采集次数） */}
@@ -56,11 +57,19 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
         <li>机会状态：{v.statusText}</li>
         {v.note ? <li>{v.note}</li> : null}
       </ul>
-      {db && (db.pendingConfig || []).length + db.notIntegrated.length ? (
+      {db && (db.pendingVerification || []).length + (db.pendingConfig || []).length + db.notIntegrated.length ? (
         <div className="core-building core-opp-building">
           <div className="core-building-head">数据覆盖与建设中维度</div>
           <p className="hint">以下维度当前不生成数据、估算或结论；接入并完成配置验证后这里会展示采集状态与来源。</p>
           <ul className="core-building-list">
+            {(db.pendingVerification || []).map(n => (
+              <li key={'pv_' + n}>
+                <span className="core-building-name">{n}</span>
+                <span className="core-building-state">待验证（能力已实现，尚无真实成功采集）</span>
+                <span className="core-building-meta">最近观察：—</span>
+                <span className="core-building-meta">当前不生成数据、估算或结论</span>
+              </li>
+            ))}
             {(db.pendingConfig || []).map(n => (
               <li key={'pc_' + n}>
                 <span className="core-building-name">{n}</span>
@@ -81,7 +90,22 @@ function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
           </ul>
         </div>
       ) : null}
-      {v.status === 'insufficient' ? (
+      {v.status === 'insufficient_voice' ? (
+        // SC-06 r2：评论已采集但没有带依据的正负分类 → 不出满意度判断，也不拿旧主题凑数
+        <div className="core-opp-insufficient">
+          <p className="core-opp-insufficient-title">用户声音已采集，但尚不足以形成满意度机会判断</p>
+          <ul>
+            <li>已采集的可核验公开评论观察：{v.voiceBasis ? v.voiceBasis.collected : 0} 条</li>
+            <li>合格输入（带 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 品牌归属）：{v.voiceBasis ? v.voiceBasis.qualified : 0} 条</li>
+            <li>缺的不是评论条数，而是可解释的正负分类依据；中性/未分类评论不进满意度分子或分母，因此不出「满意度 × 重要性」散点图，也不按相对百分位标「重点机会」。</li>
+          </ul>
+          {v.nextSteps && v.nextSteps.length ? (
+            <div className="hint">
+              下一步：<ul>{v.nextSteps.map((n, i) => <li key={i}>{n}</li>)}</ul>
+            </div>
+          ) : null}
+        </div>
+      ) : v.status === 'insufficient' ? (
         <div className="core-opp-insufficient">
           <p className="core-opp-insufficient-title">资料不足，暂不生成机会判断</p>
           {v.note ? <p className="hint">{v.note}</p> : null}
@@ -139,6 +163,16 @@ interface OppTheme {
   brandsWithVoice?: number;
 }
 
+// SC-06 r2：统一评论事实链的资格状态（缺合格输入时不画散点、不按相对百分位分区）
+interface OppVoiceBasis {
+  collected?: number;
+  qualified?: number;
+  brandsWithVoice?: number;
+  doneBrands?: number;
+  gate?: string;
+  note?: string | null;
+}
+
 interface Opportunity {
   hidden?: boolean;
   reason?: string;
@@ -154,6 +188,7 @@ interface Opportunity {
   relativeBands?: boolean;
   zones?: { underserved?: number; moderate?: number; served?: number };
   themes?: OppTheme[];
+  voiceBasis?: OppVoiceBasis | null;
 }
 
 interface MarketGap {
@@ -426,7 +461,15 @@ function OpportunityInner() {
     if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  const op = useMemo(() => (state && (state.opportunity as Opportunity)) || null, [state]);
+  // 🔴 项目边界：全局 state 是「当前项目」投影；URL 上的 projectId 才是本页上下文。
+  // 两者不一致时不拿别的项目的机会图冒充（项目切换不残留旧视图）。
+  // 真正的数据基础/机会状态由 UnifiedOpportunityBasis 按 URL projectId 单独读取。
+  const op = useMemo(() => {
+    const s = state as (ZhibiState & { projectId?: string }) | null;
+    if (!s) return null;
+    if (urlProjectId && s.projectId && String(s.projectId) !== String(urlProjectId)) return null;
+    return (s.opportunity as Opportunity) || null;
+  }, [state, urlProjectId]);
 
   if (loading) return <p className="hint">加载机会视图…</p>;
   if (!op) {
@@ -443,6 +486,42 @@ function OpportunityInner() {
           <h3>机会地图</h3>
           <p>暂无数据。</p>
         </div>
+      </div>
+    );
+  }
+
+  // 🔴 SC-06 r2：评论已采集、但没有带依据的正负分类（或合格样本不足）→
+  // 不画假散点、不按相对百分位强行分「重点机会」，也不把旧评论主题混装成市场结论；
+  // 保留数据基础（UnifiedOpportunityBasis）、卖点空缺与下一步建议。
+  const voiceGate = (op.voiceBasis && op.voiceBasis.gate) || op.reason;
+  if (op.hidden && (voiceGate === 'no_evidence_backed_polarity' || voiceGate === 'insufficient_sample')) {
+    const vb = op.voiceBasis || {};
+    return (
+      <div ref={wrapRef}>
+        <div className="page-head">
+          <div>
+            <h2>机会视图</h2>
+            <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
+          </div>
+        </div>
+        <UnifiedOpportunityBasis projectId={urlProjectId} />
+        <div className="ws-head">
+          <h3>口碑机会 · 尚不足以形成满意度判断</h3>
+          <p className="ws-prelim-banner">
+            ⚠️ <b>已采集用户声音，但缺可解释的正负分类</b>：{voiceGate === 'insufficient_sample' ? '合格样本不足' : '评论尚未完成带依据的正负分类'}，
+            因此这里<b>不出「满意度 × 重要性」散点图，也不按相对百分位标「重点机会」</b>。
+          </p>
+          <ul>
+            <li>已采集的可核验公开评论观察：{vb.collected || 0} 条</li>
+            <li>合格输入：{vb.qualified || 0} 条（需要 polarity + sentimentBasis + 证据/快照 + 来源 URL + 观察时间 + 品牌归属）</li>
+            <li>中性或未分类评论既不当作正面也不当作负面，不进满意度分子或分母——「暂不形成判断」是诚实的结论，不是缺数据。</li>
+          </ul>
+          <p className="hint">
+            下一步：① 到「竞品数据库 → 品牌档案 → 用户声音与公开评论」补齐更多公开评论页采集（每条都会留来源、快照与证据）；
+            ② 情绪/主题分类需要可解释依据（来源原始字段 / 确定性规则 / 可追溯模型提取），在此之前本页不生成满意度判断。
+          </p>
+        </div>
+        <MarketGapSection state={state!} />
       </div>
     );
   }

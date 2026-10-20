@@ -108,22 +108,33 @@ t('B1 material-engine：材料标题用「竞争品牌」，材料契约字段�
   assert.ok(mats[1].missingFields.includes('history:60d'), '无历史价仍标缺域');
 });
 
+// SC-06 r2：机会算法输入改为「统一评论事实链合格条目」（带 polarity + sentimentBasis +
+// 来源 URL + 观察时间 + 品牌归属）。旧 reviews/painPoints/voiceItems 不再能撑起机会图——
+// 本用例只改输入装配，术语与评分公式断言保持原样。
+function qualifiedVoice(brandId, text, polarity) {
+  return {
+    brandId, text, polarity, field: 'public_reviews.verified_item',
+    sentimentBasis: 'deterministic_rule', sentimentBasisNote: '来源页面公开评分 + 固定词表规则',
+    url: 'https://example.com/reviews/' + brandId, observedAt: '2026-10-01T00:00:00.000Z',
+    evidenceId: 'ev_' + brandId, snapshotId: 'snap_' + brandId,
+  };
+}
+
 t('B2 opportunity：CAVEATS/denominatorText/覆盖率 note 统一「竞争品牌」，评分公式不变', () => {
   OPP.CAVEATS.forEach(c => assert.deepEqual(hasBanned(c).concat(c.includes('对手') ? ['对手'] : []), [], 'CAVEATS 无旧术语'));
-  const comps = [1, 2, 3].map(i => ({
-    id: 'c' + i, name: '品牌' + i, status: 'done',
-    reviews: { negThemes: ['发货太慢'], basis: 'inferred' },
-  }));
-  const map = OPP.computeOpportunityMap(comps);
-  assert.equal(map.hidden, false, '3 家有声音 → 出图');
+  const comps = [1, 2, 3].map(i => ({ id: 'c' + i, name: '品牌' + i, status: 'done' }));
+  const items = [1, 2, 3].map(i => qualifiedVoice('c' + i, '发货太慢', 'neg'));
+  const map = OPP.computeOpportunityMap(comps, { voiceItems: items, voiceCollected: 3 });
+  assert.equal(map.hidden, false, '3 家有合格声音 → 出图');
   const th = map.themes[0];
   assert.ok(th.denominatorText.includes('家有用户声音的竞争品牌提到'), 'denominatorText 统一术语: ' + th.denominatorText);
   // 评分公式不变：importance = 1 + 9×(brandSet/denom)，3/3 家 → 10
   assert.equal(th.importance, 10, 'importance 数值不变');
   assert.equal(th.brandsMentioned, 3);
   // 覆盖率不足路径的 note 同步：5 家完成、3 家有声音 → 覆盖率 60% < 70% → 降级 note
-  const sparse = [1, 2, 3, 4, 5].map(i => ({ id: 'c' + i, name: '品牌' + i, status: 'done', reviews: i <= 3 ? { negThemes: ['太贵'] } : {} }));
-  const map2 = OPP.computeOpportunityMap(sparse);
+  const sparse = [1, 2, 3, 4, 5].map(i => ({ id: 'c' + i, name: '品牌' + i, status: 'done' }));
+  const sparseItems = [1, 2, 3].map(i => qualifiedVoice('c' + i, '太贵', 'neg'));
+  const map2 = OPP.computeOpportunityMap(sparse, { voiceItems: sparseItems, voiceCollected: 3 });
   assert.equal(map2.hidden, false, '3 家有声音仍出图');
   assert.equal(map2.lowCoverage, true, '覆盖率不足路径命中');
   map2.themes.forEach(x => assert.ok(!x.note.includes('对手') && x.note.includes('竞争品牌'), '覆盖率 note 统一术语: ' + x.note));

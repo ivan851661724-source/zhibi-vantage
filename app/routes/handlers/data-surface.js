@@ -148,26 +148,24 @@ async function refresh(ctx, req, res, url, p) {
   }
   const rc = resolveComp(ctx, tid, typeof body.projectId === 'string' ? body.projectId : '', competitorId);
   if (rc.error) { ctx.sendJSON(res, rc.error[0], { error: rc.error[1], message: rc.error[2] }); return true; }
-  // adapter 执行链（Registry 策略驱动：single/fallback/fanout，不硬编码 adapters[0]）
-  const chain = Adapters.resolveAdapterChain(cap.code);
-  if (!chain.ok) { ctx.sendJSON(res, 400, { error: 'CAPABILITY_NOT_SUPPORTED', message: '该能力暂无可用采集器。' }); return true; }
-  // 预检：链上第一个 supports 当前品牌的 adapter（fallback 语义下即首个可用者）
-  let adapter = null;
-  for (const code of chain.chain) {
-    const ad = Adapters.getAdapter(code);
-    if (!ad) continue;
-    const chk = ad.supports({ url: rc.comp.url, isShopify: rc.comp.isShopify });
-    if (chk && chk.supported) { adapter = ad; break; }
-  }
-  if (!adapter) { ctx.sendJSON(res, 400, { error: 'CAPABILITY_NOT_SUPPORTED', message: '当前品牌不支持该数据维度。' }); return true; }
-  // 幂等预检（SC-02 §6/§6.3）：running 复用 / capability cooldown / 日额度
-  const mk = SurfaceStore.createAttempt({
-    tenantId: tid, projectId: rc.projectId, competitorId, capability: cap.code, dimension: cap.dimension,
-    trigger: 'manual', nowMs: Date.now(),
-    costAttributionKey: cap.costAttributionKey,
-    collectorVersion: cap.collectorVersion, parserVersion: cap.parserVersion,
+  // 🔴 SC-06 r2：采集链路收口到 services/collect-request.js——
+  // 用户手动刷新与「调研完成后自动采集」走完全相同的幂等/冷却/额度/attempt/入队链路。
+  const CollectReq = require('../../services/collect-request.js');
+  const r = CollectReq.requestCollection({
+    tenantId: tid, projectId: rc.projectId, competitorId,
+    capability: cap.code, comp: rc.comp, trigger: 'manual',
   });
-  if (mk.quotaExceeded) {
+  if (r.status === 'unknown_capability') {
+    ctx.sendJSON(res, 404, { error: 'CAPABILITY_NOT_FOUND', message: '能力不存在。' }); return true;
+  }
+  if (r.status === 'not_supported') {
+    ctx.sendJSON(res, 400, { error: 'CAPABILITY_NOT_SUPPORTED', message: r.message || '当前品牌不支持该数据维度。' }); return true;
+  }
+  if (r.status === 'not_configured') {
+    // 用户侧文案（任务书 r2 §P0-2）：不出现环境变量名 / key 名；技术细节仅管理员健康接口可见
+    ctx.sendJSON(res, 400, { error: 'SOURCE_NOT_CONFIGURED', message: '数据服务暂不可用，请稍后再试。' }); return true;
+  }
+  if (r.status === 'quota') {
     const rp = cap.refreshPolicy || {};
     ctx.sendJSON(res, 429, {
       error: 'REFRESH_QUOTA_EXCEEDED',
@@ -176,37 +174,27 @@ async function refresh(ctx, req, res, url, p) {
     });
     return true;
   }
-  if (mk.deduped) {
-    const policy = Surface.buildRefreshPolicy({ tenantId: tid, projectId: rc.projectId, competitorId, capability: cap.code });
-    ctx.sendJSON(res, 200, {
-      attempt: attemptUserView(mk.attempt), deduped: true,
-      reason: mk.cooldown ? 'cooldown' : 'in_progress_or_recent',
-      message: mk.cooldown
-        ? '该数据刚刚更新过，已按刷新间隔复用最近结果（不重复产生费用）。'
-        : '已有一次相同采集在进行或刚完成，已复用该次结果（不重复产生费用）。',
-      policy,
-    });
+  if (r.status === 'deduped') {
+    if (r.reason === 'cooldown') {
+      const policy = Surface.buildRefreshPolicy({ tenantId: tid, projectId: rc.projectId, competitorId, capability: cap.code });
+      ctx.sendJSON(res, 200, {
+        attempt: attemptUserView(r.attempt), deduped: true, reason: 'cooldown',
+        message: '该数据刚刚更新过，已按刷新间隔复用最近结果（不重复产生费用）。',
+        policy,
+      });
+      return true;
+    }
+    // 同 scope 已有任务（竞态兜底）：仍返回 deduped，不产生第二个采集
+    const payload = {
+      attempt: attemptUserView(r.attempt), deduped: true, reason: 'in_progress_or_recent',
+      message: '已有一次相同采集在进行或刚完成，已复用该次结果（不重复产生费用）。',
+    };
+    if (r.jobId) payload.jobId = r.jobId;
+    ctx.sendJSON(res, 200, payload);
     return true;
   }
   // 202 + 持久任务入队（长任务契约 >10s；worker 常驻消费；前端轮询 overview）
-  const attemptId = mk.attempt.attemptId;
-  const job = CollectJobs.enqueue({
-    tenantId: tid, projectId: rc.projectId, competitorId, capability: cap.code,
-    attemptId, trigger: 'manual',
-  });
-  if (job.deduped) {
-    // 同 scope 已有任务（竞态兜底）：仍返回 deduped，不产生第二个采集
-    ctx.sendJSON(res, 200, {
-      attempt: attemptUserView(mk.attempt), deduped: true, jobId: job.jobId,
-      reason: 'in_progress_or_recent',
-      message: '已有一次相同采集在进行或刚完成，已复用该次结果（不重复产生费用）。',
-    });
-    return true;
-  }
-  // worker 可能处于 tick 间隙或未启动（测试/边缘部署）：入队后立即触发一次 tick，
-  // 但执行体在持久任务内完成——不是 fire-and-forget，失败/重启可恢复。
-  setImmediate(() => { CollectJobs.tick({ workerId: 'w-http-' + process.pid }).catch(() => {}); });
-  ctx.sendJSON(res, 202, { attempt: attemptUserView(mk.attempt), deduped: false, jobId: job.jobId });
+  ctx.sendJSON(res, 202, { attempt: attemptUserView(r.attempt), deduped: false, jobId: r.jobId });
   return true;
 }
 

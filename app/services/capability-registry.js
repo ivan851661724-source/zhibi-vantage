@@ -33,10 +33,16 @@ const DIMENSIONS = Object.freeze([
 ]);
 const DIMENSION_CODES = new Set(DIMENSIONS.map(d => d.code));
 
-// maturity 词表（05 §17 GA Gate；not_integrated = 未接入，不得宣称能力；
-// pending_config = 结构就绪但未通过一次真实 staging 成功请求，禁止标 ga——
-// Wave 1 纪律：没有真实成功请求的 adapter 不能升级为 GA）
-const MATURITY = new Set(['ga', 'not_integrated', 'pending_config']);
+// maturity 词表（05 §17 GA Gate）：
+//   ga                   = 已通过真实成功采集验证，可进入用户可见结论
+//   pending_verification = 能力代码/适配器已就绪（无需凭据的公开来源），但**尚无一次
+//                          真实成功采集**——不得显示「已采集/已接通」，也不得当作已接入
+//   pending_config       = 结构就绪但缺系统凭据（需要配置）——与「待验证」是两件事
+//   not_integrated       = 未接入，不得宣称能力
+// 🔴 SC-06 r2（评审 §二）：新增 pending_verification 而不是把未验证能力塞进现有三态；
+//    运行态（source-readiness）复用 ready_to_verify 语义，四层区分：
+//    能力代码存在 / 来源已配置 / 已有真实成功采集 / 当前品牌已有可展示证据。
+const MATURITY = new Set(['ga', 'not_integrated', 'pending_config', 'pending_verification']);
 
 const CAPABILITIES = Object.freeze([
   {
@@ -130,8 +136,11 @@ const CAPABILITIES = Object.freeze([
     manualRefresh: true,
     autoInspect: false,
     freshnessSlaHours: 72,
-    maturity: 'ga',
-    limitations: '仅展示公开商品页实际出现的名称/价格/币种/评分/评价数（JSON-LD 公开字段）与可安全识别的商品 URL；样本受发现路径限制并明示；不推断销量与转化（00 §17 冻结）',
+    // 🔴 SC-06 r2（评审 §二）：尚无一次真实公开商品页采集成功闭环
+    // （Snapshot → Evidence → Attempt → 前端商品展示），因此不得标 ga。
+    // 代码与受控 fixture 存在 ≠ 生产验证通过——升级 ga 必须由真实成功产生。
+    maturity: 'pending_verification',
+    limitations: '仅展示公开商品页实际出现的名称/价格/币种/评分/评价数（JSON-LD 公开字段）与可安全识别的商品 URL；样本受发现路径限制并明示；不推断销量与转化（00 §17 冻结）。当前状态：能力已实现，尚待一次真实公开商品页采集验证',
     costAttributionKey: 'infra.public_site_products',
     collectorVersion: 'net-1',
     parserVersion: 'site-profile-1',
@@ -336,6 +345,21 @@ function assertRegistryIntegrity() {
       if (cap.refreshPolicy && !(cap.refreshPolicy.cooldownMinutes > 0)) {
         errs.push(cap.code + ': pending_config capability requires cooldownMinutes > 0');
       }
+    } else if (cap.maturity === 'pending_verification') {
+      // SC-06 r2：能力已实现但尚无真实验证——适配器与刷新策略必须就绪（否则连验证都跑不了），
+      // 但不得要求凭据（公开来源），也不得据此宣称已接入。
+      if (!cap.adapter || !cap.provider) errs.push(cap.code + ': pending_verification capability requires adapter+provider');
+      if (!Array.isArray(cap.adapters) || !cap.adapters.includes(cap.adapter)) {
+        errs.push(cap.code + ': pending_verification capability adapters[] must include primary adapter');
+      }
+      if (!cap.adapterStrategy) errs.push(cap.code + ': pending_verification capability requires adapterStrategy');
+      if (cap.requiresServerCredential) errs.push(cap.code + ': pending_verification applies to credential-free public sources');
+      if (!cap.manualRefresh && !cap.autoInspect) errs.push(cap.code + ': pending_verification capability must allow refresh or inspect');
+      if (!cap.measurementMethod) errs.push(cap.code + ': pending_verification capability requires measurementMethod');
+      if (!cap.freshnessSlaHours) errs.push(cap.code + ': pending_verification capability requires freshnessSlaHours');
+      if (cap.refreshPolicy && !(cap.refreshPolicy.cooldownMinutes > 0)) {
+        errs.push(cap.code + ': pending_verification capability requires cooldownMinutes > 0');
+      }
     } else if (cap.adapterStrategy != null) errs.push(cap.code + ': not_integrated capability must not declare adapterStrategy');
     if (cap.maturity === 'ga') {
       if (!cap.adapter || !cap.provider) errs.push(cap.code + ': ga capability requires adapter+provider');
@@ -344,7 +368,7 @@ function assertRegistryIntegrity() {
       }
       if (!cap.manualRefresh && !cap.autoInspect) errs.push(cap.code + ': ga capability must allow refresh or inspect');
       if (!cap.freshnessSlaHours) errs.push(cap.code + ': ga capability requires freshnessSlaHours');
-    } else if (cap.maturity !== 'pending_config') {
+    } else if (cap.maturity !== 'pending_config' && cap.maturity !== 'pending_verification') {
       if (cap.adapter || cap.provider) errs.push(cap.code + ': not_integrated capability must not declare adapter/provider');
       if (Array.isArray(cap.adapters) && cap.adapters.length) errs.push(cap.code + ': not_integrated capability must not declare adapters[]');
       if (cap.manualRefresh || cap.autoInspect) errs.push(cap.code + ': not_integrated capability must not allow refresh/inspect');

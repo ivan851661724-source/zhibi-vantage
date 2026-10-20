@@ -1818,7 +1818,7 @@ const officialSiteProfileAdapter = {
     if (!comp.url) return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌没有可采集的官网地址。' });
 
     // 首页抓取：SSRF/FetchGate/robots/重定向全在 Net.fetchPage 内强制执行
-    const fr = await Net.fetchPage(comp.url, 15000, { trigger, tenantId: ctx.tenantId, includeHtml: true });
+    const fr = await Net.fetchPage(comp.url, 15000, { trigger, tenantId: ctx.tenantId, includeHtml: true, signal: ctx.signal });
     if (!fr || fr.ok !== true) {
       const cls = AdaptersClassify(fr);
       return failAttempt(ctx, { ok: false, error: fr && fr.error || 'unavailable', snapshotId: fr && fr.snapshotId },
@@ -1947,7 +1947,8 @@ const officialSiteProductsAdapter = {
     if (!comp.url) return failAttempt(ctx, { ok: false, error: 'not_applicable' }, { errorUserText: '该品牌没有可采集的官网地址。' });
 
     const snapshotIds = [];
-    const fetchOpts = { trigger, tenantId: ctx.tenantId, includeHtml: true };
+    // SC-06 r2：worker 超时 abort 必须能打断商品页抓取（signal 贯穿每一跳）
+    const fetchOpts = { trigger, tenantId: ctx.tenantId, includeHtml: true, signal: ctx.signal };
     const home = await Net.fetchPage(comp.url, 15000, fetchOpts);
     if (!home || home.ok !== true) {
       return failAttempt(ctx, { ok: false, error: home && home.error || 'unavailable', snapshotId: home && home.snapshotId },
@@ -1959,14 +1960,18 @@ const officialSiteProductsAdapter = {
     let discoveryPath = products.length ? 'jsonld' : null;
     let urlCandidatesFound = products.length;
     let partialScan = false; let partialScanReason = null;
+    // r2：商品页抓取的真实结果统计——「找到候选但一页都读不到」必须与「官网没有商品页」区分开
+    let pageAttempts = 0; let pageFailures = 0; let lastPageStatus = null;
 
     // ② robots sitemap 路径：首页商品不足时展开（robots + sitemap 各限 1 跳 index + 1 个子文件）
     if (products.length < 3) {
       const robotsUrl = new URL('/robots.txt', home.url || comp.url).toString();
-      const rb = await Net.fetchPage(robotsUrl, 10000, { trigger, tenantId: ctx.tenantId });
+      // includeHtml：robots.txt 的 Sitemap 指令靠行结构识别，stripHtml 会把多行压成
+      // 单行导致行首锚点失配（真实站点实测缺陷，r2 修复）
+      const rb = await Net.fetchPage(robotsUrl, 10000, { trigger, tenantId: ctx.tenantId, signal: ctx.signal, includeHtml: true });
       if (rb && rb.ok === true) {
         if (rb.snapshotId) snapshotIds.push(rb.snapshotId);
-        const smUrls = SiteProfile.parseSitemapsFromRobots(rb.htmlLower || rb.text || '');
+        const smUrls = SiteProfile.parseSitemapsFromRobots(rb.html || rb.text || '');
         if (smUrls.length) {
           let sm = await Net.fetchPage(smUrls[0], 15000, fetchOpts);
           if (sm && sm.ok === true) {
@@ -1978,7 +1983,8 @@ const officialSiteProductsAdapter = {
             if (!urls.length) {
               // 并发抓取子 sitemap（上限 8，抓取面与串行一致；FetchGate 同域节流仍生效），
               // 取首个发现商品 URL 的子文件——多区域站点子文件顺序无关商品分布
-              const subIdxs = locs.filter(u => /\.xml$/i.test(u)).slice(0, 8);
+              // 分片 sitemap URL 常带查询串（?from=&to=），直接 /\\.xml$/ 会漏掉整批商品分片
+              const subIdxs = locs.filter(u => SiteProfile.isSitemapUrl(u)).slice(0, 8);
               const results = await Promise.all(subIdxs.map(async u => {
                 const r = await Net.fetchPage(u, 15000, fetchOpts);
                 if (r && r.ok === true) return { u, html: r.html, snapshotId: r.snapshotId };
@@ -1995,8 +2001,15 @@ const officialSiteProductsAdapter = {
               discoveryPath = discoveryPath || 'sitemap';
               // 逐页抓取上限 12：公开观察抽样（样本明示），不是全量枚举
               for (const u of urls.slice(0, 12)) {
+                pageAttempts += 1;
                 const pr = await Net.fetchPage(u, 12000, fetchOpts);
-                if (!pr || pr.ok !== true) { partialScan = true; partialScanReason = partialScanReason || 'some_product_pages_unreachable'; continue; }
+                if (!pr || pr.ok !== true) {
+                  pageFailures += 1;
+                  if (pr && pr.status) lastPageStatus = pr.status;
+                  partialScan = true;
+                  partialScanReason = partialScanReason || (pr && pr.status === 429 ? 'product_pages_rate_limited' : 'some_product_pages_unreachable');
+                  continue;
+                }
                 if (pr.snapshotId) snapshotIds.push(pr.snapshotId);
                 const pp = SiteProfile.parseSiteProfile(pr.html || '', pr.url || u);
                 for (const p of pp.products) {
@@ -2010,13 +2023,29 @@ const officialSiteProductsAdapter = {
       }
     }
 
+    // 🔴 r2：候选商品页存在但一页都读不到（限流/拒访/超时）→ 如实失败，
+    // 不能落成「成功且 0 商品」——那会把来源的访问限制伪装成「官网没有商品」。
+    // 只有「页面读得到、但没有可识别的公开结构化商品数据」才是诚实的空结果。
+    if (urlCandidatesFound > 0 && pageAttempts > 0 && pageFailures === pageAttempts && products.length === 0) {
+      // 带上真实 HTTP 状态，让 classifyFetchFailure 按来源真实响应分类（429 → rate_limited）
+      return failAttempt(ctx, {
+        ok: false, status: lastPageStatus || null,
+        error: lastPageStatus === 429 ? 'http:429' : 'product_pages_unreadable',
+        snapshotId: snapshotIds[snapshotIds.length - 1] || null,
+      }, {
+        errorUserText: lastPageStatus === 429
+          ? '对方官网限制了本次公开商品页访问频率，稍后可重试。'
+          : '商品页暂不可读（来源不可达或被拒绝），稍后可重试。',
+      });
+    }
     const currencies = Array.from(new Set(products.map(p => p.currency).filter(Boolean)));
     const res = {
       ok: true, products, snapshotIds,
       currencies,
       discoveryPath, urlCandidatesFound,
-      partialScan: products.length === 0 ? false : partialScan,
-      partialScanReason: products.length === 0 ? null : partialScanReason,
+      partialScan: partialScan,
+      partialScanReason: partialScanReason,
+      pageAttempts, pageFailures,
       sourceUrl: home.url || comp.url,
     };
     const out = this.normalize(res, ctx);

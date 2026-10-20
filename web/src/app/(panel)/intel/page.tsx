@@ -152,7 +152,8 @@ function IntelInbox({ projectId }: { projectId: string }) {
           <h3>用户声音与公开评论（统一读模型）</h3>
           <p className="hint">
             只有一套口径：公开评论页采集（来源 URL + 快照与证据引用 + 观察时间）。
-            样本不足的品牌只列状态，不做「满意/不满意」群体结论。
+            样本不足的品牌只列状态，不做「满意/不满意」群体结论；已采集但缺带依据的正负分类时，
+            明确写「尚不足以形成满意度机会判断」，不拿历史主题凑成新结论。
           </p>
           <ul className="core-voice-changes-list">
             {voiceChanges.map(v => (
@@ -165,6 +166,10 @@ function IntelInbox({ projectId }: { projectId: string }) {
                     <span className="hint">资料不足，暂不形成群体结论。</span>
                   )}
                 </div>
+                {/* SC-06 r2：机会资格与样本充分性分开说——采到评论 ≠ 能形成满意度判断 */}
+                {v.opportunityEligible === false && v.opportunityReasonText ? (
+                  <p className="hint">{v.opportunityReasonText}</p>
+                ) : null}
                 {v.recentItems.length ? (
                   <ul className="core-voice-changes-items">
                     {v.recentItems.map((it, i) => (
@@ -172,6 +177,7 @@ function IntelInbox({ projectId }: { projectId: string }) {
                         {it.sourceUrl ? <a href={it.sourceUrl} target="_blank" rel="noopener noreferrer nofollow">{it.title || it.sourceUrl}</a> : (it.title || '公开评论页')}
                         {typeof it.rating === 'number' ? <span> · 评分 {it.rating}</span> : null}
                         {typeof it.reviewCount === 'number' ? <span> · {it.reviewCount} 条评价</span> : null}
+                        {it.polarity ? <span> · {it.polarity === 'pos' ? '正面' : '负面'}（依据 {it.sentimentBasis || '—'}）</span> : null}
                         <span className="hint">（观察 {String(it.observedAt || '').slice(0, 10) || '—'}）</span>
                       </li>
                     ))}

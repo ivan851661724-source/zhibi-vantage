@@ -70,10 +70,32 @@ function decorateState(s) {
     })
     .map(c => `${c.name}(${c.currency || s.marketCurrency})`);
   // 机会地图（Ulwick ODI 改良）：派生产物，不落盘；与 priceField 同构，每次读态实时重算。
-  // R2.5：机会视图接真实声音（voice-collector 采集产物，带来源 URL）
-  const _realVoice = [];
-  _aggComps.forEach(c => { (c.voiceItems || []).forEach(v => { if (v) _realVoice.push(v); }); });
-  s.opportunity = computeOpportunityMap(_aggComps, { excluded: s.excluded || [], voiceItems: _realVoice });
+  // 🔴 SC-06 r2：口碑机会只吃统一评论事实链（public_reviews + Evidence/Snapshot + sentimentBasis）。
+  // 旧 voiceItems / reviews / painPoints 不再作为统计来源——没有合格输入时如实隐藏，
+  // 不拿旧主题混装成市场结论（评审 §一.1/§一.3）。
+  const _voiceInput = (() => {
+    try {
+      const VoiceUnified = require('../services/voice-unified.js');
+      const BrandStore = require('../services/brand-store.js');
+      const brandByRef = new Map();
+      if (s.tenantId && s.projectId) {
+        for (const l of (BrandStore.listBrandLinksForProject(s.tenantId, s.projectId) || [])) {
+          if (l && l.competitorRef && l.brandId) brandByRef.set(l.competitorRef, l.brandId);
+        }
+      }
+      return VoiceUnified.buildOpportunityInputForComps({
+        tenantId: s.tenantId, projectId: s.projectId, comps: _aggComps,
+        brandIdOf: (c) => brandByRef.get(c.id) || null,
+      });
+    } catch (e) { return { items: [], collected: 0, qualified: 0, eligible: false, reason: 'no_public_reviews', reasonText: '' }; }
+  })();
+  s.opportunity = computeOpportunityMap(_aggComps.map(c => ({ id: c.id, name: c.name, status: 'done' })), {
+    excluded: s.excluded || [], voiceItems: _voiceInput.items, voiceCollected: _voiceInput.collected,
+  });
+  s.opportunityVoiceBasis = {
+    collected: _voiceInput.collected, qualified: _voiceInput.qualified,
+    eligible: !!_voiceInput.eligible, gate: _voiceInput.reason, gateText: _voiceInput.reasonText,
+  };
   // 蓝海要素曲线（一维 · 全行业趋同处 vs 无人区）：派生产物，不落盘；与 whitespace-grid 同构。
   s.blueOcean = computeBlueOceanCurve(_aggComps, { minCoverage: 3 });
   // 推理纪律 v2：对派生视图施加供需交叉(闸A)/边界过滤(闸B)/单边降级(闸C) 三道闸（不落盘，实时重算）

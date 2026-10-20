@@ -514,9 +514,13 @@ function okFetchResult(tid, url, opts) {
     } finally { stC.restore(); }
     const ov = Surface.buildOverview({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', comp, nowMs: NOW + 3600e3 });
     const wp = ov.dimensions.find(d => d.code === 'website_products');
-    assert.strictEqual(wp.aggregations.length, 4, 'SC-06：四能力聚合块（catalog + collections + official_site_profile + public_site_products）');
+    // SC-06 r2（评审 §二）：public_site_products 尚无真实成功采集 → 不得作为「已采集」能力渲染；
+    // 它出现在 pendingVerification 里（能力已实现、待验证），聚合块只剩 3 个。
+    assert.strictEqual(wp.aggregations.length, 3, 'SC-06 r2：三能力聚合块（catalog + collections + official_site_profile）');
     const codes = wp.aggregations.map(a => a.capability.code).sort();
-    assert.deepStrictEqual(codes, ['official_site_profile', 'public_site_products', 'shopify_catalog', 'shopify_collections']);
+    assert.deepStrictEqual(codes, ['official_site_profile', 'shopify_catalog', 'shopify_collections']);
+    assert.ok(Array.isArray(wp.pendingVerification) && wp.pendingVerification.some(x => x.code === 'public_site_products'),
+      '待验证能力单列：public_site_products 不得显示为已采集');
     const catAgg = wp.aggregations.find(a => a.capability.code === 'shopify_catalog');
     const colAgg = wp.aggregations.find(a => a.capability.code === 'shopify_collections');
     assert.strictEqual(catAgg.summary.kind, 'storefront_catalog');
@@ -524,8 +528,8 @@ function okFetchResult(tid, url, opts) {
     assert.notStrictEqual(catAgg.summary.kind, colAgg.summary.kind, '摘要不共用固定模板');
     // 明细维度返回双 capability 视图
     const det = Surface.buildDimensionDetail({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', dimension: 'website_products', offset: 0, limit: 10, comp });
-    // SC-06：website_products 维度 = catalog + collections + official_site_profile + public_site_products
-    assert.strictEqual(det.capabilities.length, 4);
+    // SC-06 r2：明细只含可渲染能力（未验证的 public_site_products 不混进明细观察）
+    assert.strictEqual(det.capabilities.length, 3);
     assert.ok(det.capabilities.every(c => c.capabilityCode), '明细按 capability 维度组织');
   });
 

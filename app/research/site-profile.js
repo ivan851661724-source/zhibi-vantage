@@ -248,23 +248,51 @@ function parseSiteProfile(html, baseUrl) {
 
 // robots.txt → Sitemap: 行（公开声明；无则空数组）
 function parseSitemapsFromRobots(robotsTxt) {
+  const src = String(robotsTxt || '');
   const out = [];
-  const re = /^\s*sitemap\s*:\s*(\S+)\s*$/gim;
+  const push = (raw) => {
+    if (out.length >= 10) return;
+    const u = absUrl(String(raw || '').replace(/[;,]+$/, ''), null);
+    if (u && out.indexOf(u) === -1) out.push(u);
+  };
+  // ① 规范形式：Sitemap 指令独占一行（robots.txt 规范写法）
+  const strict = /^\s*sitemap\s*:\s*(\S+)\s*$/gim;
   let m;
-  while ((m = re.exec(String(robotsTxt || ''))) && out.length < 10) {
-    const u = absUrl(m[1], null);
-    if (u) out.push(u);
+  while ((m = strict.exec(src))) push(m[1]);
+  // ② 兜底：上游若把多行文本压成单行（HTML 抽取/去空白），行首锚点必然失配。
+  //    Sitemap 是 robots.txt 的固定指令名，宽松匹配只恢复这种「排版被压平」的情况，
+  //    不猜测其他字段（真实站点实测：VAUDE/Allbirds 单行文本下严格匹配为 0）。
+  if (!out.length) {
+    const loose = /(?:^|[\s;])sitemap\s*:\s*(\S+)/gi;
+    while ((m = loose.exec(' ' + src)) && out.length < 10) push(m[1]);
   }
   return out;
 }
 
 // sitemap.xml → <loc> 列表（含 sitemap index 二次展开由 adapter 层决定）
+// XML 实体归一（<loc> 内的 &amp; 必须还原）——真实站点实测：
+// Shopify sitemap index 的分片 URL 形如 sitemap_products_1.xml?from=1&amp;to=2，
+// 不解码会带着 "amp;" 去抓，等于抓到错误 URL（r2 修复）。
+function decodeXmlEntities(s) {
+  return String(s || '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'");
+}
+
+// 是否 sitemap 文件 URL：允许 .xml 后带查询串（分片 sitemap 常见），也允许 .xml.gz
+function isSitemapUrl(u) {
+  try {
+    const p = new URL(u);
+    return /\.xml(\.gz)?$/i.test(p.pathname);
+  } catch (e) { return false; }
+}
+
 function parseSitemapLocs(xml) {
   const out = [];
   const re = /<loc>\s*([^<\s]{1,2000})\s*<\/loc>/gi;
   let m;
   while ((m = re.exec(String(xml || ''))) && out.length < LIMITS.sitemapLocs) {
-    const u = absUrl(m[1], null);
+    const u = absUrl(decodeXmlEntities(m[1]), null);
     if (u) out.push(u);
   }
   return out;
@@ -293,7 +321,7 @@ function sampleProductUrls(locs) {
 }
 
 module.exports = {
-  SITE_PROFILE_PARSER_VERSION, LIMITS,
+  SITE_PROFILE_PARSER_VERSION, LIMITS, isSitemapUrl, decodeXmlEntities,
   parseSiteProfile, extractJsonLdScripts,
   parseSitemapsFromRobots, parseSitemapLocs, isProductUrl, sampleProductUrls,
   absUrl, cleanText,

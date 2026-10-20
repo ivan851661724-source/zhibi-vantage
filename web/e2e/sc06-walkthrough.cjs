@@ -8,6 +8,9 @@
 //   W5 内容与广告 tab：维度状态 + 无 fake 数据
 //   W6 情报库：用户声音区块 + 建设中区域
 //   W7 /sector 深链接不 404
+//   W8 项目切换后 URL 上下文一致
+//   W9 机会视图：评论已采集但缺带依据的正负分类 → 不画散点、不标重点机会（r2）
+//   W3b 官网公开商品（public_site_products）未验证 → 显示「待验证」，不写已采集（r2）
 // 数据：新租户 + 真实 VEJA 采集（走生产 refresh 路径）
 // ============================================================
 const path = require('path');
@@ -24,7 +27,7 @@ function check(name, ok, detail) {
 
 (async () => {
   // ---------- 数据准备（真实采集） ----------
-  const BASE = 'http://127.0.0.1:3331';
+  const BASE = process.env.ZB_BACKEND || 'http://127.0.0.1:3331';
   const email = 'sc06w-' + Math.random().toString(36).slice(2, 10) + '@example.com';
   const pass = 'sc06w-' + Math.random().toString(36).slice(2, 12) + 'P1';
   const reg = await (await fetch(BASE + '/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: pass, name: 'SC06 Walkthrough' }) })).json();
@@ -47,6 +50,9 @@ function check(name, ok, detail) {
       { id: 'compShopW', name: 'Allbirds', status: 'done', url: 'https://www.allbirds.com', isShopify: true, market: 'us' },
     ],
   }));
+  // /api/state 读的是租户「当前项目」指针；不设置的话机会页拿到的是空态（测试脚手架修正）
+  const { setCurrentId } = require(ROOT + '/app/core/state-store.js');
+  setCurrentId(projId, TID);
   console.log('[w] STORE_PATH =', Db.STORE_PATH, '| env ZB_DATA_DIR =', process.env.ZB_DATA_DIR);
   const saved = Db.getProject ? Db.getProject(TID, projId) : null;
   console.log('[w] project saved?', !!saved, fs.existsSync(stPath) ? 'stPath ok' : 'stPath MISSING');
@@ -114,6 +120,9 @@ function check(name, ok, detail) {
   const prodSec = await page.locator('.core-brand-detail').textContent();
   check('W3 「官网已确认」块 + 确认地址', /官网已确认/.test(prodSec), prodSec.slice(0, 300));
   check('W3 无「官网不支持」字样', !/官网不支持|此维度暂不支持/.test(prodSec));
+  // r2：公开商品能力尚未完成真实闭环 → 用户侧必须是「待验证」，不得写已采集
+  check('W3b 官网公开商品显示「待验证」（未验证不等于已采集）', /官网公开商品：待验证|尚未完成真实采集验证/.test(prodSec), prodSec.slice(0, 400));
+  check('W3b 不出现「官网公开商品：已采集到」（未验证不得宣称已采集）', !/官网公开商品：已采集到/.test(prodSec));
   await page.screenshot({ path: path.join(shotDir, 'sc06-w3-brand-products.png'), fullPage: true });
 
   // W4 voice tab
@@ -139,8 +148,15 @@ function check(name, ok, detail) {
   const intelPage = await page.locator('main').textContent().catch(() => '');
   check('W6 情报库建设中区域存在（折叠）', await page.locator('.core-building-fold').count() === 1);
   check('W6 情报库无「官网不支持」', !/官网不支持/.test(intelPage));
-  check('W6 「Shopify 公开商品目录不可用」出现（≤1 次，不重复刷屏）',
-    (intelPage.match(/Shopify 公开商品目录不可用/g) || []).length <= 1, (intelPage.match(/Shopify 公开商品目录不可用/g) || []).length);
+  const shopifyHits = (intelPage.match(/Shopify 公开商品目录不可用/g) || []).length;
+  check('W6 「Shopify 公开商品目录不可用」出现（≤1 次，不重复刷屏）', shopifyHits <= 1, shopifyHits + ' 次');
+  if (shopifyHits > 1) {
+    let idx = intelPage.indexOf('Shopify 公开商品目录不可用');
+    while (idx >= 0) {
+      console.log('  [dup-ctx]', intelPage.slice(Math.max(0, idx - 180), idx + 60).replace(/\s+/g, ' '));
+      idx = intelPage.indexOf('Shopify 公开商品目录不可用', idx + 1);
+    }
+  }
   await page.screenshot({ path: path.join(shotDir, 'sc06-w6-intel.png'), fullPage: true });
 
   // W7 /sector 深链接不 404
@@ -152,6 +168,35 @@ function check(name, ok, detail) {
   await page.goto(FRONT + '/brands' + SP);
   await page.waitForTimeout(600);
   check('W8 品牌页 URL 携带当前 projectId', page.url().includes('projectId=' + projId));
+
+  // ---------- W9 机会视图（r2）：评论已采集但无带依据的正负分类 → 不出散点 ----------
+  // 受控 fixture：给两个品牌各落一条公开评论观察（无 polarity/sentimentBasis），
+  // 走生产 attempt 生命周期；用于验证「采到了评论 ≠ 能形成满意度判断」的 UI 分支。
+  const SurfaceStore = require(ROOT + '/app/services/surface-store.js');
+  for (const cid of ['compVejaW', 'compShopW']) {
+    const mk = SurfaceStore.createAttempt({
+      tenantId: TID, projectId: projId, competitorId: cid,
+      capability: 'public_reviews', dimension: 'reviews_reputation',
+      trigger: 'manual', idempotencyKey: 'w9-' + cid + '-' + Math.random().toString(36).slice(2, 8),
+    });
+    if (mk && mk.attempt) {
+      SurfaceStore.completeAttempt(TID, mk.attempt.attemptId, {
+        status: 'success',
+        observations: [{ id: 'w9-' + cid, title: 'Public review page', snippet: 'public review snippet without sentiment', sourceUrl: 'https://reviews.example.com/' + cid, rating: 2.0, reviewCount: 8, publishedAt: new Date().toISOString() }],
+        summary: { kind: 'reviews_digest', reviewCount: 8, sourceCount: 1, measurementSource: 'public_source_observation' },
+        snapshotIds: ['snap-w9-' + cid], evidenceIds: ['ev-w9-' + cid],
+      }, null);
+    }
+  }
+  await page.goto(FRONT + '/opportunity' + SP);
+  await page.waitForTimeout(2500);
+  const oppPage = await page.locator('main').textContent().catch(() => '');
+  check('W9 机会视图如实说明「已采集但尚不足以形成满意度判断」', /尚不足以形成满意度判断|尚不足以形成满意度机会判断/.test(oppPage), oppPage.slice(0, 400));
+  check('W9 明确不画散点、不标重点机会', /不出「满意度 × 重要性」散点图/.test(oppPage) && /不按相对百分位标「重点机会」/.test(oppPage));
+  check('W9 无散点图画布（不画假图）', await page.locator('.opp-chart').count() === 0);
+  check('W9 无机会分卡片（不强行分区）', await page.locator('.opp-score').count() === 0);
+  check('W9 保留数据基础与下一步建议', /数据基础与样本范围/.test(oppPage) && /补齐更多公开评论页采集/.test(oppPage));
+  await page.screenshot({ path: path.join(shotDir, 'sc06-w9-opportunity.png'), fullPage: true });
 
   await browser.close();
   console.log('[w] RESULT: ' + passed + ' passed / ' + failed + ' failed');

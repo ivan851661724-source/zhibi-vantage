@@ -2,7 +2,8 @@
 // 只暴露用户可见字段：不含服务器路径、内部错误码、栈、密钥、原始 payload 路径。
 import { apiGet, apiPost } from '@/lib/api';
 
-export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'pending_config' | 'unknown';
+// SC-06 r2：pending_verification = 能力已实现但尚无真实成功采集（不得显示「已采集」）
+export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'pending_config' | 'pending_verification' | 'unknown';
 
 export interface CoverageDimension {
   code: string;
@@ -40,10 +41,25 @@ export interface BrandListItem {
   coverageDimensions: CoverageDimension[];
   // SC-06：竞品数据库首页新增——官网确认状态与时间积累起点
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; lastCollectedAt?: string | null } | null;
+  // SC-06 r2：官网公开商品（非目录接口）——未验证时 status='not_collected' 且带说明
+  publicProducts?: PublicProductsStatus | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
   lastChange: { at: string; kind: string; kindText: string; title: string | null } | null;
   gaps: { code: string; displayName: string; state: CoverState; stateText: string }[];
+}
+
+export interface PublicProductsStatus {
+  status: 'verified' | 'unavailable' | 'not_collected';
+  statusText: string;
+  maturity?: string | null;
+  lastCollectedAt?: string | null;
+  lastAttemptAt?: string | null;
+  observedCount?: number | null;
+  discoveryPath?: string | null;
+  sampleNote?: string | null;
+  failureText?: string | null;
+  note?: string | null;
 }
 
 export interface ProductObservation {
@@ -115,7 +131,11 @@ export interface VoiceChangeItem {
   status: 'sufficient' | 'insufficient';
   sampleSize: number;
   sourceCount: number;
-  recentItems: { title: string | null; sourceUrl: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null; evidenceId: string | null; snapshotId: string | null }[];
+  // SC-06 r2：统一事实链是否够格进入满意度机会判断（缺依据时明确写出原因）
+  opportunityEligible?: boolean;
+  opportunityReason?: string | null;
+  opportunityReasonText?: string | null;
+  recentItems: { title: string | null; sourceUrl: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null; evidenceId: string | null; snapshotId: string | null; polarity?: string | null; sentimentBasis?: string | null }[];
 }
 
 export interface MemoryEventItem {
@@ -155,8 +175,18 @@ export interface OpportunityHistoryBasis {
   note: string;
 }
 
+export interface OpportunityVoiceBasis {
+  collected: number;
+  qualified: number;
+  brandsWithQualifiedVoice?: number;
+  gate: 'ok' | 'no_public_reviews' | 'no_evidence_backed_polarity' | 'insufficient_sample' | string;
+  gateText?: string;
+  sampleNote?: string;
+}
+
 export interface OpportunityView {
-  status: 'ok' | 'insufficient';
+  // insufficient_voice = 评论已采集但没有带依据的正负分类 → 不画满意度散点
+  status: 'ok' | 'insufficient' | 'insufficient_voice';
   statusText: string;
   items: {
     id: string | null; theme: string | null; level?: string | null; basis?: unknown;
@@ -164,8 +194,11 @@ export interface OpportunityView {
     caveats?: string[]; status?: string; note?: string;
   }[];
   sample: { brandCount: number; brandsWithData: number; required?: number };
-  dimensionBasis?: { integrated: string[]; pendingConfig?: string[]; notIntegrated: string[]; covered: string[] };
+  dimensionBasis?: { integrated: string[]; pendingVerification?: string[]; pendingConfig?: string[]; notIntegrated: string[]; covered: string[] };
   historyBasis?: OpportunityHistoryBasis | null; // SC-05：可用历史跨度 + 本次使用的时间范围
+  // SC-06 r2：统一评论事实链的资格状态 + 下一步建议（缺合格输入时如实说明）
+  voiceBasis?: OpportunityVoiceBasis | null;
+  nextSteps?: string[];
   limits: string[];
   note?: string | null;
 }
@@ -235,8 +268,8 @@ export interface UnifiedVoice {
     items: {
       kind: string; title: string | null; snippet: string | null; sourceUrl: string | null;
       rating: number | null; reviewCount: number | null; observedAt: string | null;
-      brandId: string | null; evidenceId: string | null; snapshotId: string | null;
-      sentiment: string | null; sentimentBasis: string | null;
+      brandId: string | null; competitorId?: string | null; evidenceId: string | null; snapshotId: string | null;
+      polarity: string | null; sentiment: string | null; sentimentBasis: string | null; sentimentBasisNote?: string | null;
     }[];
     summary: {
       sampleSize: number; sourceCount: number;
@@ -257,6 +290,8 @@ export interface BrandDetail {
   coverage: Coverage;
   // SC-06 二：官网确认状态（confirmed/unavailable/not_collected，非「官网不支持」语义）
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
+  // SC-06 r2：官网公开商品采集状态（与官方资料分离；未验证不写「已采集」）
+  publicProducts?: PublicProductsStatus | null;
   // SC-06 三：统一「用户声音与公开评论」读模型
   unifiedVoice?: UnifiedVoice | null;
   products: {

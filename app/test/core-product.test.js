@@ -298,6 +298,13 @@ function pageBody(ids) {
         assert.ok(c.measurementMethod, c.code + ' pending_config 必须声明 measurementMethod');
         assert.notStrictEqual(c.maturity, 'ga', '未通过真实 staging 验证不得标 ga');
       }
+      // SC-06 r2：待验证（无凭据公开来源、尚无真实成功采集）——结构就绪但不得宣称已接入
+      if (c.maturity === 'pending_verification') {
+        assert.ok(c.adapter && c.provider, c.code + ' pending_verification 必须声明 adapter/provider');
+        assert.ok(c.measurementMethod, c.code + ' pending_verification 必须声明 measurementMethod');
+        assert.strictEqual(c.requiresServerCredential, false, c.code + ' pending_verification 仅适用于无凭据公开来源');
+        assert.notStrictEqual(c.maturity, 'ga', '没有真实成功采集不得标 ga');
+      }
     }
   });
 

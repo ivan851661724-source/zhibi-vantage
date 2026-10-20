@@ -111,6 +111,18 @@ async function fetchPage(url, timeoutMs, opts) {
   };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || 12000);
+  // 🔴 SC-06 r2（评审 §三.3）：外部取消信号（worker attempt 超时）必须能打断本次抓取。
+  // 此前 fetchPage 只用自己的超时控制器，worker 侧 Promise.race 到点返回后，底层
+  // socket 仍在读字节——「超时」只是不再等待，不是真的取消。这里把外部 signal
+  // 级联到内部控制器，沿 safeRequestOnce → req.destroy 真正释放连接。
+  let onOuterAbort = null;
+  if (o.signal) {
+    if (o.signal.aborted) ctrl.abort();
+    else {
+      onOuterAbort = () => { try { ctrl.abort(); } catch (e2) { /* 忽略重复 abort */ } };
+      try { o.signal.addEventListener('abort', onOuterAbort, { once: true }); } catch (e2) { /* 非标准 signal：降级为仅自身超时 */ }
+    }
+  }
   let lastHost = null; // 网络异常（超时等）也计入同域失败熔断
   try {
     // 🔴 连接语义（复审 §一）：每跳 = safeRequestOnce（assertPublicUrl 先行 +
@@ -171,7 +183,12 @@ async function fetchPage(url, timeoutMs, opts) {
     try { if (lastHost) FetchGate.recordResult(lastHost, false); } catch (e2) { /* 熔断记账失败不影响返回 */ }
     return { ok: false, error: String(e && e.message || e), snapshotId: sid };
   }
-  finally { clearTimeout(timer); }
+  finally {
+    clearTimeout(timer);
+    if (onOuterAbort && o.signal && o.signal.removeEventListener) {
+      try { o.signal.removeEventListener('abort', onOuterAbort); } catch (e2) { /* 清理失败无害 */ }
+    }
+  }
 }
 // 变体价格中位数（商品代表价，规格 3.1 第 2 步：不用最低——引流小样拉低；不用最高——高配版不构成主流成交）
 function variantMedian(nums) {

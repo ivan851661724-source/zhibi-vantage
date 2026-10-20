@@ -412,6 +412,18 @@ function constructionDimensions(tenantId, projectId, brandId) {
     const caps = Registry.capabilitiesByDimension(d.code);
     const ga = caps.filter(c => c.maturity === 'ga');
     if (ga.length) continue;
+    // SC-06 r2：待验证（能力就绪、尚无真实成功）与需配置（缺凭据）分开报，不混成一类
+    const pendingVerify = caps.filter(c => c.maturity === 'pending_verification');
+    if (pendingVerify.some(c => capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, c.code))) continue;
+    if (pendingVerify.length) {
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'pending_verification',
+        message: '能力已实现，但尚未完成一次真实采集验证；验证前不展示数据、估算或结论。',
+      });
+      continue;
+    }
     const pending = caps.filter(c => c.maturity === 'pending_config');
     if (pending.some(c => capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, c.code))) continue;
     if (pending.length) {
@@ -458,6 +470,53 @@ function buildOfficialSiteStatus(tenantId, projectId, competitor) {
   return { status: 'not_collected', statusText: '未采集' };
 }
 
+// ---------- 官网公开商品状态（SC-06 r2：成熟度与真实验证分开表达） ----------
+// 第四层区分「当前品牌已有可展示证据」：只看本品牌本项目的 public_site_products attempt。
+//   verified            已成功/部分成功采集 → 有可展示商品观察
+//   unavailable         尝试过但失败（拒访/限流/不可达/无商品页可发现）→ 如实说明，不写「官网不支持」
+//   not_collected       从未采集
+// 与官方资料（official_site_profile）分离：Shopify 目录不可用不影响本状态。
+function buildPublicProductsStatus(tenantId, projectId, competitor) {
+  const comp = competitor || {};
+  const cap = Registry.getCapability('public_site_products');
+  const maturity = cap ? cap.maturity : null;
+  if (!comp.id) return { status: 'not_collected', statusText: '未采集', maturity };
+  let atts = [];
+  try { atts = SurfaceStore.listAttempts(tenantId, projectId, comp.id, 'public_site_products', 10); } catch (e) { atts = []; }
+  // 🔴 r2：只有「真的拿到了商品观察」才算已采集——partial 但 0 条观察（如商品页全被限流）
+  // 不得显示为已采集；这类情况如实说明来源限制。
+  const usable = atts.find(a => {
+    if (a.status !== 'success' && a.status !== 'partial') return false;
+    const observations = Array.isArray(a.observations) ? a.observations : [];
+    const sum = a.summary || {};
+    return observations.length > 0 || (typeof sum.productCount === 'number' && sum.productCount > 0);
+  });
+  if (usable) {
+    const sum = usable.summary || {};
+    const n = Array.isArray(usable.observations) ? usable.observations.length : (typeof sum.productCount === 'number' ? sum.productCount : null);
+    return {
+      status: 'verified', statusText: '已采集到公开商品页观察', maturity,
+      lastCollectedAt: usable.endedAt || usable.startedAt || null,
+      observedCount: n,
+      discoveryPath: sum.discoveryPath || null,
+      sampleNote: sum.sampleNote || '样本来自公开商品页（含快照与证据引用），受发现路径限制，不代表全量商品',
+    };
+  }
+  if (atts.length) {
+    const last = atts[0];
+    return {
+      status: 'unavailable', statusText: '最近一次公开商品页采集未成功', maturity,
+      lastAttemptAt: last.startedAt || null,
+      failureText: last.errorUserText || '来源暂不可达，稍后可重试。',
+      note: '这不代表官网不支持或没有商品；可能没有可发现的商品页（无 sitemap / 无 JSON-LD Product）。',
+    };
+  }
+  return {
+    status: 'not_collected', statusText: '未采集', maturity,
+    note: '该能力已实现但尚无一次真实成功采集验证；验证完成前不展示商品数据。',
+  };
+}
+
 // ---------- 品牌视图 ----------
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
@@ -476,6 +535,7 @@ function listBrandViews(tenantId, projectId) {
       coverageSummary: cov.summary,
       coverageDimensions: cov.dimensions,
       officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
+      publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
       firstObservedAt: firstObservedAt(tenantId, b.brandId),
       lastObservedAt: last ? last.at : null,
       lastChange: last ? { at: last.at, kind: last.kind, kindText: INTEL_TYPE_TEXT[last.kind] || last.kind, title: last.title } : null,
@@ -526,7 +586,8 @@ function getBrandView(tenantId, brandId, projectId) {
     links,
     coverage: cov,
     officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
-    unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, comp: comp || {} }),
+    publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
+    unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, competitorId: comp ? comp.id : null, comp: comp || {} }),
     products,
     timeline: timelineView(tenantId, brandId, { limit: 100 }),
     intelligence: comp ? buildBrandIntelligence(tenantId, projectId, brandId, comp, {}) : [],
@@ -542,5 +603,5 @@ module.exports = {
   syncProjectBrands, loadProjectState, findCompetitor, domainOfUrl,
   buildCoverage, rebuildTimeline, timelineView, firstObservedAt,
   listIntelligence, buildBrandIntelligence, constructionDimensions,
-  listBrandViews, getBrandView, buildOfficialSiteStatus,
+  listBrandViews, getBrandView, buildOfficialSiteStatus, buildPublicProductsStatus,
 };

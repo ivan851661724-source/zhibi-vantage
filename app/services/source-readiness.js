@@ -25,6 +25,9 @@ const READINESS_STATES = Object.freeze([
 const USER_TEXT = Object.freeze({
   not_configured: '数据服务暂不可用。',
   ready_to_verify: '正在验证数据服务。',
+  // SC-06 r2：公开来源（无需凭据）尚无一次真实成功采集时的诚实口径——
+  // 不写「正在验证」（并非进行中），更不写「已采集/已接通」
+  ready_to_verify_public: '该数据来源尚未完成真实采集验证，暂不展示数据。',
   operational: '',
   auth_rejected: '最近采集失败，可稍后重试。',
   quota_exhausted: '最近采集失败，可稍后重试。',
@@ -107,9 +110,35 @@ function getReadiness(capabilityCode) {
       reason: 'system_credentials_missing',
     };
   }
-  // 无凭据需求的公开来源（如 Shopify 公开目录）：恒可运行
+  // 无凭据需求的公开来源（Shopify 公开目录 / 官网公开页面）：
+  // 🔴 SC-06 r2（评审 §二）：无凭据 ≠ 已接通。运行态同样只能由**真实成功采集**推到
+  // operational；没有成功记录时是 ready_to_verify（来源已配置、尚无真实成功），
+  // 最近一次真实尝试失败则按失败分类如实回显——绝不因为「不需要配置」就恒报可用。
   if (!cfg.keys.length) {
-    return { state: 'operational', userText: '', provider: cap.provider, configKeys: [], configKeysPresent: {} };
+    const okPub = lastSuccess(capabilityCode);
+    const failPub = lastFailure(capabilityCode);
+    const failNewerPub = !!(failPub && (!okPub || String(failPub.at || '') > String(okPub.created_at || '')));
+    if (okPub && !failNewerPub) {
+      return {
+        state: 'operational', userText: '', lastVerifiedAt: okPub.created_at,
+        provider: okPub.provider || cap.provider, publicSource: true,
+        configKeys: [], configKeysPresent: {},
+      };
+    }
+    if (failPub) {
+      const state = failPub.failureClass === 'auth_rejected' ? 'auth_rejected'
+        : failPub.failureClass === 'quota_exhausted' || failPub.failureClass === 'rate_limited' ? 'quota_exhausted'
+          : 'unavailable';
+      return {
+        state, userText: USER_TEXT[state], lastFailureClass: failPub.failureClass, lastFailureAt: failPub.at,
+        publicSource: true, configKeys: [], configKeysPresent: {},
+      };
+    }
+    return {
+      state: 'ready_to_verify', userText: USER_TEXT.ready_to_verify_public,
+      reason: 'public_source_no_verified_success', publicSource: true,
+      configKeys: [], configKeysPresent: {},
+    };
   }
   const ok = lastSuccess(capabilityCode);
   const fail = lastFailure(capabilityCode);
@@ -160,7 +189,9 @@ function recordVerification({ capability, provider, status, failureClass, source
 
 // 管理员健康视图（不显示密钥值，只显示配置存在性 + 状态 + 最近验证/失败）
 function adminView() {
-  const caps = Registry.listCapabilities().filter(c => c.maturity === 'ga' || c.maturity === 'pending_config');
+  // SC-06 r2：待验证能力（代码就绪、尚无真实成功）也必须在管理员健康视图可见——
+  // 否则「已实现但未验证」在运维面上是隐形的。
+  const caps = Registry.listCapabilities().filter(c => c.maturity === 'ga' || c.maturity === 'pending_config' || c.maturity === 'pending_verification');
   return caps.map(c => {
     const r = getReadiness(c.code);
     return {

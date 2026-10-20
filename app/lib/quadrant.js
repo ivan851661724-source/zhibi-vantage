@@ -49,7 +49,13 @@ function computeQuadrant(competitors, opts) {
 
   // B-7b：透传市场币种（由调用方从 intent.regions 取），保持与 /api/sector 同一币种过滤口径
   const sector = Agg.buildSector({ name: opts.sectorName || 'sector', brands: profiles, marketCurrency: opts.marketCurrency });
-  const oppMap = OPP.computeOpportunityMap(comps, { excluded: ex });
+  // SC-06 r2：机会轴只接受统一评论事实链的合格条目（opts.voiceItems）；
+  // 不再从竞品档案的 reviews / painPoints / voiceItems 拼分母。
+  const oppMap = OPP.computeOpportunityMap(comps, {
+    excluded: ex,
+    voiceItems: opts.voiceItems || [],
+    voiceCollected: opts.voiceCollected || 0,
+  });
 
   // 品牌名 → 机会分暴露（仅在该对手参与的主题上累加）
   const exp = {};
@@ -132,7 +138,9 @@ function computeQuadrant(competitors, opts) {
       reason: oppMap.reason || null,
       coveragePct: oppMap.coveragePct || 0,
       brandsWithVoice: oppMap.brandsWithVoice || 0,
-      doneBrands: oppMap.doneBrands || 0
+      doneBrands: oppMap.doneBrands || 0,
+      // SC-06 r2：机会轴的输入资格（前端据此说明「为什么没有机会轴」）
+      voiceBasis: oppMap.voiceBasis || null
     },
     sector: {
       concentration: {

@@ -14,6 +14,12 @@
 //   2. 每条可溯源：记录品牌 + 来源字段 + basis，供逐条核对。
 //   3. 置信度封顶「中」：提及广度只是重要性的代理，不足以支撑高置信结论。
 //   4. 样本不足不出图：有用户声音的对手 < 3 家直接隐藏；覆盖率 < 70% 降级、不作排序结论。
+//   5. 🔴 SC-06 r2：输入只接受「统一评论事实链」产出的合格条目
+//      （services/voice-unified.js 的 buildOpportunityInput / buildOpportunityInputForComps）。
+//      本模块**不再读**竞品档案里的 reviews / painPoints / voiceItems——
+//      那些是旧链路字段，没有 Evidence/Snapshot/sentimentBasis，不能当统计来源。
+//      没有合格输入时返回 hidden + reason='no_evidence_backed_polarity'，
+//      由上层如实显示「用户声音已采集，但尚不足以形成满意度机会判断」。
 // ============================================================
 
 const CONF_CAP = 'medium';               // 置信度硬上限（永不 high）
@@ -21,20 +27,22 @@ const MIN_BRANDS_WITH_VOICE = 3;         // 出图门槛：至少 3 家有用户
 const COVERAGE_OK = 0.7;                 // 覆盖率红线：低于此仅展示、不作排序结论
 const SIM_THRESHOLD = 0.5;               // 主题聚类相似度阈值（字符二元组 Jaccard）
 const MAX_THEMES = 24;                   // 前端展示上限（total 仍给全量计数）
+// 情绪依据来源分类（与 services/voice-unified.js 的契约保持一致，此处为守门副本）
+const SENTIMENT_BASIS_KINDS = ['source_field', 'deterministic_rule', 'model_extraction'];
 
 // 分区阈值（沿用 ODI 惯例：>15 严重欠满足，10–15 值得关注，<10 已满足/不重要）
 const ZONE_UNDERSERVED = 15;
 const ZONE_MODERATE = 10;
 
 const CAVEATS = [
-  '重要性＝提及广度代理（多少家竞争品牌的用户声音提到），不是调研测得的重要性；满意度＝正负提及比，不是满意度评分。',
+  '重要性＝提及广度代理（多少家竞争品牌的用户声音提到），不是调研测得的重要性；满意度＝正负提及比，只统计带依据（polarity + sentimentBasis）的公开评论，中性或未分类评论不进任何分子或分母。',
   '分母是「有用户声音的竞争品牌家数」，不是消费者样本量。本图可以帮你排优先级，不能替代真实用户访谈。',
   '本图任何一条置信度封顶为「中」——代理指标不足以支撑高置信结论。',
   '同义表述按字面相似度合并，阈值取保守值：宁可少合并也不硬凑。因此机会分的失真方向是「低估」而非「高估」，看到的分数是下限。',
   '分区（重点机会 / 中等 / 已覆盖）是「相对当前数据」：按机会分在可见主题里排 top 15% / 再 35% 着色，不是 Ulwick 绝对门槛；上面展示的重要性 / 满意度 / 机会分仍是绝对代理值，请照绝对值看。'
 ];
 
-const METHOD_LABEL = '用户声音聚类（提及广度代理重要性 · 正负提及比代理满意度）';
+const METHOD_LABEL = '用户声音聚类（提及广度代理重要性 · 带依据的正负提及比代理满意度）';
 
 function stableHash(str) {
   let h = 2166136261;
@@ -79,39 +87,45 @@ function similarity(a, b) {
   return 0.5 * bi + 0.5 * uni;
 }
 
-// 从竞品档案里收集「用户声音条目」。同一品牌同极性的重复表述先去重，避免刷高广度。
-// 返回 [{ text, brand, brandId, polarity:'pos'|'neg', field, basis }]
-function collectVoiceItems(comps) {
-  const items = [];
+// 统一评论事实链 → 聚类条目。只认 opts.voiceItems（voice-unified 已过资格闸），
+// 并在此再做一次轻量守门（polarity 必须是 pos/neg、必须带 sentimentBasis/来源/观察时间）。
+// 返回 [{ text, brand, brandId, competitorId, polarity:'pos'|'neg', field, basis, url, observedAt }]
+function collectUnifiedItems(opts) {
+  const raw = (opts && Array.isArray(opts.voiceItems)) ? opts.voiceItems : [];
   const seen = new Set();
-  const push = (c, text, polarity, field, basis, url) => {
-    const t = String(text == null ? '' : text).trim();
-    if (!t) return;
-    const key = c.id + '|' + polarity + '|' + normTheme(t);
-    if (!key.split('|')[2]) return;
-    if (seen.has(key)) return;
+  const items = [];
+  for (const v of raw) {
+    if (!v) continue;
+    const polarity = v.polarity === 'pos' ? 'pos' : (v.polarity === 'neg' ? 'neg' : null);
+    if (!polarity) continue;                                   // neu / 未分类 → 不进分子也不进分母
+    if (!v.sentimentBasis || !String(v.sentimentBasisNote || '').trim()) continue; // 依据不可解释 → 丢弃
+    if (!v.url || !v.observedAt) continue;                     // 不可核验 → 丢弃
+    const brandKey = v.brandId || v.competitorId || v.brand;
+    if (!brandKey) continue;                                   // 无品牌归属 → 不分母
+    const text = String(v.text == null ? '' : v.text).trim();
+    if (!text) continue;
+    const key = brandKey + '|' + polarity + '|' + normTheme(text);
+    if (seen.has(key)) continue;                               // 同品牌同极性去重，避免刷高广度
     seen.add(key);
-    // R2.3：真实声音条目带 url（来源可点开溯源）；LLM 研判主题无 url → null，不编造
-    items.push({ text: t.slice(0, 60), brand: c.name, brandId: c.id, polarity, field, basis: basis || 'unverified', url: url || null });
-  };
-  comps.forEach(c => {
-    const rv = c.reviews || {};
-    (rv.negThemes || []).forEach(t => push(c, t, 'neg', 'reviews.negThemes', rv.basis));
-    (rv.posThemes || []).forEach(t => push(c, t, 'pos', 'reviews.posThemes', rv.basis));
-    (c.painPoints || []).forEach(p => push(c, (p && p.point != null) ? p.point : p, 'neg', 'painPoints', p && p.basis));
-    // R2.5：真实声音（voice-collector 采集，带来源 URL）接入机会管线
-    (c.voiceItems || []).forEach(v => {
-      if (!v || (v.polarity !== 'pos' && v.polarity !== 'neg')) return;
-      push(c, v.text, v.polarity, v.field || 'voice.real', v.basis, v.url);
+    items.push({
+      text: text.slice(0, 60),
+      brand: v.brand || brandKey,
+      brandId: v.brandId || null,
+      competitorId: v.competitorId || null,
+      polarity,
+      field: v.field || 'public_reviews.verified_item',
+      basis: v.sentimentBasis,
+      basisNote: v.sentimentBasisNote || null,
+      url: v.url || null,
+      observedAt: v.observedAt || null,
+      evidenceId: v.evidenceId || null,
+      snapshotId: v.snapshotId || null,
     });
-  });
+  }
   return items;
 }
 
-function hasVoice(c) {
-  const rv = c.reviews || {};
-  return ((rv.negThemes || []).length + (rv.posThemes || []).length + ((c.painPoints || []).length) + ((c.voiceItems || []).length)) > 0;
-}
+function itemBrandKey(m) { return (m && (m.brandId || m.competitorId || m.brand)) || null; }
 
 // 贪心聚类：按出现频次从高到低，逐条并入首个足够相似的簇，否则自立门户。
 // 确定性（同输入同输出），且保留全部原始成员供前端展示「合并自：…」。
@@ -146,9 +160,9 @@ function clusterThemes(items, opts) {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function round1(v) { return Math.round(v * 10) / 10; }
 
-// 单簇打分。brandsWithVoice = 分母（有用户声音的对手家数）
+// 单簇打分。brandsWithVoice = 分母（有合格用户声音事实的对手家数）
 function scoreCluster(cl, brandsWithVoice) {
-  const brandSet = new Set(cl.mentions.map(m => m.brandId || m.brand));
+  const brandSet = new Set(cl.mentions.map(m => itemBrandKey(m)));
   const brands = Array.from(new Set(cl.mentions.map(m => m.brand)));
   const pos = cl.mentions.filter(m => m.polarity === 'pos').length;
   const neg = cl.mentions.filter(m => m.polarity === 'neg').length;
@@ -156,12 +170,13 @@ function scoreCluster(cl, brandsWithVoice) {
   const breadth = clamp(brandSet.size / denom, 0, 1);
   const importance = round1(1 + 9 * breadth);
   const totalMentions = pos + neg;
+  // 分母只含已分类（pos/neg）提及：neu/未分类绝不进满意度分母
   const satisfaction = totalMentions ? round1(1 + 9 * (pos / totalMentions)) : 5.5;
   const opportunity = round1(importance + Math.max(importance - satisfaction, 0));
   const zone = opportunity >= ZONE_UNDERSERVED ? 'underserved'
     : opportunity >= ZONE_MODERATE ? 'moderate' : 'served';
-  const cited = cl.mentions.filter(m => m.basis === 'verified' || m.basis === 'inferred').length;
-  // 置信度封顶 medium：广度≥3家且至少 2 条有据 → medium，否则 low
+  const cited = cl.mentions.filter(m => SENTIMENT_BASIS_KINDS.indexOf(m.basis) !== -1).length;
+  // 置信度封顶 medium：广度≥3家且至少 2 条带可解释依据 → medium，否则 low
   const confidence = (brandSet.size >= 3 && cited >= 2) ? CONF_CAP : 'low';
   return {
     oid: 'O-' + stableHash(normTheme(cl.rep)),
@@ -179,8 +194,9 @@ function scoreCluster(cl, brandsWithVoice) {
     denominatorText: `${brandSet.size}/${denom} 家有用户声音的竞争品牌提到（正面 ${pos} · 负面 ${neg}）`,
     sources: cl.mentions.slice(0, 12).map(m => ({
       name: m.brand, field: m.field, polarity: m.polarity,
-      basis: m.basis || 'unverified', detail: m.text,
-      url: m.url || null // R2.3：每条主题可溯源（真实声音带原始 URL）
+      basis: m.basis || 'unverified', basisNote: m.basisNote || null,
+      detail: m.text, url: m.url || null, observedAt: m.observedAt || null,
+      evidenceId: m.evidenceId || null, snapshotId: m.snapshotId || null,
     }))
   };
 }
@@ -201,48 +217,74 @@ function applyRelativeZones(themes) {
   });
 }
 
-// 初步主题（薄样本降级用）：无论是否达出图门槛，都尽可能聚类已识别的用户声音，
-// 供前端在「样本不足」时仍展示「已算出的部分信号」，而非塌成空屏。
+// 初步主题（薄样本降级用）：只有在**已通过资格闸**的条目存在时才聚类，
+// 供前端在「样本不足」时仍展示已算出的部分信号，而非塌成空屏。
 // 与正式出图的区别：① 不分区排名（不制造 top15% 重点机会）；② 每条锁 low 置信并标 preliminary。
-function computePreliminaryThemes(voiceComps, brandsWithVoice, doneBrands, opts) {
-  const items = collectVoiceItems(voiceComps);
-  if (Array.isArray(opts.voiceItems) && opts.voiceItems.length) items.push.apply(items, opts.voiceItems);
-  if (!items.length) return { themes: [], mentionsTotal: 0 };
-  const clusters = clusterThemes(items, { threshold: opts.threshold });
+function computePreliminaryThemes(items, brandsWithVoice, doneBrands) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return { themes: [], mentionsTotal: 0 };
+  const clusters = clusterThemes(list, {});
   let themes = clusters.map(cl => scoreCluster(cl, brandsWithVoice));
   themes.sort((a, b) => (b.opportunity - a.opportunity) || (b.brandsMentioned - a.brandsMentioned) || a.label.localeCompare(b.label));
   themes = themes.slice(0, MAX_THEMES);
   themes.forEach((t, i) => { t.onum = i + 1; }); // ▶ #307：顺序编号，供 brief 引用 [O#]
   const note = `初步信号：样本不足（仅 ${brandsWithVoice}/${doneBrands} 家有用户声音），未达出图门槛，下列主题仅作已识别信号陈列、不作排序结论。`;
   themes.forEach(t => { t.confidence = 'low'; t.preliminary = true; t.note = note; });
-  return { themes, mentionsTotal: items.length };
+  return { themes, mentionsTotal: list.length };
 }
 
-// 主入口：从竞品档案算机会地图。派生产物，不落盘。
-// opts: { excluded: Set|Array, threshold }
+// 主入口：从**统一评论事实链**算机会地图。派生产物，不落盘。
+// opts: {
+//   excluded: Set|Array,
+//   threshold: number,
+//   voiceItems: 合格事实条目（只来自 services/voice-unified.js 的装配结果）,
+//   voiceCollected: 已采集到的公开评论条数（用于区分「没采到」与「采到了但没分类」）,
+// }
 function computeOpportunityMap(competitors, opts) {
   opts = opts || {};
   const ex = opts.excluded instanceof Set ? opts.excluded : new Set(opts.excluded || []);
   const comps = (competitors || []).filter(c => c && c.status === 'done' && !ex.has(c.id));
   const doneBrands = comps.length;
-  const voiceComps = comps.filter(hasVoice);
-  const brandsWithVoice = voiceComps.length;
+  const compIds = new Set(comps.map(c => c.id).filter(Boolean));
+  // 只收本项目已就绪品牌的合格条目（跨项目/已排除品牌的条目不得进分母）
+  const items = collectUnifiedItems(opts).filter(it => {
+    const k = itemBrandKey(it);
+    return !comps.length || compIds.has(k) || !k;
+  });
+  const brandsWithVoice = new Set(items.map(itemBrandKey).filter(Boolean)).size;
   const coverage = doneBrands ? brandsWithVoice / doneBrands : 0;
   const coveragePct = Math.round(coverage * 100);
+  const collected = Number.isFinite(Number(opts.voiceCollected)) ? Number(opts.voiceCollected) : 0;
+  const voiceBasis = {
+    collected,
+    qualified: items.length,
+    brandsWithVoice,
+    doneBrands,
+    gate: items.length ? 'ok' : (collected > 0 ? 'no_evidence_backed_polarity' : 'no_public_reviews'),
+    note: items.length ? null : (collected > 0
+      ? '用户声音已采集，但尚不足以形成满意度机会判断。'
+      : '尚未采集到可核验的公开评论，暂不形成满意度判断。'),
+  };
 
+  if (!items.length) {
+    // 没有任何合格输入 → 不出图、不给初步主题、不做相对百分位分区
+    return {
+      hidden: true, preliminary: false,
+      reason: collected > 0 ? 'no_evidence_backed_polarity' : 'need_more_voice',
+      doneBrands, brandsWithVoice: 0, coveragePct: 0, collected,
+      caveats: CAVEATS, preliminaryThemes: [], mentionsTotal: 0,
+      voiceBasis,
+    };
+  }
   if (doneBrands < 3) {
-    const pt = computePreliminaryThemes(voiceComps, brandsWithVoice, doneBrands, opts);
-    return { hidden: true, preliminary: true, reason: 'need_more_brands', doneBrands, brandsWithVoice, coveragePct, caveats: CAVEATS, preliminaryThemes: pt.themes, mentionsTotal: pt.mentionsTotal };
+    const pt = computePreliminaryThemes(items, brandsWithVoice, doneBrands);
+    return { hidden: true, preliminary: true, reason: 'need_more_brands', doneBrands, brandsWithVoice, coveragePct, caveats: CAVEATS, preliminaryThemes: pt.themes, mentionsTotal: pt.mentionsTotal, voiceBasis };
   }
   if (brandsWithVoice < MIN_BRANDS_WITH_VOICE) {
-    const pt = computePreliminaryThemes(voiceComps, brandsWithVoice, doneBrands, opts);
-    return { hidden: true, preliminary: true, reason: 'need_more_voice', doneBrands, brandsWithVoice, coveragePct, caveats: CAVEATS, preliminaryThemes: pt.themes, mentionsTotal: pt.mentionsTotal };
+    const pt = computePreliminaryThemes(items, brandsWithVoice, doneBrands);
+    return { hidden: true, preliminary: true, reason: 'need_more_voice', doneBrands, brandsWithVoice, coveragePct, caveats: CAVEATS, preliminaryThemes: pt.themes, mentionsTotal: pt.mentionsTotal, voiceBasis };
   }
 
-  const items = collectVoiceItems(voiceComps);
-  // 文档 v0.5 第一部分：注入实时社媒声音（VoiceItem 归一化产物）。
-  // 向后兼容：不传 voiceItems 时行为完全不变；collectVoiceItems 本身零改动。
-  if (Array.isArray(opts.voiceItems) && opts.voiceItems.length) items.push.apply(items, opts.voiceItems);
   const clusters = clusterThemes(items, { threshold: opts.threshold });
   let themes = clusters.map(cl => scoreCluster(cl, brandsWithVoice));
   const lowCoverage = coverage < COVERAGE_OK;
@@ -289,13 +331,14 @@ function computeOpportunityMap(competitors, opts) {
     confidenceCap: CONF_CAP,
     method: METHOD_LABEL,
     caveats: CAVEATS,
+    voiceBasis,
     themes
   };
 }
 
 module.exports = {
   CONF_CAP, MIN_BRANDS_WITH_VOICE, COVERAGE_OK, SIM_THRESHOLD, CAVEATS, METHOD_LABEL,
-  ZONE_UNDERSERVED, ZONE_MODERATE,
-  normTheme, bigrams, similarity, collectVoiceItems, hasVoice,
+  ZONE_UNDERSERVED, ZONE_MODERATE, SENTIMENT_BASIS_KINDS,
+  normTheme, bigrams, similarity, collectUnifiedItems, itemBrandKey,
   clusterThemes, scoreCluster, computeOpportunityMap
 };

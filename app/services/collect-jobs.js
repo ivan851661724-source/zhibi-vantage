@@ -284,24 +284,33 @@ async function executeJob(job) {
     try { chk = adapter.supports ? adapter.supports(brandCtx) : chk; } catch (e) { chk = { supported: true }; }
     if (chk && chk.supported === false) { providerResults.push({ code, skipped: true, reason: chk.reasonCode || 'unsupported' }); return { skipped: true }; }
     let r = null;
+    // 🔴 SC-06 r2（评审 §三.3）：超时必须真正取消底层请求，不能只让 Promise.race 返回。
+    // AbortController 贯穿 adapter.collect → Net.fetchPage → safeRequestOnce(req.destroy)：
+    // 超时先 abort（网络请求被真正打断、socket 释放），再落终态；否则底层请求永久悬挂，
+    // worker 表面恢复、连接和字节流仍在漏。
+    const ctrl = new AbortController();
+    const providerCtx = Object.assign({}, runCtx, { signal: ctrl.signal });
+    const COLLECT_TIMEOUT_MS = Number(process.env.ZB_COLLECT_TIMEOUT_MS) || 10 * 60 * 1000;
+    let timer = null;
+    let timedOut = false;
     try {
-      // SC-06 修复：attempt 级超时护栏。fetchPage 挂死（对方慢速滴漏字节）
-      // 曾让 adapter.collect 永不返回、永久占用 worker——所有后续采集饿死。
-      // 超时按「来源暂不可达」诚实落终态（INTERNAL_COLLECT_TIMEOUT 分类由
-      // failAttempt 走 unavailable 文案，不伪装成功也不暴露内部栈）。
-      const COLLECT_TIMEOUT_MS = Number(process.env.ZB_COLLECT_TIMEOUT_MS) || 10 * 60 * 1000;
-      let timer = null;
       r = await Promise.race([
-        adapter.collect(runCtx),
-        new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('collect_timeout')), COLLECT_TIMEOUT_MS); }),
+        adapter.collect(providerCtx),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            try { ctrl.abort(new Error('collect_timeout')); } catch (e2) { /* abort 自身失败不改变结论 */ }
+            rej(new Error('collect_timeout'));
+          }, COLLECT_TIMEOUT_MS);
+        }),
       ]).finally(() => { if (timer) clearTimeout(timer); });
     } catch (e) {
       if (e && e.fenced) return { fenced: true };
       executed.push(code);
-      if (String(e && e.message || e) === 'collect_timeout') {
-        // 超时 → 沿「链耗尽」路径落统一 failed 终态（unavailable 文案）
-        providerResults.push({ code, failed: true, errorClass: 'unavailable', error: 'collect_timeout' });
-        return { providerFailed: true };
+      if (timedOut || String(e && e.message || e) === 'collect_timeout') {
+        // 超时 → 如实按 timeout 分类落终态（不伪装成功、不写成「没数据」）
+        providerResults.push({ code, failed: true, errorClass: 'timeout', error: 'collect_timeout', aborted: true });
+        return { providerFailed: true, aborted: true };
       }
       providerResults.push({ code, failed: true, error: String(e && e.message || e).slice(0, 120) });
       return { providerFailed: true };

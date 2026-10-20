@@ -50,6 +50,15 @@ export function VoicePanel({ voice, onEvidence }: { voice: UnifiedVoice | null |
         </ul>
       ) : null}
 
+      {/* SC-06 r2：机会判断资格与样本充分性分开说——采到评论 ≠ 能形成满意度判断 */}
+      {verified.items.length ? (
+        <p className="hint">
+          机会判断资格：{verified.items.some(it => it.polarity && it.sentimentBasis)
+            ? '已有带依据的正负分类；是否形成群体结论仍取决于样本量与覆盖率。'
+            : '尚未形成。当前只有评论片段/评分/评价数，没有带依据（polarity + sentimentBasis）的正负主题，因此不进入「满意度 × 重要性」机会算法，也不把中性评论算进满意度分母。'}
+        </p>
+      ) : null}
+
       {verified.items.length ? (
         <ul className="core-voice-list">
           {verified.items.map((it, i) => {

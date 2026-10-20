@@ -166,6 +166,14 @@ export function DimensionCard({
       {/* P0-2 整改 r2：pending_config 用户侧口径「数据服务暂不可用」（reasonText 后端下发） */}
       {dim.surfaceState === 'pending_config' && dim.reasonText ? <p className="ds-card-note ds-note-config">{dim.reasonText}</p> : null}
       {dim.surfaceState === 'empty' ? <p className="ds-card-note">该维度受支持但还未采集过数据，点「刷新数据」开始第一次采集。</p> : null}
+      {/* SC-06 r2：能力已实现但尚无真实成功采集的项单列——不混进已采集结果、不显示观察数 */}
+      {dim.pendingVerification && dim.pendingVerification.length ? (
+        <ul className="ds-gaps">
+          {dim.pendingVerification.map(pv => (
+            <li key={'pv_' + pv.code}><span aria-hidden>◌</span> {pv.displayName}：{pv.stateText || '待验证（能力已实现，尚未完成真实采集）'}</li>
+          ))}
+        </ul>
+      ) : null}
       {dim.surfaceState === 'loading' ? <p className="ds-card-note">正在采集该维度数据，完成后自动更新（无需重复点击）。</p> : null}
 
       {/* 最近更新失败 + 旧数据保留（整改 §三.2：失败不吞旧，明确告知） */}

@@ -27,17 +27,21 @@ const Db = require('../services/db.js');
 const TID = 'tenant:sc06a';
 
 // ---------- A 组：能力注册与语义 ----------
-test('A1 registry 完整性 + 两个新能力已注册（ga、无凭据、公开网页访问）', () => {
+test('A1 registry 完整性 + 两个新能力已注册（官网资料 ga；公开商品待验证，无凭据）', () => {
   const ig = Registry.assertRegistryIntegrity();
   assert.ok(ig.ok, 'integrity: ' + ig.errors.join(';'));
   for (const code of ['official_site_profile', 'public_site_products']) {
     const cap = Registry.getCapability(code);
     assert.ok(cap, code + ' 已注册');
     assert.strictEqual(cap.dimension, 'website_products');
-    assert.strictEqual(cap.maturity, 'ga');
     assert.strictEqual(cap.requiresServerCredential, false, '公开网页抓取不需要凭据');
     assert.ok(!cap.configKeys, '无 configKeys（不需要用户配置任何 key）');
   }
+  // SC-06 r2（评审 §二）：成熟度与真实验证分开——
+  // official_site_profile 已有真实成功采集（VEJA）→ ga；
+  // public_site_products 尚无真实商品观察闭环 → 不得 ga，只能是 pending_verification。
+  assert.strictEqual(Registry.getCapability('official_site_profile').maturity, 'ga');
+  assert.strictEqual(Registry.getCapability('public_site_products').maturity, 'pending_verification');
 });
 
 test('A2 非 Shopify 站：Shopify 目录不可用文案「Shopify 公开商品目录不可用」，官网资料仍支持', () => {

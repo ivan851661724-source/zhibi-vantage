@@ -99,7 +99,27 @@ async function quadrant(ctx, req, res, url, p) {
   const st = ctx.loadState();
   if (!st) { ctx.sendJSON(res, 404, { error: 'NO_STATE' }); return true; }
   const excluded = new Set(Array.isArray(st.excluded) ? st.excluded : []);
-  const q = ctx.QD.computeQuadrant(st.competitors, { excluded, sectorName: st.track, marketCurrency: marketCurrency(st.intent && st.intent.regions) });
+  // SC-06 r2：机会轴输入来自统一评论事实链（与机会页/报告/品牌档案同一读模型）
+  let voiceInput = { items: [], collected: 0 };
+  try {
+    const VoiceUnified = require('../../services/voice-unified.js');
+    const BrandStore = require('../../services/brand-store.js');
+    const brandByRef = new Map();
+    if (st.tenantId && st.projectId) {
+      for (const l of (BrandStore.listBrandLinksForProject(st.tenantId, st.projectId) || [])) {
+        if (l && l.competitorRef && l.brandId) brandByRef.set(l.competitorRef, l.brandId);
+      }
+    }
+    const done = (st.competitors || []).filter(c => c && c.status === 'done' && !excluded.has(c.id));
+    voiceInput = VoiceUnified.buildOpportunityInputForComps({
+      tenantId: st.tenantId, projectId: st.projectId, comps: done,
+      brandIdOf: (c) => brandByRef.get(c.id) || null,
+    });
+  } catch (e) { /* 读不到来源层 → 机会轴按无合格输入处理（不猜） */ }
+  const q = ctx.QD.computeQuadrant(st.competitors, {
+    excluded, sectorName: st.track, marketCurrency: marketCurrency(st.intent && st.intent.regions),
+    voiceItems: voiceInput.items, voiceCollected: voiceInput.collected,
+  });
   ctx.sendJSON(res, 200, q);
   return true;
 }
