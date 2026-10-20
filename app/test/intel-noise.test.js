@@ -129,7 +129,7 @@ const COMPS = [
   });
 
   await t('N3 constructionDimensions 恰 4 条、按 code 去重、字段极简', async () => {
-    const cd = BrandSvc.constructionDimensions();
+    const cd = BrandSvc.constructionDimensions(TID, PID);
     assert.strictEqual(cd.length, 4, '恰 4 条，实际 ' + cd.length + '：' + JSON.stringify(cd));
     const codes = new Set(cd.map(d => d.code));
     assert.strictEqual(codes.size, 4, 'code 去重后恰 4');
@@ -146,12 +146,12 @@ const COMPS = [
   });
 
   await t('N4 四项名称与统一文案正确（r2：用户侧口径，无凭据变量名）', async () => {
-    const cd = BrandSvc.constructionDimensions();
+    const cd = BrandSvc.constructionDimensions(TID, PID);
     const names = cd.map(d => d.displayName).sort();
     assert.deepStrictEqual(names, ['广告活动', '搜索与热度', '社媒内容', '口碑与评论'].sort(), JSON.stringify(names));
     for (const d of cd) {
       assert.ok(/当前不生成数据、估算或结论。/.test(d.message), '统一文案骨架：' + d.message);
-      assert.ok(/数据服务暂不可用/.test(d.message), d.code + ' 用户侧口径');
+      assert.ok(/尚未采到可核验数据/.test(d.message), d.code + ' 建设中语义');
       assert.strictEqual(/YOUTUBE_API_KEY|DATAFORSEO|TIKTOK_CLIENT|SERPER_API_KEY/.test(d.message), false, '无凭据变量名');
       assert.strictEqual('configKeys' in d, false, 'configKeys 不进用户投影');
     }
@@ -160,7 +160,7 @@ const COMPS = [
   await t('N5 建设中维度与品牌数量/采集次数无关（项目级、不随品牌翻倍）', async () => {
     // 再刷一次 N1（第 3 次采集）后，constructionDimensions 仍是恰好 4 条
     runAttempt('compN1', 'noise-n1-c', 'success', true);
-    const cd = BrandSvc.constructionDimensions();
+    const cd = BrandSvc.constructionDimensions(TID, PID);
     assert.strictEqual(cd.length, 4, '采集次数增加不影响建设中维度数量');
     const items2 = BrandSvc.listIntelligence(TID, { projectId: PID });
     assert.strictEqual(items2.filter(i => i.type === 'gap' || (i.title || '').includes('：未接入')).length, 0, '新刷新后噪音仍为 0');
@@ -171,6 +171,39 @@ const COMPS = [
     assert.strictEqual(itemsB.filter(i => (i.title || '').includes('未接入')).length, 0, '品牌过滤下无噪音');
   });
 
-  console.log(passed === 5 ? '[intel-noise] ALL PASS（5/5）' : '[intel-noise] ' + failed + ' FAIL / ' + passed + ' PASS');
+
+  await t('N6 建设中维度按项目或品牌真实证据投影，不与已采集数据矛盾', async () => {
+    const snap = mkSnapshot(TID, 'https://ads.noiseok.example.com/ad.json', JSON.stringify({ ads: [{ id: 'ad-1' }] }));
+    const ev = EvidenceStore.recordEvidence({
+      tenantId: TID, projectRef: PID, brandHint: 'NoiseOk', source: 'tiktok_ad_library', provider: 'tiktok_commercial_content',
+      source_snapshot_ids: [snap.snapshot_id],
+      claim: { field: 'ad.observation', scope: 'public_ad_observation' },
+      entity_key: 'noiseok.example.com', entity_ref: { kind: 'advertiser', id: 'noiseok' },
+      extracted_value: { creativeCount: 1 }, unit: null, currency: null, market: null,
+      evidence_status: 'verified', parser_version: 'tiktok-adapter-1', extractor_version: 'tiktok-adapter-1',
+      observed_at: snap.observed_at, note: 'construction coverage fixture',
+    });
+    assert.ok(ev.recorded, '广告 Evidence 落账');
+    const attempt = SurfaceStore.createAttempt({
+      tenantId: TID, projectId: PID, competitorId: 'compN1', capability: 'tiktok_commercial_content',
+      dimension: 'ad_campaigns', trigger: 'manual', idempotencyKey: 'noise-ad-evidence', nowMs: Date.now(),
+    });
+    SurfaceStore.completeAttempt(TID, attempt.attempt.attemptId, {
+      status: 'success', sourceStatus: 'success', observations: [],
+      snapshotIds: [snap.snapshot_id], evidenceIds: [ev.meta.evidence_id],
+      summary: { kind: 'ad_creatives', creativeCount: 1, measurementMethod: 'official_disclosure', partialScan: false },
+      endedAt: new Date().toISOString(),
+    });
+    const projectCoverage = BrandSvc.constructionDimensions(TID, PID);
+    assert.ok(!projectCoverage.some(d => d.code === 'ad_campaigns'), '项目已有可核验广告数据，不再列为建设中');
+    const noiseOkBrand = BrandStore.brandIdForCompetitor(TID, PID, 'compN1');
+    const noisePartBrand = BrandStore.brandIdForCompetitor(TID, PID, 'compN2');
+    assert.ok(!BrandSvc.constructionDimensions(TID, PID, noiseOkBrand).some(d => d.code === 'ad_campaigns'), '有广告数据的品牌不显示广告建设中项');
+    const noAdForBrand = BrandSvc.constructionDimensions(TID, PID, noisePartBrand).find(d => d.code === 'ad_campaigns');
+    assert.ok(noAdForBrand && noAdForBrand.state === 'pending_config', '无可核验广告数据的品牌如实保留建设中项');
+    assert.ok(/尚未采到可核验数据/.test(noAdForBrand.message), '不再用“服务不可用”否定项目内已采到的数据');
+  });
+
+  console.log(passed === 6 ? '[intel-noise] ALL PASS（6/6）' : '[intel-noise] ' + failed + ' FAIL / ' + passed + ' PASS');
   process.exit(failed === 0 ? 0 : 1);
 })().catch(e => { console.error('[intel-noise] FATAL', e && e.stack || e); process.exit(1); });

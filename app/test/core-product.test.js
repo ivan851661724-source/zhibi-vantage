@@ -159,7 +159,7 @@ function pageBody(ids) {
     const gaps = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, type: 'gap' });
     assert.strictEqual(gaps.length, 0, '未接入维度不得生成情报事件');
     for (const i of all) assert.ok(!(i.title || '').includes('：未接入'), '无「XX：未接入」噪音卡片');
-    const cd = BrandSvc.constructionDimensions();
+    const cd = BrandSvc.constructionDimensions(TID_A, PID_A);
     assert.strictEqual(cd.length, 4, '建设中维度恰 4 条（独立字段）');
     // 按时间筛选
     const future = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, from: new Date(Date.now() + 86400000).toISOString() });

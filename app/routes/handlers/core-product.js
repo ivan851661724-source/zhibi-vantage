@@ -128,14 +128,18 @@ async function intelligence(ctx, req, res, url) {
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const brandId = q(url, 'brandId');
-  if (brandId && !brandInTenant(tid, brandId)) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
+  const selectedBrand = brandId ? brandInTenant(tid, brandId) : null;
+  if (brandId && !selectedBrand) { ctx.sendJSON(res, 404, { error: 'BRAND_NOT_FOUND', message: '品牌不存在或不属于当前租户。' }); return true; }
+  if (selectedBrand && !BrandStore.getLink(tid, selectedBrand.brandId, rp.projectId)) {
+    ctx.sendJSON(res, 404, { error: 'BRAND_NOT_IN_PROJECT', message: '该品牌未关联到当前项目。' }); return true;
+  }
   const items = BrandSvc.listIntelligence(tid, {
     projectId: rp.projectId, brandId, type: q(url, 'type'), from: q(url, 'from'), to: q(url, 'to'),
   });
   ctx.sendJSON(res, 200, {
     projectId: rp.projectId, items, count: items.length,
     // r4.10：项目级建设中维度（未接入维度不再混入 items，改由本字段独立承载）
-    constructionDimensions: BrandSvc.constructionDimensions(),
+    constructionDimensions: BrandSvc.constructionDimensions(tid, rp.projectId, selectedBrand ? selectedBrand.brandId : null),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,

@@ -17,6 +17,7 @@ const Registry = require('./capability-registry.js');
 const Surface = require('./data-surface.js');
 const SurfaceStore = require('./surface-store.js');
 const EvidenceStore = require('../research/evidence-store.js');
+const Snapshot = require('../research/source-snapshot.js');
 const DomainEvent = require('../research/domain-event.js');
 
 // 数据性质（nature）→ 用户语言
@@ -346,23 +347,65 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
 // （该维度下无 ga 能力 → 未接入）；按 code 去重恰一条；纯静态投影——
 // 不含品牌 ID、事件 ID、时间戳、Evidence/Snapshot 或任何模拟数据。
 // 暴露路径在租户鉴权后的 /api/intelligence 内，天然 tenant/project scoped。
-function constructionDimensions() {
+function attemptHasEvidenceBackedData(tenantId, attempt) {
+  if (!attempt || !['success', 'partial'].includes(attempt.status)) return false;
+  const evidenceIds = Array.isArray(attempt.evidenceIds) ? attempt.evidenceIds : [];
+  const attemptSnapshotIds = new Set(Array.isArray(attempt.snapshotIds) ? attempt.snapshotIds : []);
+  if (!evidenceIds.length || !attemptSnapshotIds.size) return false;
+  for (const evidenceId of evidenceIds) {
+    let evidence = null;
+    try { evidence = EvidenceStore.getEvidenceById(tenantId, evidenceId); } catch (e) { evidence = null; }
+    if (!evidence || evidence.evidence_status !== 'verified') continue;
+    const evidenceSnapshotIds = Array.isArray(evidence.source_snapshot_ids) ? evidence.source_snapshot_ids : [];
+    for (const snapshotId of evidenceSnapshotIds) {
+      if (!attemptSnapshotIds.has(snapshotId)) continue;
+      let snapshot = null;
+      try { snapshot = Snapshot.getById(tenantId, snapshotId); } catch (e) { snapshot = null; }
+      if (snapshot && snapshot.raw_payload_ref && snapshot.raw_payload_ref.path) return true;
+    }
+  }
+  return false;
+}
+
+// 某 capability 在 scope 内只有存在「成功/部分成功 + Evidence + 同 attempt Snapshot」
+// 才算真正可展示数据。running、failed、无证据的测试或损坏记录均不能掩盖建设中状态。
+function capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, capability) {
+  for (const competitorId of competitorIds || []) {
+    if (!competitorId) continue;
+    let attempts = [];
+    try { attempts = SurfaceStore.listAttempts(tenantId, projectId, competitorId, capability, 20); } catch (e) { attempts = []; }
+    if (attempts.some(a => attemptHasEvidenceBackedData(tenantId, a))) return true;
+  }
+  return false;
+}
+
+// ---------- 项目/品牌范围建设中维度（r4.10 + r6） ----------
+// 这仍是底部单一、去重的覆盖投影，不是情报事件。它必须与真实数据面一致：
+// pending_config 能力一旦在当前 scope 有 Evidence 支持的可展示数据，就从建设中列表移除。
+// 无 brandId 时按项目所有品牌判断；传 brandId 时只按该品牌在当前项目的 competitor 判断。
+function constructionDimensions(tenantId, projectId, brandId) {
+  if (!tenantId || !projectId) return [];
+  const state = loadProjectState(tenantId, projectId);
+  const allCompetitors = (state && Array.isArray(state.competitors)) ? state.competitors : [];
+  let competitorIds = allCompetitors.map(c => c && c.id).filter(Boolean);
+  if (brandId) {
+    const link = BrandStore.getLink(tenantId, brandId, projectId);
+    if (!link || !link.competitorRef) return [];
+    competitorIds = [link.competitorRef];
+  }
   const out = [];
   for (const d of Registry.listDimensions()) {
     const caps = Registry.capabilitiesByDimension(d.code);
     const ga = caps.filter(c => c.maturity === 'ga');
     if (ga.length) continue;
     const pending = caps.filter(c => c.maturity === 'pending_config');
-    // r2：维度下全部为 pending_config → 用户侧「数据服务暂不可用」；
-    // 仍无任何真实能力 → 尚未接入。两种状态都不生成情报事件。
+    if (pending.some(c => capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, c.code))) continue;
     if (pending.length) {
-      // P0-2 整改 r2：用户侧口径收敛——「数据服务暂不可用」；configKeys 只进
-      // 管理员健康接口，不进用户投影（任务书 r2 §P0-2）。
       out.push({
         code: d.code,
         displayName: d.displayName,
         state: 'pending_config',
-        message: '数据服务暂不可用，请稍后再试。当前不生成数据、估算或结论。',
+        message: '尚未采到可核验数据，当前不生成数据、估算或结论。',
       });
     } else {
       out.push({
