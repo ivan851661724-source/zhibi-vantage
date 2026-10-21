@@ -670,28 +670,39 @@ export function IntelProfile({
 
 // 维度数据唯一入口指引：按 competitorId 解析品牌档案并深链到其「数据覆盖与来源」；
 // 解析不到（品牌未建档）时诚实说明并指回竞品数据库，不在此处降级重复渲染维度面板。
+// 品牌清单按项目做短 TTL 共享缓存：切换竞品（IntelProfile 按 key 重挂载）不重复
+// 拉全量列表；缓存失败即失效，下次重新请求。
+const BRANDS_CACHE_MS = 30_000;
+const brandsCache = new Map<string, { at: number; p: ReturnType<typeof fetchBrands> }>();
+function brandsOf(projectId: string) {
+  const hit = brandsCache.get(projectId);
+  if (hit && Date.now() - hit.at < BRANDS_CACHE_MS) return hit.p;
+  const p = fetchBrands(projectId).catch(e => { brandsCache.delete(projectId); throw e; });
+  brandsCache.set(projectId, { at: Date.now(), p });
+  return p;
+}
 function BrandSurfaceLink({ competitorId, projectId }: { competitorId: string; projectId: string | null }) {
+  // undefined = 解析中；null = 未建档或解析失败；string = 已解析到品牌档案
   const [brandId, setBrandId] = useState<string | null | undefined>(undefined);
   useEffect(() => {
     if (!projectId) { setBrandId(null); return; }
     let alive = true;
-    const ctrl = new AbortController();
-    fetchBrands(projectId, ctrl.signal)
+    brandsOf(projectId)
       .then(r => { if (alive) setBrandId((r.brands || []).find(b => b.competitorId === competitorId)?.brandId || null); })
       .catch(() => { if (alive) setBrandId(null); });
-    return () => { alive = false; ctrl.abort(); };
+    return () => { alive = false; };
   }, [competitorId, projectId]);
-  const pid = projectId ? encodeURIComponent(projectId) : '';
+  const listHref = projectId ? `/brands?projectId=${encodeURIComponent(projectId)}` : '/brands';
   return (
     <div className="pf-surface-link">
       <span className="hint">
         五维数据覆盖与逐维度观察（官网与商品 / 社媒 / 广告 / 评论 / 搜索热度）在品牌档案的「数据覆盖与来源」中统一查看。
       </span>
-      {brandId ? (
-        <Link className="btn-ghost" href={`/brands/${encodeURIComponent(brandId)}?projectId=${pid}&tab=coverage`}>打开该品牌的数据覆盖 →</Link>
-      ) : (
-        <Link className="btn-ghost" href={`/brands?projectId=${pid}`}>前往竞品数据库 →</Link>
-      )}
+      {typeof brandId === 'string' && projectId ? (
+        <Link className="btn-ghost" href={`/brands/${encodeURIComponent(brandId)}?projectId=${encodeURIComponent(projectId)}&tab=coverage`}>打开该品牌的数据覆盖 →</Link>
+      ) : brandId === null ? (
+        <Link className="btn-ghost" href={listHref}>前往竞品数据库 →</Link>
+      ) : null /* 解析中：只显示指引文案，避免按钮文案在加载完成后跳变 */}
     </div>
   );
 }
