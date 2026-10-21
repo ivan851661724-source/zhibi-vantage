@@ -52,6 +52,18 @@ export function WatchControl({ competitorId }: { competitorId: string }) {
     load();
   }, [load]);
 
+  // SC-07 r3 P1：意向建立中（或限流后已安排重试）时轮询监控状态——
+  // 晋升后无需刷新页面即可从「正在建立监控来源」自动切换为正式监控（只显示价格信号）；
+  // 进入终态（promoted / cancelled / 无下次重试的 source_failed）或卸载即停止，禁止定时器泄漏。
+  const shouldPoll = !target && !!intent
+    && (intent.state === 'establishing' || (intent.state === 'source_failed' && !!intent.nextProbeAt));
+  useEffect(() => {
+    if (!shouldPoll) return;
+    let alive = true;
+    const t = setInterval(() => { if (alive) load(); }, 5000);
+    return () => { alive = false; clearInterval(t); };
+  }, [shouldPoll, load, competitorId]);
+
   const join = async () => {
     setBusy(true);
     setErr(null);

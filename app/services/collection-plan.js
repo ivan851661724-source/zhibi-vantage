@@ -152,8 +152,36 @@ function gate(code, comp, opts) {
 }
 
 /**
+ * 该品牌该能力是否已有**可信覆盖**（r4 §四：缺口按品牌 × capability 判断）。
+ * 复用规则：
+ *   · success                          → 复用（含「检查完成但无结果」的合法空终态）；
+ *   · partial 且有可信数据（观察/快照）→ 复用；
+ *   · partial 空手而归                 → 不复用，重入计划（受额度/冷却/幂等约束）；
+ *   · running / pending                → 复用（防重复入队双计费，交给既有运行链路收尾）；
+ *   · failed                           → **不复用**（r4 §四：失败不得被当作「已有覆盖」
+ *     永久跳过——重入计划，由 gate 门控决定是否可自动重试或进入待人工状态）。
+ * @returns {{covered:boolean, kind:'success'|'partial_with_data'|'running'|null}}
+ */
+function hasTerminalAttempt(tenantId, projectId, competitorId, capability) {
+  try {
+    const last = SurfaceStore.latestAttempt(tenantId, projectId, competitorId, capability);
+    if (!last) return { covered: false, kind: null };
+    if (last.status === 'running' || last.status === 'pending') {
+      return { covered: true, kind: 'running' };
+    }
+    if (last.status === 'success') return { covered: true, kind: 'success' };
+    if (last.status === 'partial') {
+      const hasData = ((last.observations || []).length > 0) || ((last.snapshotIds || []).length > 0);
+      return hasData ? { covered: true, kind: 'partial_with_data' } : { covered: false, kind: null };
+    }
+    // failed（含 dead 等其余终态）：不算覆盖
+    return { covered: false, kind: null };
+  } catch (e) { return { covered: false, kind: null }; }
+}
+
+/**
  * 单品牌首轮计划。
- * @param {object} input {tenantId, projectId, comp, trigger, runId, dryRun, reviewsAllowed}
+ * @param {object} input {tenantId, projectId, comp, trigger, runId, dryRun, reviewsAllowed, skipTerminal}
  * @returns {{competitorId, decisions: Array<{capability, decision, reason, jobId, attemptId}>}}
  */
 function planForCompetitor(input) {
@@ -170,10 +198,21 @@ function planForCompetitor(input) {
   }
   if (comp.status !== 'done') {
     out.decisions.push({ capability: null, decision: 'skipped', reason: 'research_not_done' });
-    logDecision({ tenantId, projectId, competitorId: comp.id, capability: '*', decision: 'skipped', reason: 'research_not_done', runId });
+    // r3 P0-1③：dry-run 完全只读——连跳过决策也不写台账
+    if (!o.dryRun) logDecision({ tenantId, projectId, competitorId: comp.id, capability: '*', decision: 'skipped', reason: 'research_not_done', runId });
     return out;
   }
   for (const code of PLAN_ORDER) {
+    // r4 §四：迁移/补建按「品牌 × capability」判缺口——可信覆盖复用，缺失/失败能力重入
+    // 计划（failed 不再被当作「已有覆盖」永久跳过）。绝不以「品牌有过任意 attempt」替代。
+    if (o.skipTerminal) {
+      const cov = hasTerminalAttempt(tenantId, projectId, comp.id, code);
+      if (cov.covered) {
+        out.decisions.push({ capability: code, decision: 'reused', reason: cov.kind === 'running' ? 'existing_running_attempt' : ('existing_terminal_attempt:' + cov.kind) });
+        if (!o.dryRun) logDecision({ tenantId, projectId, competitorId: comp.id, capability: code, decision: 'reused', reason: cov.kind === 'running' ? 'existing_running_attempt' : ('existing_terminal_attempt:' + cov.kind), runId });
+        continue;
+      }
+    }
     const g = gate(code, comp, { reviewsAllowed: o.reviewsAllowed, trigger });
     if (!g.ok) {
       out.decisions.push({ capability: code, decision: 'skipped', reason: g.reason, readiness: g.readiness || null });
@@ -215,8 +254,14 @@ function planForCompetitor(input) {
 
 /**
  * 项目级基线补建（有界、可重复执行；服务重启后可再次运行，幂等由既有链路保证）。
- * @param {object} input {tenantId, projectId, limit, maxReviews, dryRun, trigger}
- * @returns {object} 汇总 + 逐品牌逐能力决策
+ * r3 P0-1 整改：
+ *   · 不再按「项目有任意 attempt 就整体跳过」——缺口逐品牌逐能力判断（skipTerminal）；
+ *   · limit 的语义从「只处理前 N 个品牌」改为「本轮最多让 N 个品牌产生新入队」——
+ *     已覆盖品牌只做复用决策（零外部调用），不会占住配额把后面的品牌永远挡在门外；
+ *   · `complete` 仅当项目内所有符合范围（研究完成）的品牌都完成决策且无入队失败时为 true；
+ *     被截断的品牌列入 pendingCompetitorIds，由下一次执行继续。
+ * @param {object} input {tenantId, projectId, limit, maxReviews, dryRun, trigger, skipTerminal}
+ * @returns {object} 汇总 + 逐品牌逐能力决策 + complete / pendingCompetitorIds
  */
 function bootstrapProject(input) {
   const o = input || {};
@@ -225,29 +270,36 @@ function bootstrapProject(input) {
   const BrandSvc = require('./brand-service.js');
   const state = BrandSvc.loadProjectState(tenantId, projectId);
   if (!tenantId || !projectId || !state) {
-    return { ok: false, error: 'PROJECT_NOT_FOUND', runId: null, decisions: [] };
+    return { ok: false, error: 'PROJECT_NOT_FOUND', runId: null, decisions: [], complete: false, pendingCompetitorIds: [] };
   }
   const runId = rid('cpr');
   const limit = Math.max(1, Math.min(Number(o.limit) || 50, 200));
   const maxReviews = Math.max(0, Math.min(Number.isFinite(Number(o.maxReviews)) ? Number(o.maxReviews) : 5, 50));
-  const comps = (state.competitors || []).filter(c => c && c.id && c.status === 'done').slice(0, limit);
-  const counts = { enqueued: 0, deduped: 0, skipped: 0, failed: 0, quota: 0, planned: 0 };
+  // 符合范围 = 研究完成（status done）；全部参与决策，不再 slice 截断
+  const comps = (state.competitors || []).filter(c => c && c.id && c.status === 'done');
+  const counts = { enqueued: 0, deduped: 0, reused: 0, skipped: 0, failed: 0, quota: 0, planned: 0 };
   const perBrand = [];
+  const pendingCompetitorIds = [];
   let reviewsUsed = 0;
+  let workedBrands = 0;
   const t0 = Date.now();
   for (const comp of comps) {
-    // 搜索型采集限量：达到预算后其余品牌本轮跳过（可重复执行，下轮继续），避免一次打满搜索配额
+    // 本轮入队预算：达到上限后其余品牌不做决策，留待下次（不得假装已完成）
+    if (workedBrands >= limit) { pendingCompetitorIds.push(comp.id); continue; }
     const reviewsAllowed = reviewsUsed < maxReviews;
     const planned = planForCompetitor({
       tenantId, projectId, comp, trigger: o.trigger || 'schedule',
-      runId, dryRun: !!o.dryRun, reviewsAllowed,
+      runId, dryRun: !!o.dryRun, reviewsAllowed, skipTerminal: !!o.skipTerminal,
     });
     let usedHere = 0;
+    let enqueuedHere = 0;
     planned.decisions.forEach((d) => {
       counts[d.decision] = (counts[d.decision] || 0) + 1;
+      if (d.decision === 'enqueued' || d.decision === 'planned') enqueuedHere += 1;
       if (d.capability === REVIEWS_CAP && (d.decision === 'enqueued' || d.decision === 'planned')) usedHere += 1;
     });
     reviewsUsed += usedHere;
+    if (enqueuedHere > 0) workedBrands += 1;
     const brandName = comp.name || comp.id;
     const reasons = planned.decisions
       .filter(d => d.decision === 'skipped' || d.decision === 'failed' || d.decision === 'quota')
@@ -261,23 +313,30 @@ function bootstrapProject(input) {
       // 一句话结论，供报告/接口直接展示
       headline: planned.decisions.some(d => d.decision === 'enqueued') ? '已入队'
         : (planned.decisions.some(d => d.decision === 'deduped') ? '已存在（去重）'
-          : (planned.decisions.some(d => d.decision === 'planned') ? '可入队（dry-run）' : '未入队')),
+          : (planned.decisions.some(d => d.decision === 'reused') ? '已覆盖（复用终态）'
+            : (planned.decisions.some(d => d.decision === 'planned') ? '可入队（dry-run）' : '未入队'))),
       reasons,
     });
   }
   const summary = {
     ok: true, runId, tenantId, projectId,
     dryRun: !!o.dryRun,
+    skipTerminal: !!o.skipTerminal,
     brands: comps.length,
+    brandsDecided: comps.length - pendingCompetitorIds.length,
     brandsInProject: (state.competitors || []).filter(c => c && c.id).length,
     counts,
-    budget: { maxReviews, reviewsUsed, maxBrands: limit },
+    budget: { maxReviews, reviewsUsed, maxBrands: limit, brandsWorked: workedBrands },
+    // r3 P0-1⑥：全部品牌决策完成且无入队失败 → 迁移才允许标记 done
+    complete: pendingCompetitorIds.length === 0 && (counts.failed || 0) === 0,
+    pendingCompetitorIds,
     elapsedMs: Date.now() - t0,
     perBrand,
   };
   try {
     require('./logger.js').info('collection_bootstrap', {
       tenantId, projectId, runId, brands: comps.length, counts, reviewsUsed,
+      complete: summary.complete, pending: pendingCompetitorIds.length,
     });
   } catch (e) { /* 日志失败不影响结果 */ }
   return summary;
@@ -295,5 +354,5 @@ function listPlanLog(tenantId, projectId, limit) {
 
 module.exports = {
   PLAN_ORDER, REVIEWS_CAP,
-  gate, planForCompetitor, bootstrapProject, listPlanLog,
+  gate, planForCompetitor, bootstrapProject, listPlanLog, hasTerminalAttempt,
 };

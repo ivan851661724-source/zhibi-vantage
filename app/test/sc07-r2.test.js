@@ -399,15 +399,18 @@ test('C5 迁移：无 attempt 项目自动入队；重复执行任务数不增�
   const before = Migration.jobCounts();
   const r1 = Migration.runMigration({ maxProjects: 50, maxReviewsTotal: 5 });
   assert.strictEqual(r1.ok, true);
-  assert.strictEqual(r1.migrated, 2, '两个无 attempt 项目被执行迁移: ' + JSON.stringify(r1.perProject));
-  assert.strictEqual(r1.skippedHasAttempts, 1, '已有 attempt 的项目不重复迁移');
+  // r3 契约更新：删除「项目有任意 attempt 就整体跳过」——已有 attempt 的项目也按
+  // 品牌 × capability 缺口补齐（projM3 的唯一品牌官网已有终态 → 记 reused，不重复入队）
+  assert.strictEqual(r1.migrated, 3, '三个项目都按缺口执行迁移: ' + JSON.stringify(r1.perProject));
+  const perM3 = r1.perProject.find(p => p.projectId === 'projM3');
+  assert.ok(perM3 && perM3.outcome === 'migrated' && perM3.counts.reused >= 1, 'projM3 官网能力复用已有终态: ' + JSON.stringify(perM3));
   const after1 = Migration.jobCounts();
   assert.ok(after1.total > before.total, '迁移真实入队');
   const perM1 = r1.perProject.find(p => p.projectId === 'projM1');
   assert.ok(perM1 && perM1.counts.enqueued >= 2, 'projM1 每品牌官网资料入队: ' + JSON.stringify(perM1));
 
   // 一次性幂等：重复执行 → 全部 skippedDone，任务数与迁移账目不增（§六.6）
-  // skippedDone = 2 个迁移完成 + 1 个「已有 attempt」登记（同样不再重扫）
+  // skippedDone = 3 个项目都已完成迁移（含 projM3 的复用式迁移）
   const r2 = Migration.runMigration({ maxProjects: 50 });
   assert.strictEqual(r2.migrated, 0);
   assert.strictEqual(r2.skippedDone, 3);

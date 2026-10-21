@@ -197,4 +197,12 @@ function list({ tenantId, projectId, workspaceId, watchTargetId, brandId, provid
   return { rows, total };
 }
 
-module.exports = { init, recordCall, list, SCHEMA_VERSION, LIST_MAX_LIMIT };
+// r4：测试/进程收尾用——关闭连接释放文件锁（Windows 下 rmSync 清理临时数据目录
+// 时若连接未关会 EBUSY）。幂等：未初始化或已关闭时为 no-op。
+function close() {
+  if (!db) return;
+  try { db.close(); } catch (e) { /* 幂等收尾，保持静默 */ }
+  db = null;
+}
+
+module.exports = { init, recordCall, list, close, SCHEMA_VERSION, LIST_MAX_LIMIT };

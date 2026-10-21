@@ -281,4 +281,4 @@ test('real partial Net event is visible; projection and current-result SQLite fa
     }finally {if(mode!=='partial')f.store.getDb().exec('DROP TRIGGER IF EXISTS runtime_fault');dns.promises.lookup=lookup;global.setTimeout=timeout;httpsMod.request=origReq;}
   }
 });
-test.after(()=>{tenantDb.close();db.closeDb();f.cleanup();fs.rmSync(bootDir,{recursive:true,force:true});});
+test.after(()=>{tenantDb.close();db.closeDb();try{require('../services/call-ledger.js').close();}catch(e){}f.cleanup();fs.rmSync(bootDir,{recursive:true,force:true});});

@@ -80,16 +80,33 @@ function IntelInbox({ projectId }: { projectId: string }) {
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
 
-  // SC-07 r2 §四：有排队/采集中任务时定时刷新采集覆盖，直到进入终态
+  // SC-07 r2 §四 / r3 P1：有排队/采集中任务时定时刷新采集覆盖，直到进入终态
+  // r3 修正：轮询必须同时更新情报条目、时序变化、评论读模型与建设维度——旧实现只刷覆盖，
+  // 新情报要等手动刷新才出现。请求必须保留当前 projectId 与全部筛选条件。
   useEffect(() => {
     if (!projectId || !collectionCoverage?.anyInFlight) return;
+    let alive = true;
     const t = setInterval(() => {
-      fetchIntelligence({ projectId })
-        .then(r => setCollectionCoverage(r.collectionCoverage || null))
+      fetchIntelligence({
+        projectId,
+        brandId: brandId || undefined,
+        type: type || undefined,
+        from: from || undefined,
+        to: to || undefined,
+      })
+        .then(r => {
+          if (!alive) return;
+          setApiItems(r.items || []);
+          setMemoryEvents(r.memoryEvents || []);
+          setVoiceChanges(r.voiceChanges || []);
+          setVoiceCoverage(r.voiceCoverage || null);
+          setCollectionCoverage(r.collectionCoverage || null);
+          setConstruction(r.constructionDimensions || []);
+        })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
     }, 5000);
-    return () => clearInterval(t);
-  }, [projectId, collectionCoverage?.anyInFlight]);
+    return () => { alive = false; clearInterval(t); };
+  }, [projectId, brandId, type, from, to, collectionCoverage?.anyInFlight]);
 
   const shown = useMemo(
     () => (status ? apiItems.filter(it => it.status === status) : apiItems),

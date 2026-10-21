@@ -275,16 +275,21 @@ function deterministicDiff(prev, next) {
 }
 
 // 升级资格：真实成功 ≥2 次 + 可比较字段 + 确定性 Diff
+// r3 真实验收暴露：公开商品页采集常见 partial（部分页面抓取失败，但已观察到的商品
+// 价格是真实且可比较的）。旧实现只认 success，导致「每次都是 partial」的真实品牌
+// 永远无法晋升——这是资格判定的缺口，不是来源失败。改为 success/partial 均可计入，
+// 但必须带可比较商品（同商品标识 + 价格 + 币种），Diff 仍要求同键同币种。
 function promotionEligibility(tenantId, projectId, competitorId) {
   const Readiness = require('./source-readiness.js');
   const rd = Readiness.getReadiness(SOURCE_CAPABILITY);
   const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, SOURCE_CAPABILITY, 10) || [])
-    .filter(a => a && a.status === 'success');
+    .filter(a => a && (a.status === 'success' || a.status === 'partial'));
   const withItems = atts.map(a => ({ attempt: a, items: comparableItems(a) })).filter(x => x.items.length > 0);
   const out = {
     readiness: rd.state,
     successfulAttempts: atts.length,
     comparableAttempts: withItems.length,
+    partialAttempts: atts.filter(a => a.status === 'partial').length,
     eligible: false, reason: null, diff: null,
   };
   if (rd.state !== 'operational') { out.reason = 'source_not_verified'; return out; }
@@ -423,6 +428,55 @@ function onProbeFinished({ tenantId, projectId, competitorId, attempt }) {
   return { action: 'source_failed:' + cls + '_exhausted' };
 }
 
+// ---------- 不变量自愈（r3 P0-2） ----------
+// 每个 establishing 意向必须至少满足其一：存在进行中的 job，或存在未来的 next_probe_at。
+// 任何失败路径（包括 executor 异常、worker 崩溃、意向推进失败）都不得留下
+// 「无任务、无下次时间」的 establishing——本函数在每次调度 tick 兜底修复：
+//   · 已有 pending/running job 或 running attempt → 只看门狗时间（缺失则补上）
+//   · 否则安排退避探测（计入 auto_retries），超过上限直接 source_failed（等用户重试）
+function reconcileStuckIntents(nowMs) {
+  ensureTable();
+  const now = nowMs || Date.now();
+  const nowIso = new Date(now).toISOString();
+  const db = WS.getDb();
+  const rows = db.prepare(
+    `SELECT * FROM watch_intents WHERE state='establishing' AND (next_probe_at IS NULL OR next_probe_at <= ?) LIMIT 100`
+  ).all(nowIso);
+  const out = { checked: rows.length, rescheduled: 0, failed: 0, activeJob: 0 };
+  for (const row of rows) {
+    const intent = rowToIntent(row);
+    const tid = intent.tenantId, pid = intent.projectId, cid = intent.competitorId;
+    let activeJob = 0;
+    try {
+      activeJob = require('./collect-jobs.js').getDb().prepare(
+        `SELECT COUNT(*) AS n FROM collection_jobs
+         WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=? AND status IN ('pending','running')`
+      ).get(tid, pid, cid, SOURCE_CAPABILITY).n;
+    } catch (e) { activeJob = 0; }
+    let runningAttempt = 0;
+    try {
+      const last = SurfaceStore.latestAttempt(tid, pid, cid, SOURCE_CAPABILITY);
+      runningAttempt = (last && last.status === 'running') ? 1 : 0;
+    } catch (e) { runningAttempt = 0; }
+    if (activeJob > 0 || runningAttempt > 0) {
+      // 有任务在管：补看门狗时间（有进度的证明），不消耗重试次数
+      setProbeSchedule(intent.intentId, { nextProbeAt: new Date(now + PROBE_PENDING_GRACE_MS).toISOString() });
+      out.activeJob++;
+      continue;
+    }
+    const retries = (intent.autoRetries || 0) + 1;
+    if (retries <= MAX_AUTO_RETRIES) {
+      setProbeSchedule(intent.intentId, { nextProbeAt: new Date(now + RETRY_BACKOFF_MS).toISOString(), autoRetries: retries });
+      out.rescheduled++;
+    } else {
+      setFailed(tid, intent.intentId, 'source_unavailable', '多次未能完成来源探测，已暂停自动重试；可稍后重新加入监控。');
+      setProbeSchedule(intent.intentId, { nextProbeAt: null });
+      out.failed++;
+    }
+  }
+  return out;
+}
+
 // ---------- 到期探测执行（持久化建立流程的调度入口） ----------
 // 扫描 next_probe_at 到期的未完结意向，重新入队 public_site_products 采集。
 // 幂等由 collect-request 链路保证（running 复用 / 冷却 / 日额度）；服务重启后
@@ -437,7 +491,7 @@ function runDueProbes(nowMs) {
      WHERE state IN ('establishing','source_failed') AND next_probe_at IS NOT NULL AND next_probe_at <= ?
      ORDER BY next_probe_at ASC LIMIT 50`
   ).all(nowIso);
-  const out = { due: rows.length, enqueued: 0, deferred: 0, failed: 0, promoted: 0, details: [] };
+  const out = { due: rows.length, enqueued: 0, deferred: 0, failed: 0, promoted: 0, healed: null, details: [] };
   const CollectReq = require('./collect-request.js');
   for (const row of rows) {
     const intent = rowToIntent(row);
@@ -506,6 +560,9 @@ function runDueProbes(nowMs) {
     out.failed++;
     out.details.push({ intentId: intent.intentId, outcome: 'failed:' + r.status });
   }
+  // r3 P0-2：处理完到期项后自愈「无任务、无下次时间」的 establishing
+  //（enqueued/deferred 的看门狗时间在未来，不会被误判；取消/晋升不在扫描范围）
+  out.healed = reconcileStuckIntents(now);
   return out;
 }
 
@@ -529,7 +586,7 @@ module.exports = {
   INTENT_STATES, SOURCE_CAPABILITY, STATE_TEXT,
   PROBE_INTERVAL_MS, RATE_RETRY_MS, RETRY_BACKOFF_MS, MAX_AUTO_RETRIES, PROBE_PENDING_GRACE_MS,
   requestIntent, getIntent, findIntent, listIntents, cancelIntent, setFailed,
-  scheduleFirstProbe, runDueProbes, onProbeFinished, evaluateIntentState,
+  scheduleFirstProbe, runDueProbes, onProbeFinished, evaluateIntentState, reconcileStuckIntents,
   view, comparableItems, deterministicDiff, promotionEligibility, tryPromote,
   startScheduler, stopScheduler,
 };
