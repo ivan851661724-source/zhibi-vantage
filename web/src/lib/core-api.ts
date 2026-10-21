@@ -71,6 +71,16 @@ export interface VoiceCoverage {
   note?: string;
 }
 
+// SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细；后端从真实 attempt/job/readiness 派生）
+export interface CollectionCoverage {
+  brands: number;
+  counts: { queued: number; collecting: number; has_data: number; empty: number; failed: number; source_pending: number; not_started: number };
+  failures: { brandId: string; brandName: string | null; competitorId: string | null; reason: string | null; at: string | null }[];
+  stateText: Record<string, string>;
+  anyInFlight: boolean;
+  note?: string;
+}
+
 export interface PublicProductsStatus {
   status: 'verified' | 'unavailable' | 'not_collected';
   statusText: string;
@@ -331,7 +341,7 @@ export interface BrandDetail {
 }
 
 export function fetchBrands(projectId: string, signal?: AbortSignal) {
-  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number }>(
+  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; collectionCoverage?: CollectionCoverage | null }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
 export function fetchBrand(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
@@ -358,7 +368,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; voiceCoverage?: VoiceCoverage | null; collectionCoverage?: { brands: number; counts: Record<string, number>; failures: { brandId: string; brandName: string | null; reason: string; at: string | null }[] } | null; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; voiceCoverage?: VoiceCoverage | null; collectionCoverage?: CollectionCoverage | null; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {

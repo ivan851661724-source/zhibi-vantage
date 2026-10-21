@@ -52,7 +52,13 @@ async function brandsList(ctx, req, res, url) {
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const items = BrandSvc.listBrandViews(tid, rp.projectId);
-  ctx.sendJSON(res, 200, { projectId: rp.projectId, brands: items, count: items.length });
+  ctx.sendJSON(res, 200, {
+    projectId: rp.projectId, brands: items, count: items.length,
+    // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细），竞品数据库与情报库统一口径
+    collectionCoverage: (() => {
+      try { return BrandSvc.buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
+    })(),
+  });
   return true;
 }
 

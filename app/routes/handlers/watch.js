@@ -102,6 +102,9 @@ async function createTarget(ctx, req, res, url, p) {
       signals: ['price', 'launch'],
     });
     if (r0.error) { ctx.sendJSON(res, 400, { error: r0.error, message: '无法保存监控意向。' }); return true; }
+    // r2 §二：保存意向后**安排第一次 public_site_products 探测**（持久化 next_probe_at，
+    // 由 watch-intent 调度器执行；重启后仍能恢复）。
+    try { WIntent.scheduleFirstProbe({ tenantId: tid, projectId, competitorId }); } catch (e) { /* 调度安排失败不阻塞意向保存 */ }
     // 基线建立走统一采集链路（幂等/冷却/额度/attempt/worker fencing 全复用）
     let baseline = null;
     try {

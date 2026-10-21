@@ -12,6 +12,9 @@ interface WatchIntent {
   state: 'establishing' | 'source_failed' | 'promoted' | 'cancelled';
   stateText: string;
   reasonText?: string | null;
+  // SC-07 r2 §二：持久化建立流程——明确下一步（已安排探测 / 限流自动重试 / 等待用户重试）
+  nextStepText?: string | null;
+  nextProbeAt?: string | null;
   monitoring: boolean;
 }
 
@@ -122,6 +125,10 @@ export function WatchControl({ competitorId }: { competitorId: string }) {
                 : '已记录你的监控意向：正在建立可重复抓取的公开商品来源；完成两次可比较采集后才会进入正式监控'}
             </span>
           </div>
+          {/* SC-07 r2 §二：意向永远有明确下一步，不出现无后续的「建立中」 */}
+          {intent.nextStepText ? (
+            <div className="watch-line"><span className="watch-meta">{intent.nextStepText}</span></div>
+          ) : null}
           <div className="watch-actions">
             <button className="watch-btn watch-remove" type="button" disabled={busy} onClick={cancelIntent}>
               退出监控意向

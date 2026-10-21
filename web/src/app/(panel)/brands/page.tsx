@@ -8,9 +8,10 @@ import Link from 'next/link';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { fetchBrands, type BrandListItem } from '@/lib/core-api';
+import { fetchBrands, type BrandListItem, type CollectionCoverage } from '@/lib/core-api';
 import { apiPost } from '@/lib/api';
 import { BRAND_COVER_TEXT, brandCoverState, brandsEmptyKind, allBrandsNotCollected, type BrandCoverState } from '@/lib/core-logic';
+import { CollectionCoverageStrip } from '@/components/collection-coverage';
 import { EmptyState } from '@/components/core-ui';
 
 export default function BrandsPage() {
@@ -39,6 +40,8 @@ function BrandsInner() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState('');
+  // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细），真实渲染后端 collectionCoverage
+  const [coverage, setCoverage] = useState<CollectionCoverage | null>(null);
   const [bootstrapping, setBootstrapping] = useState(false);
   const [bootMsg, setBootMsg] = useState<string | null>(null);
 
@@ -55,6 +58,7 @@ function BrandsInner() {
       setBootMsg(`已入队 ${c.enqueued || 0} 项 / 去重 ${c.deduped || 0} 项 / 跳过 ${c.skipped || 0} 项（共 ${(r && r.brands) || 0} 个品牌）`);
       const fresh = await fetchBrands(projectId);
       setItems(fresh.brands || []);
+      setCoverage(fresh.collectionCoverage || null);
     } catch (e) {
       setBootMsg(e instanceof Error ? e.message : '入队失败');
     } finally {
@@ -81,11 +85,23 @@ function BrandsInner() {
     const ctrl = new AbortController();
     setLoading(true);
     fetchBrands(projectId, ctrl.signal)
-      .then(r => { if (alive) { setItems(r.brands || []); setErr(null); } })
+      .then(r => { if (alive) { setItems(r.brands || []); setCoverage(r.collectionCoverage || null); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId]);
+
+  // SC-07 r2 §四：有排队/采集中任务时定时刷新，直到进入终态
+  //（不把运行中的任务写成「尚未开始」——终态前保持轮询）
+  useEffect(() => {
+    if (!projectId || !coverage?.anyInFlight) return;
+    const t = setInterval(() => {
+      fetchBrands(projectId)
+        .then(r => setCoverage(r.collectionCoverage || null))
+        .catch(() => { /* 单次轮询失败不打断页面 */ });
+    }, 5000);
+    return () => clearInterval(t);
+  }, [projectId, coverage?.anyInFlight]);
 
   // 竞争关系候选（来自数据本身，不预设枚举）
   const relOptions = useMemo(() => {
@@ -136,6 +152,9 @@ function BrandsInner() {
       </div>
 
       {bootMsg ? <p className="hint">{bootMsg}</p> : null}
+
+      {/* SC-07 r2 §四：项目级采集状态（七态统一口径，与情报库一致） */}
+      <CollectionCoverageStrip coverage={coverage} projectId={projectId} />
 
       {!items.length ? (
         <EmptyState

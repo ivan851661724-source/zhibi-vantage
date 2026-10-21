@@ -12,7 +12,8 @@ import { IntelProfile } from '@/components/intel-profile';
 import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
-import { fetchIntelligence, type ConstructionDimension, type IntelItem, type MemoryEventItem, type VoiceChangeItem, type VoiceCoverage } from '@/lib/core-api';
+import { CollectionCoverageStrip } from '@/components/collection-coverage';
+import { fetchIntelligence, type CollectionCoverage, type ConstructionDimension, type IntelItem, type MemoryEventItem, type VoiceChangeItem, type VoiceCoverage } from '@/lib/core-api';
 import { intelSummary } from '@/lib/core-logic';
 
 const INTEL_TYPES: { value: string; label: string }[] = [
@@ -50,6 +51,8 @@ function IntelInbox({ projectId }: { projectId: string }) {
   // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径，独立区块）
   const [voiceChanges, setVoiceChanges] = useState<VoiceChangeItem[]>([]);
   const [voiceCoverage, setVoiceCoverage] = useState<VoiceCoverage | null>(null);
+  // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细）——真实渲染，不再只存在于 API 类型
+  const [collectionCoverage, setCollectionCoverage] = useState<CollectionCoverage | null>(null);
 
   // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
   // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
@@ -72,10 +75,21 @@ function IntelInbox({ projectId }: { projectId: string }) {
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setVoiceChanges(r.voiceChanges || []); setVoiceCoverage(r.voiceCoverage || null); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setVoiceChanges(r.voiceChanges || []); setVoiceCoverage(r.voiceCoverage || null); setCollectionCoverage(r.collectionCoverage || null); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
+
+  // SC-07 r2 §四：有排队/采集中任务时定时刷新采集覆盖，直到进入终态
+  useEffect(() => {
+    if (!projectId || !collectionCoverage?.anyInFlight) return;
+    const t = setInterval(() => {
+      fetchIntelligence({ projectId })
+        .then(r => setCollectionCoverage(r.collectionCoverage || null))
+        .catch(() => { /* 单次轮询失败不打断页面 */ });
+    }, 5000);
+    return () => clearInterval(t);
+  }, [projectId, collectionCoverage?.anyInFlight]);
 
   const shown = useMemo(
     () => (status ? apiItems.filter(it => it.status === status) : apiItems),
@@ -167,6 +181,10 @@ function IntelInbox({ projectId }: { projectId: string }) {
           ) : null}
         </section>
       ) : null}
+
+      {/* SC-07 r2 §四：项目级采集状态（七态统一口径，按当前项目 attempt/Evidence/运行状态派生；
+          竞品数据库同款组件，排队/采集中自动刷新） */}
+      <CollectionCoverageStrip coverage={collectionCoverage} projectId={projectId} />
 
       {voiceChanges.length ? (
         <section className="core-voice-changes">

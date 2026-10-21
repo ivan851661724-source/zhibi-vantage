@@ -107,10 +107,14 @@ async function serperSearchWithFailover(query, keys, gl, opts) {
 }
 
 // 进程内 key 池状态（key 内容变了就重置 disabled；key 不变则保留已判失效/耗尽的标记）
+// SC-07 r2 §一：key 池改由 lib/search-credentials.js 统一解析（env + 配置文件双源，
+// env 优先）——与 providerCall 实际交给 failover 的 key 列表严格同源，否则
+// disabled 下标集合会错位。
 let _serperKeySig = null;
 let _serperDisabled = new Set();
 function getSerperPool(config) {
-  const keys = normalizeSerperKeys(config && config.search);
+  const Cred = require('../../lib/search-credentials.js');
+  const keys = Cred.resolveSearchCredentials(config).serper.keys;
   const sig = keys.join('|');
   if (sig !== _serperKeySig) { _serperKeySig = sig; _serperDisabled = new Set(); }
   return { keys, disabled: _serperDisabled, budgetTotal: Budget.budgetTotal(config && config.search) };

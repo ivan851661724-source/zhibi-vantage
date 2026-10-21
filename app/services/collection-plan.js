@@ -78,6 +78,45 @@ function isShopifyComp(comp) {
 }
 
 // 单项准入判断（不发起采集，只回答「能不能安排、不能的原因」）
+// r2 §五：public_reviews 失败门控补齐——注释声称「额度耗尽不会无限重试」，
+// 实际只跳过 not_configured / auth_rejected。真实规则（自动计划 = trigger schedule）：
+//   quota_exhausted/rate_limited → 有界冷却（ZB_REVIEW_FAILURE_COOLDOWN_MS，默认 6h），
+//                                  冷却未到不重复创建任务；冷却到点允许一次受控检查；
+//   unavailable                  → 退避（ZB_REVIEW_RETRY_BACKOFF_MS，默认 30min）后重试；
+//   auth_rejected/not_configured → 配置恢复前不自动重试；
+//   用户手动重试（trigger manual）→ 可触发一次受控检查，仍受冷却/额度/幂等约束
+//                                  （requestCollection 链路强制），不在此处放行无限重试。
+const REVIEW_COOLDOWN_MS = Math.max(60 * 1000, Number(process.env.ZB_REVIEW_FAILURE_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
+const REVIEW_BACKOFF_MS = Math.max(60 * 1000, Number(process.env.ZB_REVIEW_RETRY_BACKOFF_MS) || 30 * 60 * 1000);
+
+function reviewsGate(rd, opts) {
+  const o = opts || {};
+  const manual = o.trigger === 'manual';
+  if (rd.state === 'not_configured') {
+    // 手动也不放行「未配置」：没有凭据时发起必然失败（仍是受控行为，但无意义）
+    return { ok: false, reason: 'source_not_configured', readiness: rd.state };
+  }
+  if (rd.state === 'auth_rejected') {
+    if (manual) return { ok: true, readiness: rd.state, manualCheck: true }; // 手动触发一次受控检查
+    return { ok: false, reason: 'source_auth_rejected', readiness: rd.state };
+  }
+  if (rd.state === 'quota_exhausted') {
+    const readyAt = rd.lastFailureAt ? Date.parse(rd.lastFailureAt) + REVIEW_COOLDOWN_MS : 0;
+    if (manual) return { ok: true, readiness: rd.state, manualCheck: true };
+    if (Date.now() < readyAt) return { ok: false, reason: 'source_cooldown', readiness: rd.state, retryAfterMs: readyAt - Date.now() };
+    return { ok: true, readiness: rd.state }; // 冷却到点：允许一次受控检查（仍受日额度/幂等约束）
+  }
+  if (rd.state === 'unavailable') {
+    const readyAt = rd.lastFailureAt ? Date.parse(rd.lastFailureAt) + REVIEW_BACKOFF_MS : 0;
+    if (Date.now() < readyAt) {
+      if (manual) return { ok: true, readiness: rd.state, manualCheck: true };
+      return { ok: false, reason: 'source_backoff', readiness: rd.state, retryAfterMs: readyAt - Date.now() };
+    }
+    return { ok: true, readiness: rd.state };
+  }
+  return { ok: true, readiness: rd.state };
+}
+
 function gate(code, comp, opts) {
   const o = opts || {};
   const cap = capOf(code);
@@ -103,11 +142,11 @@ function gate(code, comp, opts) {
   if (code === REVIEWS_CAP) {
     if (!comp.url && !comp.name) return { ok: false, reason: 'missing_brand_identity' };
     const rd = Readiness.getReadiness(REVIEWS_CAP);
-    if (rd.state === 'not_configured') return { ok: false, reason: 'source_not_configured', readiness: rd.state };
-    // 运行态失败（凭据被拒/额度耗尽）不得无限重试：本批次跳过，等运行态恢复
-    if (rd.state === 'auth_rejected') return { ok: false, reason: 'source_auth_rejected', readiness: rd.state };
-    if (o.reviewsAllowed === false) return { ok: false, reason: 'search_budget_exhausted', readiness: rd.state };
-    return { ok: true, readiness: rd.state };
+    const g = reviewsGate(rd, { trigger: o.trigger });
+    if (!g.ok) return { ok: false, reason: g.reason, readiness: g.readiness, retryAfterMs: g.retryAfterMs || null };
+    // 搜索型采集限量：达到本批预算后跳过（可重复执行，下轮继续），不无限打满搜索配额
+    if (o.reviewsAllowed === false) return { ok: false, reason: 'search_budget_exhausted', readiness: g.readiness };
+    return { ok: true, readiness: g.readiness };
   }
   return { ok: false, reason: 'unknown_capability' };
 }
@@ -135,7 +174,7 @@ function planForCompetitor(input) {
     return out;
   }
   for (const code of PLAN_ORDER) {
-    const g = gate(code, comp, { reviewsAllowed: o.reviewsAllowed });
+    const g = gate(code, comp, { reviewsAllowed: o.reviewsAllowed, trigger });
     if (!g.ok) {
       out.decisions.push({ capability: code, decision: 'skipped', reason: g.reason, readiness: g.readiness || null });
       if (!o.dryRun) logDecision({ tenantId, projectId, competitorId: comp.id, capability: code, decision: 'skipped', reason: g.reason, runId });

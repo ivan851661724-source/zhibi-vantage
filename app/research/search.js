@@ -10,7 +10,8 @@ const ProviderHealth = require('../services/providers/health.js');
 const SourceFusion = require('../lib/source-fusion.js');
 const metering = require('../services/metering.js');
 const cost = require('../services/cost.js');
-const { bochaSearch, braveSearch, getSerperPool, normalizeSerperKeys, serperSearchWithFailover, tavilySearch, wigoloSearch } = require('../services/providers/search.js');
+const { bochaSearch, braveSearch, getSerperPool, serperSearchWithFailover, tavilySearch, wigoloSearch } = require('../services/providers/search.js');
+const Cred = require('../lib/search-credentials.js');
 const { curTenantId } = require('../core/als.js'); // B-1（2026-09-12 任务书）：拆分时遗漏导入，正文 L64 调用会 ReferenceError
 
 // 搜索单次成本（¥/次，成本埋点口径）：按 Serper $0.30/1k 折算 ≈ ¥0.0022/次；
@@ -34,41 +35,36 @@ function providerMain(config) {
   return PROVIDER_ALIAS[p] || 'tavily';
 }
 function providerConfigured(config, name) {
-  const sc = (config && config.search) || {};
-  // SC-07 §1：配置来源有两处——运行配置文件与部署环境变量。
-  // 搜索调用链与就绪门控必须用同一判定，否则会出现「搜索跑得动、评论采集被判未配置」。
-  const env = process.env;
-  if (name === 'serper') return normalizeSerperKeys(sc).length > 0 || !!String(env.SERPER_API_KEY || '').trim();
-  if (name === 'brave') return !!sc.braveKey || !!String(env.BRAVE_API_KEY || '').trim();
-  if (name === 'bocha') return !!sc.bochaKey || !!String(env.BOCHA_API_KEY || '').trim();
-  if (name === 'tavily') return !!(sc.tavilyKey || sc.apiKey) || !!String(env.TAVILY_API_KEY || '').trim();
-  if (name === 'wigolo') return !!(String(sc.wigoloUrl || '').trim() || String(process.env.WIGOLO_URL || '').trim());
-  return false;
+  // SC-07 r2 §一：就绪判断与真实调用（providerCall）共用 lib/search-credentials.js
+  // 的同一份解析结果——env 与配置文件双源、优先级一致。此前本函数认 env、
+  // providerCall 只认 config.search，导致「门控通过、调用失败 NO_SERPER_KEY」。
+  return Cred.providerConfigured(name, config);
 }
 async function providerCall(name, query, config, gl) {
+  // SC-07 r2 §一：实际请求与就绪判断同源。凭据解析只在此处发生一次，
+  // 结果不落日志/快照/证据/错误信息。
+  const cred = Cred.resolveSearchCredentials(config);
   if (name === 'serper') {
-    const { keys, disabled, budgetTotal } = getSerperPool(config);
-    if (!keys.length) throw new Error('NO_SERPER_KEY');
-    return serperSearchWithFailover(query, keys, gl, { disabled, budgetTotal });
+    if (!cred.serper.keys.length) throw new Error('NO_SERPER_KEY');
+    const { disabled, budgetTotal } = getSerperPool(config);
+    return serperSearchWithFailover(query, cred.serper.keys, gl, { disabled, budgetTotal });
   }
   if (name === 'brave') {
-    const k = config.search.braveKey;
+    const k = cred.brave.key;
     if (!k) throw new Error('NO_BRAVE_KEY');
     return braveSearch(query, k, gl);
   }
   if (name === 'bocha') {
-    const k = config.search.bochaKey;
+    const k = cred.bocha.key;
     if (!k) throw new Error('NO_BOCHA_KEY');
     return bochaSearch(query, k);
   }
   if (name === 'wigolo') {
-    const sc = config.search || {};
-    const base = String(sc.wigoloUrl || process.env.WIGOLO_URL || '').trim();
+    const base = cred.wigolo.url;
     if (!base) throw new Error('NO_WIGOLO_URL');
-    const token = String(sc.wigoloToken || process.env.WIGOLO_API_TOKEN || '').trim();
-    return wigoloSearch(query, base, token);
+    return wigoloSearch(query, base, cred.wigolo.token);
   }
-  const k = config.search.tavilyKey || config.search.apiKey;
+  const k = cred.tavily.key;
   if (!k) throw new Error('NO_TAVILY_KEY');
   return tavilySearch(query, k);
 }
