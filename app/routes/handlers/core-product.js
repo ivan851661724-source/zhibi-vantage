@@ -5,7 +5,9 @@
 //   GET  /api/brands/:brandId                      品牌详情（统一档案）
 //   GET  /api/brands/:brandId/timeline             品牌时间线
 //   GET  /api/brands/:brandId/coverage             数据覆盖与来源
-//   GET  /api/intelligence?projectId=&brandId=&type=&from=&to=   情报库
+//   GET  /api/intel/inbox?projectId=&brandId=&dimension=&eventType=&verificationStatus=&from=&to=&cursor=&limit=
+//                                                  每日变化收件箱（SC-08 §二：只含 monitoring 确定性变化）
+//   GET  /api/intelligence?projectId=&brandId=&type=&from=&to=   情报库（历史口径，保留兼容）
 //   GET  /api/opportunities?projectId=             机会视图
 //   GET  /api/reports?projectId=                   报告列表
 //   POST /api/reports                              生成报告（202 + 持久任务）
@@ -100,6 +102,43 @@ async function brandCoverage(ctx, req, res, url, p) {
 }
 
 // ---------------- 情报库 ----------------
+// ---------------- SC-08 §二：每日变化收件箱 ----------------
+// 只回答「今天/最近系统新发现了哪些竞争变化」：
+//   · 只含 origin='monitoring' 的确定性变化（首次 baseline / 回补历史 / 报告 / 缺口全部排除）；
+//   · 顶部统计为项目今日口径（不随筛选变化）；正文按自然日倒序分组；
+//   · cursor 稳定分页（默认 30，上限 100），绝不一次返回无限历史。
+async function intelInbox(ctx, req, res, url) {
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' }); return true; }
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const Inbox = require('../../services/intel-inbox.js');
+  const limitRaw = q(url, 'limit');
+  if (limitRaw != null && !/^\d+$/.test(limitRaw)) {
+    ctx.sendJSON(res, 400, { error: 'INVALID_LIMIT', message: 'limit 须为正整数。' }); return true;
+  }
+  const limit = limitRaw == null ? 30 : Math.max(1, Math.min(Number(limitRaw), 100));
+  let data;
+  try {
+    data = Inbox.listInbox({
+      tenantId: tid, projectId: rp.projectId,
+      brandId: q(url, 'brandId') || undefined,
+      dimension: q(url, 'dimension') || undefined,
+      eventType: q(url, 'eventType') || undefined,
+      verificationStatus: q(url, 'verificationStatus') || undefined,
+      from: q(url, 'from') || undefined,
+      to: q(url, 'to') || undefined,
+      cursor: q(url, 'cursor') || undefined,
+      limit,
+      timeZone: q(url, 'timeZone') || undefined,
+    });
+  } catch (e) {
+    ctx.sendJSON(res, 500, { error: 'INBOX_UNAVAILABLE', message: '收件箱暂不可用，请稍后重试。' }); return true;
+  }
+  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId }, data));
+  return true;
+}
+
 async function intelligence(ctx, req, res, url) {
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
@@ -213,6 +252,6 @@ async function reportDetail(ctx, req, res, url, p) {
 
 module.exports = {
   brandsList, brandDetail, brandCoverage,
-  intelligence, opportunities,
+  intelInbox, intelligence, opportunities,
   reportsList, reportsCreate, reportDetail,
 };

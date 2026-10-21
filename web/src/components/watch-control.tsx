@@ -29,7 +29,8 @@ interface WatchTarget {
   lastWindow?: { slot: string; coverage: string; partialScan: boolean; failureReasons?: Record<string, number> } | null;
 }
 
-const SIGNAL_ZH: Record<string, string> = { price: '价格', launch: '上新', stock: '断货' };
+// SC-08 §三：site_change = 官网内容（结构化字段变化），非 Shopify 无可比价格时的正式降级信号
+const SIGNAL_ZH: Record<string, string> = { price: '价格', launch: '上新', stock: '断货', site_change: '官网内容' };
 
 export function WatchControl({ competitorId }: { competitorId: string }) {
   const [target, setTarget] = useState<WatchTarget | null>(null);

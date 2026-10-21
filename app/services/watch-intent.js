@@ -292,13 +292,64 @@ function promotionEligibility(tenantId, projectId, competitorId) {
     partialAttempts: atts.filter(a => a.status === 'partial').length,
     eligible: false, reason: null, diff: null,
   };
+  // SC-08 §三 C：同时评估降级信号 site_change（官网可访问但无稳定价格时的正式信号）
+  out.siteChange = siteChangeEligibility(tenantId, projectId, competitorId);
   if (rd.state !== 'operational') { out.reason = 'source_not_verified'; return out; }
-  if (withItems.length < 2) { out.reason = 'need_two_comparable_collections'; return out; }
+  if (withItems.length < 2) {
+    out.reason = 'need_two_comparable_collections';
+    return out;
+  }
   const diff = deterministicDiff(withItems[1].items, withItems[0].items);
   out.diff = diff;
-  if (!diff.comparable) { out.reason = 'diff_not_computable:' + diff.reason; return out; }
+  if (!diff.comparable) {
+    out.reason = 'diff_not_computable:' + diff.reason;
+    return out;
+  }
   out.eligible = true;
   return out;
+}
+
+/**
+ * site_change 晋升资格（SC-08 §三 C）：
+ *   官网（official_site_profile）至少两次独立真实采集成功/部分成功，
+ *   且最新一次的结构化指纹稳定（≥2 类结构化字段：title/canonical/organization/商品集合/结构摘要）。
+ *   不要求「已有变化」——首次 baseline 本身就是可监控的稳定来源。
+ */
+function siteChangeEligibility(tenantId, projectId, competitorId) {
+  const out = { eligible: false, attempts: 0, stable: false, signals: [], reason: null, sourceUrl: null };
+  try {
+    const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, 'official_site_profile', 10) || [])
+      .filter(a => a && (a.status === 'success' || a.status === 'partial'));
+    out.attempts = atts.length;
+    if (atts.length < 2) { out.reason = 'need_two_site_collections'; return out; }
+    const Snapshot = require('../research/source-snapshot.js');
+    const FP = require('./site-fingerprint.js');
+    // 用最新一次成功的页面重建指纹（不得用替身/猜测：拿不到原文就如实不达标准）
+    let fp = null, url = null;
+    for (const sid of (atts[0].snapshotIds || [])) {
+      const meta = Snapshot.getById(tenantId, sid);
+      if (!meta) continue;
+      let raw = null;
+      try { raw = Snapshot.readRawPayload(meta); } catch (e) { raw = null; }
+      if (!raw) continue;
+      const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw);
+      if (!/<html|<body|<title/i.test(text)) continue;
+      fp = FP.buildFingerprint(text, meta.source_url || meta.final_url || '');
+      url = meta.source_url || meta.final_url || null;
+      break;
+    }
+    if (!fp) { out.reason = 'fingerprint_unavailable'; return out; }
+    const st = FP.stabilityOf(fp);
+    out.stable = !!st.stable;
+    out.signals = st.signals || [];
+    out.sourceUrl = url;
+    if (!st.stable) { out.reason = 'insufficient_structured_fields'; return out; }
+    out.eligible = true;
+    return out;
+  } catch (e) {
+    out.reason = 'site_change_eval_failed';
+    return out;
+  }
 }
 
 /**
@@ -339,12 +390,15 @@ function tryPromote({ tenantId, projectId, competitorId, timezone, market }) {
   const intent = findIntent(tenantId, projectId, competitorId);
   if (!intent || intent.state !== 'establishing') return { promoted: false, reason: 'no_open_intent' };
   const el = promotionEligibility(tenantId, projectId, competitorId);
-  if (!el.eligible) {
-    return { promoted: false, reason: el.reason, eligibility: el };
+  // SC-08 §三：价格路径优先；无稳定可比较价格但官网结构化字段稳定 → 降级为 site_change
+  const useSiteChange = !el.eligible && el.siteChange && el.siteChange.eligible;
+  if (!el.eligible && !useSiteChange) {
+    return { promoted: false, reason: el.reason || (el.siteChange && el.siteChange.reason) || null, eligibility: el };
   }
-  // r2 §二：非 Shopify 公开商品页只能核实「价格 + 商品标识」——supportedSignals
-  // 只能是 ['price']，不宣称上新/库存（无发布时间与库存字段可核验）。
-  const signals = ['price'];
+  // 非 Shopify：supportedSignals 只能是真实可核实的信号——
+  //   price（同商品同币种确定性涨跌）或 site_change（稳定结构化字段变化）；
+  // 绝不宣称上新/库存（无发布时间与库存字段可核验）。
+  const signals = useSiteChange ? ['site_change'] : ['price'];
   const r = WS.createWatchTarget({
     tenantId, projectId, competitorId,
     market: market || '',
@@ -354,8 +408,11 @@ function tryPromote({ tenantId, projectId, competitorId, timezone, market }) {
     enrichmentStatus: 'complete',
     // 非 Shopify 来源不落额外列：执行器按 comp.isShopify 分支（见 watch-monitor）
   });
+  const reasonText = useSiteChange
+    ? '已建立可重复的官网内容来源，升级为正式监控（当前信号：官网内容变化）'
+    : '已完成两次可比较采集，升级为正式监控（当前支持价格信号）';
   WS.getDb().prepare("UPDATE watch_intents SET state='promoted', promoted_target_id=?, reason_code='promoted', reason_text=?, next_probe_at=NULL, updated_at=? WHERE tenant_id=? AND intent_id=?")
-    .run(r.target.watchTargetId, '已完成两次可比较采集，升级为正式监控（当前支持价格信号）', new Date().toISOString(), String(tenantId), intent.intentId);
+    .run(r.target.watchTargetId, reasonText, new Date().toISOString(), String(tenantId), intent.intentId);
   return { promoted: true, target: r.target, intent: getIntent(tenantId, intent.intentId), eligibility: el };
 }
 
@@ -379,8 +436,24 @@ function onProbeFinished({ tenantId, projectId, competitorId, attempt }) {
   if (status === 'success' || status === 'partial') {
     const items = comparableItems(att);
     if (!items.length) {
-      // 成功但没有可比较商品（有页面、无商品/无价格）→ 终态：等用户重试
-      setFailed(tid, intent.intentId, 'no_comparable_products', '来源可以访问，但没有采集到可比较的商品价格信息；可稍后重新加入监控。');
+      // SC-08 §三 C：来源可访问但没有可比较价格 → **不得**直接 source_failed。
+      // 先走 site_change 降级：官网结构化字段稳定即可晋升；不足两次采集则继续安排探测。
+      const sc = siteChangeEligibility(tid, pid, cid);
+      if (sc.eligible) {
+        setProbeSchedule(intent.intentId, { lastProbeAttemptId: att.attemptId });
+        const p = tryPromote({ tenantId: tid, projectId: pid, competitorId: cid });
+        return { action: p.promoted ? 'promoted' : 'promote_failed:' + (p.reason || ''), eligibility: p.eligibility, signal: 'site_change' };
+      }
+      if (sc.attempts >= 1) {
+        // 已有可用的官网观察但还不足两次：持久化下一次探测（有后续任务，不永久 establishing）
+        const retryAt = new Date(Date.now() + PROBE_INTERVAL_MS).toISOString();
+        setProbeSchedule(intent.intentId, {
+          nextProbeAt: retryAt, probeCount: sc.attempts, lastProbeAttemptId: att.attemptId, state: 'establishing',
+        });
+        return { action: 'awaiting_second_site_collection', nextProbeAt: retryAt, siteChange: sc };
+      }
+      // 官网也没有任何可用结构化字段 → 真实失败（§三 D）
+      setFailed(tid, intent.intentId, 'no_comparable_products', '来源可以访问，但没有可核实的稳定字段（价格或结构化内容），无法建立监控；已尝试：官网页面与公开商品页。');
       setProbeSchedule(intent.intentId, { nextProbeAt: null });
       return { action: 'source_failed:no_comparable_products' };
     }
@@ -587,6 +660,6 @@ module.exports = {
   PROBE_INTERVAL_MS, RATE_RETRY_MS, RETRY_BACKOFF_MS, MAX_AUTO_RETRIES, PROBE_PENDING_GRACE_MS,
   requestIntent, getIntent, findIntent, listIntents, cancelIntent, setFailed,
   scheduleFirstProbe, runDueProbes, onProbeFinished, evaluateIntentState, reconcileStuckIntents,
-  view, comparableItems, deterministicDiff, promotionEligibility, tryPromote,
+  view, comparableItems, deterministicDiff, promotionEligibility, siteChangeEligibility, tryPromote,
   startScheduler, stopScheduler,
 };

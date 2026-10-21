@@ -156,7 +156,10 @@ function BrandsInner() {
       {bootMsg ? <p className="hint">{bootMsg}</p> : null}
 
       {/* SC-07 r2 §四：项目级采集状态（七态统一口径，与情报库一致） */}
-      <CollectionCoverageStrip coverage={coverage} projectId={projectId} />
+      {/* SC-08 §二：情报库的「查看数据覆盖与采集状态」次级链接落到这里（#coverage） */}
+      <div id="coverage" className="core-cov-anchor">
+        <CollectionCoverageStrip coverage={coverage} projectId={projectId} />
+      </div>
 
       {!items.length ? (
         <EmptyState

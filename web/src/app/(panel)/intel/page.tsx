@@ -1,398 +1,310 @@
 'use client';
-// 情报库（SC-04 UI 框架轮）：「竞争变化收件箱」主体 + 品牌逐字段档案（保留区）。
-// 收件箱：顶部摘要（可核实/待核实/资料缺口）+ 品牌/类型/时间/状态筛选 +
-// 情报卡（证据入口/纠错入口）；无证据的条目永不使用「已核实」样式。
-// 空状态三分：尚无采集结果 / 当前筛选无结果 / 资料不足。
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+// ============================================================
+// 情报库 = 每日变化收件箱（SC-08 §二 重做）
+// 只回答一个问题：今天/最近一段时间，系统新发现了哪些竞争变化？
+//
+// 只展示（后端已保证）：基线建立后由两次可比较观察产生的确定性变化、正式监控窗口发现的变化。
+// 每条必须带：品牌、变化类型、观察时间、核验状态、证据入口。
+//
+// 明确删除（§一.2 / §二 正文删除清单）：
+//   品牌静态档案卡 / 采集任务统计 / 公开评论覆盖统计 / 资料缺口列表 /
+//   独立「时序变化（系统推导）」区块 / 首次基线观察 / 报告生成记录 / 回补历史 / 失败维度卡。
+// 采集状态只保留一个次级链接 → 竞品数据库的项目级覆盖区域。
+// ============================================================
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { FieldCorrectModal } from '@/components/field-correct';
-import { IntelProfile } from '@/components/intel-profile';
+import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
+import type { SurfaceEvidenceRef } from '@/components/data-surface/types';
 import { EmptyState } from '@/components/core-ui';
-import type { Competitor } from '@/types/state';
-import { IntelList } from '@/components/brand/coverage-panel';
-import { CollectionCoverageStrip } from '@/components/collection-coverage';
-import { fetchIntelligence, type CollectionCoverage, type ConstructionDimension, type IntelItem, type MemoryEventItem, type VoiceChangeItem, type VoiceCoverage } from '@/lib/core-api';
-import { intelSummary } from '@/lib/core-logic';
+import { fetchIntelInbox, type InboxEvent, type InboxGroup, type InboxSummary } from '@/lib/core-api';
 
-const INTEL_TYPES: { value: string; label: string }[] = [
-  { value: '', label: '全部类型' },
+// 变化类型（维度）——只列**真实接入**的维度；未接入维度不在前端造选项
+const DIMENSIONS: { value: string; label: string }[] = [
+  { value: '', label: '全部变化类型' },
   { value: 'price', label: '价格' },
-  { value: 'product', label: '商品' },
-  { value: 'promo', label: '促销' },
-  { value: 'channel', label: '渠道' },
-  { value: 'voice', label: '口碑' },
-  { value: 'gap', label: '资料缺口' },
-  { value: 'monitor', label: '监控状态' },
+  { value: 'website', label: '官网内容' },
 ];
-
+const DIMENSION_LABEL: Record<string, string> = {
+  price: '价格', product: '商品', stock: '库存', website: '官网内容',
+  review: '评论', social: '社媒', ads: '广告', search: '搜索热度',
+};
 const STATUS_FILTERS: { value: string; label: string }[] = [
-  { value: '', label: '全部状态' },
+  { value: '', label: '全部核验状态' },
   { value: 'verified', label: '已核实' },
   { value: 'pending', label: '待核实' },
-  { value: 'insufficient', label: '资料不足' },
 ];
 
-function IntelInbox({ projectId }: { projectId: string }) {
-  const sp = useSearchParams();
-  const [apiItems, setApiItems] = useState<IntelItem[]>([]);
-  const [err, setErr] = useState<string | null>(null);
-  const [brandId, setBrandId] = useState(sp.get('brandId') || '');
-  const [type, setType] = useState('');
-  const [status, setStatus] = useState('');
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
-  const [fcItem, setFcItem] = useState<IntelItem | null>(null);
-  // r4.10：项目级建设中维度（后端独立字段，不再混入情报列表）
-  const [construction, setConstruction] = useState<ConstructionDimension[]>([]);
-  // SC-05：项目级时序变化事件（后端独立字段；与采集观察分开呈现，不把推导当直接观察）
-  const [memoryEvents, setMemoryEvents] = useState<MemoryEventItem[]>([]);
-  // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径，独立区块）
-  const [voiceChanges, setVoiceChanges] = useState<VoiceChangeItem[]>([]);
-  const [voiceCoverage, setVoiceCoverage] = useState<VoiceCoverage | null>(null);
-  // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细）——真实渲染，不再只存在于 API 类型
-  const [collectionCoverage, setCollectionCoverage] = useState<CollectionCoverage | null>(null);
+const PAGE_SIZE = 30;
+const POLL_MS = 30000;
 
-  // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
-  // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
-  // brandId（URL 已被导航函数清除，但 state 仍在）造成「假空结果」。
-  // brandId 取切换后 URL 的现值（导航函数已清除资源参数，通常为空）。
-  const prevPidRef = useRef(projectId);
+function hhmm(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  } catch (e) { return '—'; }
+}
+function dayLabel(date: string): string {
+  const today = new Date();
+  const y = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const yest = new Date(today.getTime() - 86400000);
+  const yd = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`;
+  if (date === y) return '今天';
+  if (date === yd) return '昨天';
+  return date;
+}
+
+function IntelInboxBody({ projectId }: { projectId: string }) {
+  const sp = useSearchParams();
+  const [brandId, setBrandId] = useState(sp.get('brandId') || '');
+  const [dimension, setDimension] = useState(sp.get('dimension') || '');
+  const [status, setStatus] = useState(sp.get('verificationStatus') || '');
+  const [from, setFrom] = useState(sp.get('from') || '');
+  const [to, setTo] = useState(sp.get('to') || '');
+
+  const [summary, setSummary] = useState<InboxSummary>({ today: 0, verified: 0, pending: 0, brandsChanged: 0 });
+  const [groups, setGroups] = useState<InboxGroup[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
+  const [polling, setPolling] = useState<{ enabled: boolean; reason: string }>({ enabled: false, reason: '' });
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [drawerRefs, setDrawerRefs] = useState<SurfaceEvidenceRef[] | null>(null);
+  // eventId 去重（轮询 / 加载更多都不得重复插入）
+  const seen = useRef<Set<string>>(new Set());
+
+  // 跨项目切换：重置筛选与已有数据（否则残留原项目 brandId 造成假空结果）
   useEffect(() => {
-    if (prevPidRef.current === projectId) return;
-    prevPidRef.current = projectId;
-    setBrandId(sp.get('brandId') || '');
-    setType('');
+    setBrandId('');
+    setDimension('');
     setStatus('');
     setFrom('');
     setTo('');
-  }, [projectId, sp]);
+    setGroups([]);
+    setCursor(null);
+    setTotal(0);
+    seen.current = new Set();
+  }, [projectId]);
 
-  // API 不支持 status 参数：状态筛选在前端做（展示层行为，不改后端契约）
+  const mergeGroups = useCallback((incoming: InboxGroup[]) => {
+    setGroups(prev => {
+      const byDate = new Map(prev.map(g => [g.date, { date: g.date, events: [...g.events] }]));
+      for (const g of incoming) {
+        if (!byDate.has(g.date)) byDate.set(g.date, { date: g.date, events: [] });
+        const bucket = byDate.get(g.date)!;
+        for (const ev of g.events) {
+          if (seen.current.has(ev.eventId)) continue;
+          seen.current.add(ev.eventId);
+          bucket.events.push(ev);
+        }
+      }
+      return [...byDate.values()]
+        .map(g => ({ date: g.date, events: g.events.sort((a, b) => (a.observedAt < b.observedAt ? 1 : a.observedAt > b.observedAt ? -1 : 0)) }))
+        .filter(g => g.events.length > 0)
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    });
+  }, []);
+
+  // 首屏 / 筛选变化：整体替换（筛选条件全部参与请求）
   useEffect(() => {
-    if (!projectId) return;
+    if (!projectId) { setLoading(false); return; }
     let alive = true;
     const ctrl = new AbortController();
-    fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setVoiceChanges(r.voiceChanges || []); setVoiceCoverage(r.voiceCoverage || null); setCollectionCoverage(r.collectionCoverage || null); setErr(null); } })
-      .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
+    setLoading(true);
+    seen.current = new Set();
+    fetchIntelInbox({
+      projectId, brandId: brandId || undefined, dimension: dimension || undefined,
+      verificationStatus: status || undefined, from: from || undefined, to: to || undefined,
+      limit: PAGE_SIZE,
+    }, ctrl.signal)
+      .then(r => {
+        if (!alive) return;
+        setSummary(r.summary || { today: 0, verified: 0, pending: 0, brandsChanged: 0 });
+        setCursor(r.nextCursor || null);
+        setTotal(r.total || 0);
+        setPolling(r.polling || { enabled: false, reason: '' });
+        setGroups([]);
+        mergeGroups(r.groups || []);
+        setErr(null);
+      })
+      .catch(e => { if (alive && !ctrl.signal.aborted) setErr(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; ctrl.abort(); };
-  }, [projectId, brandId, type, from, to]);
+  }, [projectId, brandId, dimension, status, from, to, mergeGroups]);
 
-  // SC-07 r2 §四 / r3 P1：有排队/采集中任务时定时刷新采集覆盖，直到进入终态
-  // r3 修正：轮询必须同时更新情报条目、时序变化、评论读模型与建设维度——旧实现只刷覆盖，
-  // 新情报要等手动刷新才出现。请求必须保留当前 projectId 与全部筛选条件。
+  // 轮询：只在后端明确「存在 active 正式监控」时开启；必须保留当前全部筛选条件。
+  // 已翻页（cursor 存在）时停止轮询，避免游标与内容错位。
   useEffect(() => {
-    if (!projectId || !collectionCoverage?.anyInFlight) return;
-    let alive = true;
+    if (!projectId || !polling.enabled || cursor) return;
     const t = setInterval(() => {
-      fetchIntelligence({
-        projectId,
-        brandId: brandId || undefined,
-        type: type || undefined,
-        from: from || undefined,
-        to: to || undefined,
+      fetchIntelInbox({
+        projectId, brandId: brandId || undefined, dimension: dimension || undefined,
+        verificationStatus: status || undefined, from: from || undefined, to: to || undefined,
+        limit: PAGE_SIZE,
       })
         .then(r => {
-          if (!alive) return;
-          setApiItems(r.items || []);
-          setMemoryEvents(r.memoryEvents || []);
-          setVoiceChanges(r.voiceChanges || []);
-          setVoiceCoverage(r.voiceCoverage || null);
-          setCollectionCoverage(r.collectionCoverage || null);
-          setConstruction(r.constructionDimensions || []);
+          setSummary(r.summary || { today: 0, verified: 0, pending: 0, brandsChanged: 0 });
+          setTotal(r.total || 0);
+          setPolling(r.polling || { enabled: false, reason: '' });
+          // 轮询只做增量合并（eventId 去重，绝不重复插入）
+          mergeGroups(r.groups || []);
         })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
-    }, 5000);
-    return () => { alive = false; clearInterval(t); };
-  }, [projectId, brandId, type, from, to, collectionCoverage?.anyInFlight]);
+    }, POLL_MS);
+    return () => clearInterval(t);
+  }, [projectId, polling.enabled, cursor, brandId, dimension, status, from, to, mergeGroups]);
 
-  const shown = useMemo(
-    () => (status ? apiItems.filter(it => it.status === status) : apiItems),
-    [apiItems, status],
-  );
+  function loadMore() {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    fetchIntelInbox({
+      projectId, brandId: brandId || undefined, dimension: dimension || undefined,
+      verificationStatus: status || undefined, from: from || undefined, to: to || undefined,
+      cursor, limit: PAGE_SIZE,
+    })
+      .then(r => { setCursor(r.nextCursor || null); mergeGroups(r.groups || []); })
+      .catch(() => { /* 保留已有内容 */ })
+      .finally(() => setLoadingMore(false));
+  }
 
+  function openEvidence(ev: InboxEvent) {
+    const refs: SurfaceEvidenceRef[] = (ev.evidenceRefs || []).map(r => ({
+      evidenceId: r.evidenceId || null,
+      snapshotId: r.snapshotId || null,
+      sourceUrl: r.sourceUrl || null,
+    }));
+    if (!refs.length) return;
+    setDrawerRefs(refs);
+  }
+
+  const hasFilter = !!(brandId || dimension || status || from || to);
   const brandOptions = useMemo(() => {
     const m = new Map<string, string>();
-    for (const it of apiItems) if (it.brandId && it.brandName) m.set(it.brandId, it.brandName);
+    for (const g of groups) for (const e of g.events) {
+      const id = e.brandId || e.competitorId;
+      if (id) m.set(id, e.brandName || id);
+    }
     return [...m.entries()];
-  }, [apiItems]);
-
-  const sum = useMemo(() => intelSummary(apiItems), [apiItems]);
-  const hasFilter = !!(brandId || type || status || from || to);
-  const onlyGaps = apiItems.length > 0 && sum.verified === 0 && sum.pending === 0;
+  }, [groups]);
 
   return (
-    <section className="core-intel-section core-inbox">
-      <h3>竞争变化收件箱</h3>
-      <div className="core-inbox-sum">
-        <span className="core-sum-item core-sum-ok">可核实 <b>{sum.verified}</b></span>
-        <span className="core-sum-item core-sum-warn">待核实 <b>{sum.pending}</b></span>
-        <span className="core-sum-item">资料缺口 <b>{sum.gaps}</b></span>
+    <section className="core-inbox-page">
+      <div className="core-inbox-head">
+        <h3>每日变化收件箱</h3>
+        <Link className="core-inbox-cov-link" href={`/brands?projectId=${encodeURIComponent(projectId)}#coverage`}>
+          查看数据覆盖与采集状态 →
+        </Link>
       </div>
-      <p className="hint">「可核实」= 每条都有可打开的证据记录；无证据的条目一律待核实，不会使用已核实样式。</p>
 
-      <div className="core-intel-filters">
-        <select value={brandId} onChange={(e) => setBrandId(e.target.value)}>
+      <div className="core-inbox-sum" data-testid="inbox-summary">
+        <span className="core-sum-item">今日变化 <b>{summary.today}</b></span>
+        <span className="core-sum-item core-sum-ok">已核实 <b>{summary.verified}</b></span>
+        <span className="core-sum-item core-sum-warn">待核实 <b>{summary.pending}</b></span>
+        <span className="core-sum-item">涉及品牌 <b>{summary.brandsChanged}</b></span>
+      </div>
+
+      <div className="core-inbox-filters">
+        <select value={brandId} onChange={e => setBrandId(e.target.value)} aria-label="品牌筛选">
           <option value="">全部品牌</option>
           {brandOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
         </select>
-        <select value={type} onChange={(e) => setType(e.target.value)}>
-          {INTEL_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        <select value={dimension} onChange={e => setDimension(e.target.value)} aria-label="变化类型筛选">
+          {DIMENSIONS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
         </select>
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+        <select value={status} onChange={e => setStatus(e.target.value)} aria-label="核验状态筛选">
           {STATUS_FILTERS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="起始日期" />
+        <input type="date" value={from} onChange={e => setFrom(e.target.value)} aria-label="起始时间" />
         <span className="core-filter-sep">至</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} aria-label="结束日期" />
+        <input type="date" value={to} onChange={e => setTo(e.target.value)} aria-label="结束时间" />
       </div>
 
       {err ? <p className="core-err">{err}</p> : null}
 
-      {/* SC-05：时序变化（derived_timeline_events 投影）——独立区块，不与采集观察混排；
-          每条都能回到品牌档案的对应时间与证据。 */}
-      {memoryEvents.length ? (
-        <section className="core-mem-events">
-          <h3>时序变化（系统推导）</h3>
-          <p className="hint">由已验证的时序事实确定性计算得出，不是新的来源；点击可打开品牌档案中对应时间段与证据。</p>
-          <ul className="core-mem-event-list">
-            {memoryEvents.slice(0, 40).map(ev => (
-              <li key={ev.id}>
-                <div className="core-mem-event-top">
-                  <span className="mem-time">{String(ev.at).slice(0, 10)}</span>
-                  <span className="mem-badge mem-badge-derived-event">{ev.sourceKindText}</span>
-                  <span className="core-mem-event-brand">{ev.brandName || '—'}</span>
-                  <span className="core-mem-event-text">{ev.eventText}{ev.entityName ? '：' + ev.entityName : ''}</span>
-                  <span className="mem-precision">{ev.timePrecisionText}</span>
-                </div>
-                {ev.summary ? <div className="core-mem-event-sum">{ev.summary}</div> : null}
-                {ev.link ? (
-                  <Link className="core-mem-event-link" href={`/brands/${encodeURIComponent(ev.link.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=products`}>
-                    在品牌档案查看 →
-                  </Link>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {/* SC-07 §3：没有观察的品牌不再逐条出「尚无评论」卡；改由项目级采集覆盖承载，
-          零结果 / 失败（含品牌与原因）/ 未采集分别计数 */}
-      {voiceCoverage ? (
-        <section className="core-voice-changes">
-          <h3>公开评论采集覆盖</h3>
-          <p className="hint">
-            共 {voiceCoverage.brands} 个品牌：有观察 {voiceCoverage.withObservations} 个 ·
-            检查完成但零结果 {voiceCoverage.empty} 个 · 采集失败 {voiceCoverage.failed} 个 ·
-            未开始采集 {voiceCoverage.notCollected} 个。
-          </p>
-          {voiceCoverage.failures && voiceCoverage.failures.length ? (
-            <ul className="core-voice-limits">
-              {voiceCoverage.failures.map((f) => (
-                <li key={f.brandId}>{f.brandName || f.brandId}：{f.reason}{f.at ? `（${String(f.at).slice(0, 10)}）` : ''}</li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
-      ) : null}
-
-      {/* SC-07 r2 §四：项目级采集状态（七态统一口径，按当前项目 attempt/Evidence/运行状态派生；
-          竞品数据库同款组件，排队/采集中自动刷新） */}
-      <CollectionCoverageStrip coverage={collectionCoverage} projectId={projectId} />
-
-      {voiceChanges.length ? (
-        <section className="core-voice-changes">
-          <h3>用户声音与公开评论（统一读模型）</h3>
-          <p className="hint">
-            只有一套口径：公开评论页采集（来源 URL + 快照与证据引用 + 观察时间）。
-            样本不足的品牌只列状态，不做「满意/不满意」群体结论；已采集但缺带依据的正负分类时，
-            明确写「尚不足以形成满意度机会判断」，不拿历史主题凑成新结论。
-          </p>
-          <ul className="core-voice-changes-list">
-            {voiceChanges.map(v => (
-              <li key={v.brandId}>
-                <div className="core-voice-changes-top">
-                  <Link href={`/brands/${encodeURIComponent(v.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=voice`}>{v.brandName || v.brandId}</Link>
-                  {v.status === 'sufficient' ? (
-                    <span>样本 {v.sampleSize} 条 · {v.sourceCount} 个来源页</span>
-                  ) : (
-                    <span className="hint">资料不足，暂不形成群体结论。</span>
-                  )}
-                </div>
-                {/* SC-06 r2：机会资格与样本充分性分开说——采到评论 ≠ 能形成满意度判断 */}
-                {v.opportunityEligible === false && v.opportunityReasonText ? (
-                  <p className="hint">{v.opportunityReasonText}</p>
-                ) : null}
-                {v.recentItems.length ? (
-                  <ul className="core-voice-changes-items">
-                    {v.recentItems.map((it, i) => (
-                      <li key={i}>
-                        {it.sourceUrl ? <a href={it.sourceUrl} target="_blank" rel="noopener noreferrer nofollow">{it.title || it.sourceUrl}</a> : (it.title || '公开评论页')}
-                        {typeof it.rating === 'number' ? <span> · 评分 {it.rating}</span> : null}
-                        {typeof it.reviewCount === 'number' ? <span> · {it.reviewCount} 条评价</span> : null}
-                        {it.polarity ? <span> · {it.polarity === 'pos' ? '正面' : '负面'}（依据 {it.sentimentBasis || '—'}）</span> : null}
-                        <span className="hint">（观察 {String(it.observedAt || '').slice(0, 10) || '—'}）</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {!apiItems.length && !memoryEvents.length && !hasFilter ? (
-        <EmptyState
-          title="尚无采集结果"
-          sub="该项目还没有可展示的情报。首轮采集入队并完成后，可核实的观察与变化会出现在这里；零结果与失败原因见下方采集覆盖。"
-        />
-      ) : !shown.length && memoryEvents.length ? (
-        <p className="hint">采集观察暂无条目；上方「时序变化（系统推导）」来自已核验的时序事实，单独呈现，不计入上面的三个计数。</p>
-      ) : !shown.length ? (
-        <EmptyState
-          title="当前筛选没有结果"
-          sub="换个品牌、类型或状态，或清除时间范围再试。"
-          action={<button type="button" className="btn-ghost" onClick={() => { setBrandId(''); setType(''); setStatus(''); setFrom(''); setTo(''); }}>清除筛选</button>}
-        />
+      {loading ? (
+        <p className="hint">正在加载变化记录…</p>
+      ) : !groups.length ? (
+        hasFilter ? (
+          <EmptyState title="当前筛选条件下没有变化记录" sub="放宽筛选条件，或清空筛选查看全部变化。" />
+        ) : (
+          <EmptyState
+            title="今天暂未发现已核实的竞争变化"
+            sub="系统仍在按计划检查已监控品牌。"
+          />
+        )
       ) : (
-        <>
-          {onlyGaps ? (
-            <p className="core-inbox-poor">当前可展示的内容以资料缺口为主：已接入维度的采集尚未产出可核实情报。补齐采集后这里会出现品牌变化。</p>
+        <div className="core-inbox-groups" data-testid="inbox-groups">
+          {groups.map(g => (
+            <section key={g.date} className="core-inbox-day" data-date={g.date}>
+              <h4 className="core-inbox-day-title">{dayLabel(g.date)} <span className="core-inbox-day-raw">{g.date}</span></h4>
+              <ul className="core-inbox-list">
+                {g.events.map(ev => {
+                  const brandHref = ev.links.brand
+                    ? `${ev.links.brand}${ev.links.brand.includes('?') ? '&' : '?'}projectId=${encodeURIComponent(projectId)}`
+                    : null;
+                  const timelineHref = ev.links.timeline
+                    ? `${ev.links.timeline}${ev.links.timeline.includes('?') ? '&' : '?'}projectId=${encodeURIComponent(projectId)}`
+                    : brandHref;
+                  return (
+                    <li key={ev.eventId} className="core-inbox-item" data-event-id={ev.eventId}>
+                      <span className="core-inbox-time">{hhmm(ev.observedAt)}</span>
+                      {brandHref ? (
+                        <Link className="core-inbox-brand" href={brandHref}>{ev.brandName || '—'}</Link>
+                      ) : <span className="core-inbox-brand">{ev.brandName || '—'}</span>}
+                      <span className={`core-inbox-dim core-dim-${ev.dimension}`}>{DIMENSION_LABEL[ev.dimension] || ev.dimension}</span>
+                      {timelineHref ? (
+                        <Link className="core-inbox-text" href={timelineHref}>{ev.title}</Link>
+                      ) : <span className="core-inbox-text">{ev.title}</span>}
+                      <span
+                        className={`core-inbox-verify ${ev.verificationStatus === 'verified' ? 'is-verified' : 'is-pending'}`}
+                        data-verify={ev.verificationStatus}
+                      >
+                        {ev.verificationStatus === 'verified' ? '已核实' : '待核实'}
+                      </span>
+                      {ev.evidenceCount > 0 ? (
+                        <button
+                          type="button"
+                          className="core-inbox-evidence"
+                          onClick={() => openEvidence(ev)}
+                          disabled={!ev.evidenceRefs.length}
+                        >
+                          证据{ev.evidenceCount > 1 ? `（${ev.evidenceCount}）` : ''}
+                        </button>
+                      ) : (
+                        <span className="core-inbox-evidence-none">无证据</span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+          {cursor ? (
+            <button type="button" className="core-btn core-inbox-more" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore ? '加载中…' : `加载更早的变化（已显示 ${groups.reduce((n, g) => n + g.events.length, 0)} / ${total}）`}
+            </button>
           ) : null}
-          <IntelList items={shown} onCorrect={(it) => setFcItem(it)} />
-        </>
+        </div>
       )}
 
-      {fcItem && fcItem.competitorId ? (
-        <FieldCorrectModal
-          competitorId={fcItem.competitorId}
-          onClose={() => setFcItem(null)}
-        />
-      ) : null}
-
-      {/* r4.10：数据覆盖与建设中维度——项目级单一去重区域（页面最底部）。
-          未接入维度不是情报事件：无时间戳、无来源、无证据、无状态徽章、无 0 值；
-          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。
-          P0-2 整改 r2：用户侧只有四种口径——数据服务暂不可用 / 正在验证数据服务 /
-          本轮未观察到结果 / 最近采集失败，可稍后重试；凭据细节仅管理员接口可见。 */}
-      {construction.length ? (
-        <details className="core-building core-building-fold">
-          <summary>数据覆盖与建设中维度（{construction.length}）</summary>
-          <p className="hint">以下维度当前不生成数据、估算或结论；数据服务可用后这里会展示采集状态与来源。</p>
-          <ul className="core-building-list">
-            {construction.map(d => (
-              <li key={d.code}>
-                <span className="core-building-name">{d.displayName}</span>
-                <span className="core-building-state cfg">{d.state === 'pending_config' ? '数据服务暂不可用' : '尚未接入'}</span>
-                <span className="core-building-msg">{d.message}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
+      {drawerRefs ? <EvidenceDrawer refs={drawerRefs} onClose={() => setDrawerRefs(null)} /> : null}
     </section>
   );
 }
 
 export default function IntelPage() {
+  // 与 /brands 同一范式：URL 优先，其次当前项目状态
+  const { state } = useZhibiState();
+  const sp = useSearchParams();
+  const projectId = String(sp.get('projectId') || (state as { projectId?: string } | null)?.projectId || '');
+  if (!projectId) {
+    return <EmptyState title="请先选择项目" sub="选择项目后，这里会显示已监控品牌的每日竞争变化。" />;
+  }
   return (
-    <Suspense fallback={<p className="hint">加载情报库…</p>}>
-      <IntelInner />
+    <Suspense fallback={<p className="hint">正在加载…</p>}>
+      <IntelInboxBody projectId={projectId} />
     </Suspense>
-  );
-}
-
-function IntelInner() {
-  const { state, loading } = useZhibiState();
-  const searchParams = useSearchParams();
-  // 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底
-  const projectId = String(searchParams.get('projectId') || (state as { projectId?: string } | null)?.projectId || '');
-  const [curId, setCurId] = useState<string | null>(null);
-  const [fcField, setFcField] = useState<string | undefined>(undefined);
-  const [fcOpen, setFcOpen] = useState(false);
-
-  const cs = useMemo(() => {
-    if (!state) return [] as Competitor[];
-    const excluded = new Set((state.excluded as string[]) || []);
-    return ((state.competitors || []) as Competitor[])
-      .filter((c) => !excluded.has(c.id))
-      .slice()
-      .sort((a, b) => ((b.rankScore as number) || 0) - ((a.rankScore as number) || 0));
-  }, [state]);
-
-  // 支持 ?c=<id> 定位（雷达卡点击跳转；对齐旧版 switchTab('intel', cid)）
-  const qsId = searchParams.get('c');
-  const active =
-    (qsId && cs.find((x) => x.id === qsId)?.id) ||
-    (curId && cs.find((x) => x.id === curId)?.id) ||
-    (cs[0] && cs[0].id) ||
-    null;
-  const cur = cs.find((x) => x.id === active);
-
-  if (loading) return <p className="hint">加载情报库…</p>;
-
-  return (
-    <div>
-      <div className="page-head">
-        <div>
-          <h2>情报库</h2>
-          <p className="desc">每天看一遍：竞争品牌发生了什么变化、哪些已核实、哪些待核实、还缺什么资料。每个字段都可逐条核对与纠错。</p>
-        </div>
-      </div>
-
-      {projectId ? <IntelInbox projectId={projectId} /> : (
-        <EmptyState title="请先选择项目" sub="右上角选择项目后，这里会显示该项目竞争品牌的变化收件箱。" />
-      )}
-
-      {/* 品牌逐字段档案（保留区）：六维画像与逐字段纠错 */}
-      {cs.length ? (
-        <>
-          <div className="page-head">
-            <div className="actions">
-              <div className="filters" style={{ marginBottom: 0 }}>
-                {cs.map((c) => (
-                  <button
-                    key={c.id}
-                    className={'chip' + (c.id === active ? ' on' : '')}
-                    type="button"
-                    onClick={() => setCurId(c.id)}
-                  >
-                    {c.name as string}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="intel-list">
-            {cur ? (
-              <IntelProfile
-                key={cur.id}
-                c={cur}
-                state={state!}
-                onCorrect={(field) => {
-                  setFcField(field);
-                  setFcOpen(true);
-                }}
-              />
-            ) : null}
-          </div>
-        </>
-      ) : null}
-
-      {fcOpen && active ? (
-        <FieldCorrectModal
-          competitorId={active}
-          initialField={fcField}
-          onClose={() => {
-            setFcOpen(false);
-            setFcField(undefined);
-          }}
-        />
-      ) : null}
-    </div>
   );
 }

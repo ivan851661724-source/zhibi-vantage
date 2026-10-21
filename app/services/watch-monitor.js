@@ -91,6 +91,88 @@ async function collectPublicSiteProducts(comp, tid, pid) {
   return { ok: true, items, currency: (obs.map(o => o && o.currency).filter(Boolean)[0] || null), partialScan: att.status === 'partial' };
 }
 
+// ---------- 价格变化 → 每日收件箱事件（SC-08 §二） ----------
+// 只在「同商品、同市场、同币种、同规格」且已有前值时产生（首次 = baseline，不产事件）。
+// 证据：来源快照（verified）；无快照则如实 pending。
+function recordPriceInboxEvent({ tid, pid, comp, ev, windowId, observedAt, sourceUrl, snapshotIds }) {
+  try {
+    const refs = [];
+    for (const sid of (snapshotIds || []).slice(0, 3)) refs.push({ snapshotId: sid, sourceUrl: sourceUrl || null, observedAt });
+    const delta = (typeof ev.old === 'number' && typeof ev.new === 'number') ? ev.new - ev.old : null;
+    return require('./intel-inbox.js').recordEvent({
+      tenantId: tid, projectId: pid, competitorId: comp.id,
+      brandName: comp.name || null,
+      dimension: 'price', eventType: 'price_changed',
+      title: (ev.title ? ev.title + '：' : '') + '价格由 ' + (ev.oldDisplay != null ? ev.oldDisplay : ev.old) + ' 调整为 ' + (ev.display != null ? ev.display : ev.new),
+      summary: (ev.title || '商品') + ' 价格 ' + ev.old + ' → ' + ev.new + (ev.deltaPct != null ? ('（' + (ev.deltaPct > 0 ? '+' : '') + ev.deltaPct + '%）') : ''),
+      subjectId: ev.subjectId ? String(ev.subjectId) : null,
+      observedAt,
+      effectiveAt: null, // 无可靠发布时间来源 → null，不复制 observedAt
+      sourceKind: 'live_observation', origin: 'monitoring',
+      change: {
+        field: 'price', oldValue: ev.old, newValue: ev.new,
+        direction: delta == null ? null : (delta > 0 ? 'increase' : delta < 0 ? 'decrease' : 'flat'),
+        delta: delta == null ? null : Number(delta.toFixed(2)),
+        pct: ev.deltaPct != null ? ev.deltaPct : null,
+        currency: ev.currency || null,
+        basis: 'deterministic_diff',
+      },
+      evidenceRefs: refs,
+      verificationStatus: refs.length ? 'verified' : 'pending',
+      windowKey: windowId,
+    });
+  } catch (e) { return { recorded: false, reason: 'EXCEPTION' }; }
+}
+
+// ---------- 非 Shopify：官网内容结构化指纹采集（SC-08 §三 C） ----------
+// 走 official_site_profile adapter：SSRF/FetchGate/robots/重定向/大小/超时/快照/证据链
+// 与手动刷新完全一致。返回稳定结构化指纹 + 证据引用；不在这里判定「变化」。
+async function collectSiteFingerprint(comp, tid, pid, opts) {
+  const Adapters = require('./source-adapter.js');
+  const Snapshot = require('../research/source-snapshot.js');
+  const FP = require('./site-fingerprint.js');
+  const o = opts || {};
+  const ad = Adapters.getAdapter('official_site_profile');
+  if (!ad) return { ok: false, error: 'adapter_missing', reason: 'not_supported' };
+  let r = null;
+  // 显式幂等键：site_change 的「两次独立采集」不能被 capability 冷却吞掉
+  //（冷却只对自动生成的时间桶键生效；显式键由调用方按窗口/探测序号自管）。
+  try { r = await ad.collect({ tenantId: tid, projectId: pid, competitor: comp, trigger: 'schedule', idempotencyKey: o.idempotencyKey || undefined }); }
+  catch (e) { return { ok: false, error: String((e && e.message) || e), reason: 'fetch_failed' }; }
+  const att = r && r.attempt;
+  if (!att) return { ok: false, error: (r && (r.error || r.errorClass)) || 'fetch_failed', reason: 'fetch_failed' };
+  if (att.status !== 'success' && att.status !== 'partial') {
+    const reason = att.sourceStatus === 'rate_limited' ? 'rate_limited'
+      : (att.sourceStatus === 'blocked' ? 'blocked'
+        : (att.sourceStatus === 'parse_failed' ? 'parse_failed' : 'fetch_failed'));
+    return { ok: false, error: att.errorClass || reason, reason, sourceStatus: att.sourceStatus || null };
+  }
+  // 从快照回读原始 HTML 构指纹（不额外抓取：一次访问同时供证据与指纹使用）
+  let html = null, snapUrl = null;
+  for (const sid of (att.snapshotIds || [])) {
+    const meta = Snapshot.getById(tid, sid);
+    if (!meta) continue;
+    let raw = null;
+    try { raw = Snapshot.readRawPayload(meta); } catch (e) { raw = null; }
+    if (!raw) continue;
+    const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw);
+    if (/<html|<body|<title/i.test(text)) { html = text; snapUrl = meta.source_url || meta.final_url || null; break; }
+  }
+  if (!html) return { ok: false, error: 'raw_unavailable', reason: 'parse_failed', snapshotIds: att.snapshotIds || [], evidenceIds: att.evidenceIds || [] };
+  const fingerprint = FP.buildFingerprint(html, snapUrl || att.sourceUrl || comp.url || '');
+  const stability = FP.stabilityOf(fingerprint);
+  const evidenceRefs = [];
+  for (const eid of (att.evidenceIds || [])) evidenceRefs.push({ evidenceId: eid });
+  for (const sid of (att.snapshotIds || []).slice(0, 3)) {
+    const meta = Snapshot.getById(tid, sid);
+    evidenceRefs.push({ snapshotId: sid, sourceUrl: meta ? (meta.source_url || null) : null, observedAt: att.endedAt || att.startedAt || null });
+  }
+  return {
+    ok: true, fingerprint, stability, sourceUrl: snapUrl || att.sourceUrl || comp.url || null,
+    evidenceRefs, attempt: att, partialScan: att.status === 'partial',
+  };
+}
+
 // ---------- 单目标单窗口执行（返回窗口级 Coverage 结果） ----------
 // deps（全部可注入，测试用替身）：fetchFn / productPricesFn / productPriceSaveFn /
 //   stockLoadFn / stockSaveFn / alertsPushFn
@@ -128,12 +210,77 @@ async function executeWindow(target, windowId, deps, nowMs) {
     for (const s of signals) attempt(s, false, 'not_supported');
   } else if (!shopifyReady) {
     // 非 Shopify：只有「监控意向已升级为正式 Target」才会到这里（意向本身不被调度）。
-    // 走公开商品页直采；未升级的意向永远不会进这张表（见 watch-intent.js）。
-    const unsupported = signals.filter(s => s !== 'price');
+    // SC-08 §三：price 与 site_change 是两条可并存的正式信号——
+    //   · price：存在稳定商品价格源时（两次可比较采集后晋升）
+    //   · site_change：官网可访问但暂无稳定价格时的**降级信号**（结构化字段变化）
+    const unsupported = signals.filter(s => s !== 'price' && s !== 'site_change');
     for (const s of unsupported) attempt(s, false, 'not_supported'); // 上新/断货无发布时间与库存字段可核验
-    if (!signals.includes('price')) {
-      // 无可执行信号：如实失败，不产生 quiet
-    } else {
+    if (signals.includes('site_change')) {
+      let sres = null;
+      try { sres = await (deps.siteFingerprintFn || collectSiteFingerprint)(comp, tid, pid, { idempotencyKey: 'site_snap:' + tid + ':' + pid + ':' + comp.id + ':' + windowId }); }
+      catch (e) { sres = { ok: false, error: String((e && e.message) || e), reason: 'fetch_failed' }; }
+      if (!sres || !sres.ok) {
+        attempt('site_change', false, sres && sres.reason ? sres.reason : 'fetch_failed');
+      } else {
+        if (sres.partialScan) partialScan = true;
+        try {
+          const nowIsoS = new Date(now).toISOString();
+          const baseline = WS.getSiteBaseline(tid, pid, comp.id);
+          if (!baseline || !baseline.fingerprint) {
+            // 首次成功观察：只存 baseline —— 不生成 inbox event（§二 字段规则 2）
+            WS.saveSiteBaseline({
+              tenantId: tid, projectId: pid, competitorId: comp.id,
+              fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
+            });
+            attempt('site_change', true);
+          } else {
+            const FP = require('./site-fingerprint.js');
+            const diff = FP.diffFingerprints(baseline.fingerprint, sres.fingerprint);
+            if (diff.comparable && diff.changes.length) {
+              eventsVerified++;
+              const first = diff.changes[0];
+              const refs = (sres.evidenceRefs || []).slice(0, 6);
+              const rec = require('./intel-inbox.js').recordEvent({
+                tenantId: tid, projectId: pid, competitorId: comp.id,
+                brandName: comp.name || null,
+                dimension: 'website', eventType: 'website_changed',
+                title: '官网内容变化：' + FP.describeChanges(diff.changes),
+                summary: FP.describeChanges(diff.changes),
+                subjectId: sres.sourceUrl || comp.url || null,
+                observedAt: nowIsoS,
+                // effectiveAt 无可靠来源 → null（不得复制 observedAt）
+                effectiveAt: null,
+                sourceKind: 'live_observation', origin: 'monitoring',
+                change: {
+                  field: first.field, oldValue: first.oldValue, newValue: first.newValue,
+                  basis: 'deterministic_diff', fields: diff.changes.slice(0, 8).map(c => c.field),
+                  detail: diff.changes.slice(0, 8),
+                },
+                evidenceRefs: refs,
+                verificationStatus: refs.length ? 'verified' : 'pending',
+                windowKey: windowId,
+              });
+              try {
+                alertsPushFn(tid, {
+                  type: 'site-change', projectId: pid,
+                  competitorId: comp.id, competitorName: comp.name,
+                  title: '官网内容变化', text: (comp.name || '竞品') + '：' + FP.describeChanges(diff.changes),
+                  sourceUrl: sres.sourceUrl || comp.url || null, basis: refs.length ? 'verified' : 'pending',
+                });
+              } catch (e) { /* 推送失败不影响窗口落账 */ }
+              // baseline 前移：同一变化不会在后续窗口被重复报出
+              WS.saveSiteBaseline({
+                tenantId: tid, projectId: pid, competitorId: comp.id,
+                fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
+              });
+              if (!rec || !rec.recorded) { /* 去重/规则拒绝：不静默改口径，窗口照常成功 */ }
+            }
+            attempt('site_change', true);
+          }
+        } catch (e) { attempt('site_change', false, 'parse_failed'); }
+      }
+    }
+    if (signals.includes('price')) {
       let pres = null;
       try { pres = await (deps.publicSiteFn || collectPublicSiteProducts)(comp, tid, pid); }
       catch (e) { pres = { ok: false, error: String((e && e.message) || e) }; }
@@ -170,6 +317,11 @@ async function executeWindow(target, windowId, deps, nowMs) {
                   currency: r2.event.currency, sourceUrl: it.id || comp.url || null, basis: 'verified',
                 });
               } catch (e) { /* 推送失败不影响窗口落账 */ }
+              recordPriceInboxEvent({
+                tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
+                sourceUrl: it.id || pres.sourceUrl || comp.url || null,
+                snapshotIds: (pres && pres.snapshotIds) || [],
+              });
             }
             try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
@@ -224,6 +376,11 @@ async function executeWindow(target, windowId, deps, nowMs) {
                   currency: r2.event.currency, sourceUrl: res.url || comp.url || null, basis: 'verified',
                 });
               } catch (e) { /* 推送失败不影响窗口落账 */ }
+              recordPriceInboxEvent({
+                tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
+                sourceUrl: res.url || comp.url || null,
+                snapshotIds: res.snapshotId ? [res.snapshotId] : (res.snapshotIds || []),
+              });
             }
             try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
@@ -348,4 +505,4 @@ function startTick(logger) {
 }
 function stopTick() { if (_timer) { clearInterval(_timer); _timer = null; } }
 
-module.exports = { dueWindows, jitterMsFor, executeWindow, runDueWindows, startTick, stopTick, medianOf };
+module.exports = { dueWindows, jitterMsFor, executeWindow, runDueWindows, startTick, stopTick, medianOf, collectPublicSiteProducts, collectSiteFingerprint };

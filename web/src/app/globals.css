@@ -3162,3 +3162,52 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .core-coll-cov-line .core-coll-failed{color:#c0392b}
 .core-coll-cov-failures{list-style:none;margin:8px 0 0;padding:0;font-size:11.5px;color:var(--ink2)}
 .core-coll-cov-failures>li{padding:3px 0;border-top:1px dashed var(--line1)}
+
+/* ============================================================
+   SC-08 §二：每日变化收件箱（/intel 重做）
+   单列事件行：时间 → 品牌 → 变化类型 → 变化说明 → 核验 → 证据
+   ============================================================ */
+.core-inbox-page{margin:0 0 40px}
+.core-inbox-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 10px}
+.core-inbox-head h3{margin:0;font-size:16px;font-weight:600;color:var(--ink)}
+.core-inbox-cov-link{font-size:12px;color:var(--ink2);text-decoration:none;border-bottom:1px solid var(--line1)}
+.core-inbox-cov-link:hover{color:var(--ink)}
+.core-inbox-sum{display:flex;flex-wrap:wrap;gap:8px 20px;margin:0 0 14px;font-size:12.5px;color:var(--ink2)}
+.core-inbox-sum b{font-family:var(--num);color:var(--ink);font-weight:600}
+.core-inbox-sum .core-sum-ok b{color:#1D9E75}
+.core-inbox-sum .core-sum-warn b{color:#8a6d1a}
+.core-inbox-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}
+.core-inbox-filters select,.core-inbox-filters input{font-size:12px;padding:5px 8px;border:1px solid var(--line1);border-radius:var(--r-sm);background:var(--bg1);color:var(--ink)}
+.core-inbox-day{margin:0 0 22px}
+.core-inbox-day-title{margin:0 0 8px;font-size:12.5px;font-weight:600;color:var(--ink2);letter-spacing:.02em}
+.core-inbox-day-raw{margin-left:8px;font-family:var(--num);font-size:11px;color:var(--ink3);font-weight:400}
+.core-inbox-list{list-style:none;margin:0;padding:0}
+.core-inbox-item{display:grid;grid-template-columns:44px minmax(88px,120px) 72px minmax(0,1fr) 62px 74px;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line1);font-size:13px}
+.core-inbox-item:last-child{border-bottom:1px solid var(--line1)}
+.core-inbox-time{font-family:var(--num);font-size:11.5px;color:var(--ink2)}
+.core-inbox-brand{color:var(--ink);font-weight:600;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+a.core-inbox-brand:hover{text-decoration:underline}
+.core-inbox-dim{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid var(--line1);color:var(--ink2);white-space:nowrap}
+.core-dim-price{border-color:rgba(29,158,117,.35);color:#1D9E75}
+.core-dim-website{border-color:rgba(40,90,200,.3);color:#285ac8}
+.core-inbox-text{color:var(--ink);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+a.core-inbox-text:hover{text-decoration:underline}
+.core-inbox-verify{font-size:11.5px;white-space:nowrap}
+.core-inbox-verify.is-verified{color:#1D9E75}
+.core-inbox-verify.is-pending{color:#8a6d1a}
+.core-inbox-evidence{font-size:11.5px;padding:2px 8px;border:1px solid var(--line1);border-radius:var(--r-sm);background:transparent;color:var(--ink2);cursor:pointer;white-space:nowrap}
+.core-inbox-evidence:hover:not(:disabled){color:var(--ink);border-color:var(--ink3)}
+.core-inbox-evidence:disabled{opacity:.5;cursor:default}
+.core-inbox-evidence-none{font-size:11px;color:var(--ink3)}
+.core-inbox-more{display:block;margin:16px auto 0;font-size:12px;padding:6px 14px;border:1px solid var(--line1);border-radius:var(--r-sm);background:transparent;color:var(--ink2);cursor:pointer}
+.core-inbox-more:hover:not(:disabled){color:var(--ink)}
+/* 移动端：时间 → 品牌 → 变化 → 证据 纵向排列（§二 末尾） */
+@media (max-width: 640px){
+  .core-inbox-item{grid-template-columns:1fr;gap:4px;padding:12px 0}
+  .core-inbox-time{order:1}
+  .core-inbox-brand{order:2;white-space:normal}
+  .core-inbox-dim{order:3;justify-self:start}
+  .core-inbox-text{order:4;white-space:normal;line-height:1.5}
+  .core-inbox-verify{order:5}
+  .core-inbox-evidence,.core-inbox-evidence-none{order:6;justify-self:start}
+}

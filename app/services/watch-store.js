@@ -37,7 +37,8 @@ const QUALIFICATION_STATUSES = new Set(['qualified', 'unresolved', 'disqualified
 const ENRICHMENT_STATUSES = new Set(['not_started', 'running', 'partial', 'complete', 'failed']);
 const FRESHNESS_STATUSES = new Set(['fresh', 'stale', 'unknown']);
 // 信号词表 = 当前监控链路真实具备的探测能力（sweep/net.js 已实现；不虚设未实现信号）
-const SIGNALS = new Set(['price', 'launch', 'stock']);
+// SC-08 §三 C：site_change = 官网内容结构化字段变化（非 Shopify、无可比价格时的正式降级信号）
+const SIGNALS = new Set(['price', 'launch', 'stock', 'site_change']);
 // 失败原因（00 v1.2 §2.1 unavailable.reason_code 词表 + window 专属 partial_scan 传播标记）
 const FAILURE_REASONS = new Set(['fetch_failed', 'blocked', 'rate_limited', 'parse_failed', 'not_supported', 'http_error']);
 // 调度（03 v0.3 §12.1 唯一口径：目标市场时区 06:00 / 14:00 / 22:00 三窗口）
@@ -119,6 +120,18 @@ function getDb() {
     at TEXT NOT NULL,
     UNIQUE (tenant_id, project_id, competitor_id, subject_id, currency)
   )`);
+  // SC-08 §三 C：官网结构化指纹 baseline（首次成功观察只存 baseline，第二次确定性变化才成事件）
+  db.exec(`CREATE TABLE IF NOT EXISTS watch_site_baselines (
+    tenant_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    competitor_id TEXT NOT NULL,
+    fingerprint_json TEXT NOT NULL,
+    stability_json TEXT NOT NULL DEFAULT '{}',
+    url TEXT,
+    at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, project_id, competitor_id)
+  )`);
   _db = db;
   return db;
 }
@@ -166,6 +179,7 @@ function sanitizeSignals(list) {
     const k = String(s || '').trim().toLowerCase();
     if (SIGNALS.has(k) && !out.includes(k)) out.push(k);
   }
+  // SC-08：显式只给了 site_change（非 Shopify 降级）时必须保留，不得回退成 Shopify 三件套
   return out.length ? out : ['price', 'launch', 'stock'];
 }
 
@@ -452,6 +466,37 @@ function latestWindowFor(tenantId, watchTargetId) {
 }
 
 // ---------- 单品价格快照（整改 §6：稳定商品身份比较；每身份存最近一条） ----------
+// ---------- 官网结构化指纹 baseline（SC-08 §三 C） ----------
+// 首次成功观察只写 baseline（不入事件）；此后每次窗口与 baseline 做确定性 Diff。
+function getSiteBaseline(tenantId, projectId, competitorId) {
+  const row = getDb().prepare(
+    'SELECT * FROM watch_site_baselines WHERE tenant_id=? AND project_id=? AND competitor_id=?'
+  ).get(String(tenantId || ''), String(projectId || ''), String(competitorId || ''));
+  if (!row) return null;
+  let fingerprint = null, stability = null;
+  try { fingerprint = JSON.parse(row.fingerprint_json); } catch (e) { fingerprint = null; }
+  try { stability = row.stability_json ? JSON.parse(row.stability_json) : null; } catch (e) { stability = null; }
+  return { fingerprint, stability, url: row.url || null, at: row.at, updatedAt: row.updated_at };
+}
+
+function saveSiteBaseline({ tenantId, projectId, competitorId, fingerprint, stability, url, at }) {
+  const nowIso = at || new Date().toISOString();
+  getDb().prepare(`INSERT INTO watch_site_baselines
+      (tenant_id, project_id, competitor_id, fingerprint_json, stability_json, url, at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(tenant_id, project_id, competitor_id) DO UPDATE SET
+        fingerprint_json=excluded.fingerprint_json, stability_json=excluded.stability_json,
+        url=excluded.url, at=excluded.at, updated_at=excluded.updated_at`)
+    .run(String(tenantId || ''), String(projectId || ''), String(competitorId || ''),
+      JSON.stringify(fingerprint || null), JSON.stringify(stability || {}), url ? String(url) : null, nowIso, nowIso);
+  return getSiteBaseline(tenantId, projectId, competitorId);
+}
+
+function clearSiteBaseline(tenantId, projectId, competitorId) {
+  return getDb().prepare('DELETE FROM watch_site_baselines WHERE tenant_id=? AND project_id=? AND competitor_id=?')
+    .run(String(tenantId || ''), String(projectId || ''), String(competitorId || '')).changes;
+}
+
 function listProductPrices(tenantId, projectId, competitorId) {
   return getDb().prepare(`SELECT * FROM watch_price_snapshots
     WHERE tenant_id=? AND project_id=? AND competitor_id=?`)
@@ -488,5 +533,6 @@ module.exports = {
   createWatchTarget, getWatchTarget, listWatchTargets, listActiveTargets, listSchedulableTargets, updateWatchTarget, deleteWatchTarget,
   markSuccess, markDegraded, refreshFreshness,
   listProductPrices, upsertProductPrice,
+  getSiteBaseline, saveSiteBaseline, clearSiteBaseline,
   claimWindow, completeWindow, failWindow, getWindow, windowsForTargetDay, windowsForTenantDay, latestWindowFor,
 };

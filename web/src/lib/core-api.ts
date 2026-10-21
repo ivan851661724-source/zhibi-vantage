@@ -362,6 +362,61 @@ export function fetchBrandCoverage(brandId: string, opts: { projectId?: string; 
   const q = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : '';
   return apiGet<{ brandId: string; projectId?: string; coverage: Coverage }>(`/api/brands/${encodeURIComponent(brandId)}/coverage${q}`, opts.signal);
 }
+// ---------- SC-08 §二：每日变化收件箱 ----------
+export type InboxDimension = 'price' | 'product' | 'stock' | 'website' | 'review' | 'social' | 'ads' | 'search';
+export interface InboxEvidenceRef {
+  evidenceId?: string;
+  snapshotId?: string;
+  sourceUrl?: string | null;
+  observedAt?: string | null;
+}
+export interface InboxEvent {
+  eventId: string;
+  brandId: string | null;
+  competitorId: string | null;
+  brandName: string | null;
+  dimension: InboxDimension;
+  eventType: string;
+  title: string;
+  summary: string | null;
+  subjectId: string | null;
+  observedAt: string;
+  effectiveAt: string | null;
+  verificationStatus: 'verified' | 'pending';
+  sourceKind: 'live_observation' | 'derived_event';
+  origin: 'monitoring' | 'backfill' | 'history';
+  change: Record<string, unknown> | null;
+  evidenceCount: number;
+  evidenceRefs: InboxEvidenceRef[];
+  windowKey?: string | null;
+  links: { brand: string | null; timeline: string | null; evidence: string | null };
+}
+export interface InboxGroup { date: string; events: InboxEvent[] }
+export interface InboxSummary { today: number; verified: number; pending: number; brandsChanged: number }
+export interface InboxResponse {
+  projectId: string;
+  summary: InboxSummary;
+  groups: InboxGroup[];
+  nextCursor: string | null;
+  total: number;
+  polling: { enabled: boolean; reason: string; activeTargets?: number };
+  filters: Record<string, string | null>;
+  timeZone: string;
+  limitations: string[];
+}
+export function fetchIntelInbox(params: {
+  projectId: string; brandId?: string; dimension?: string; eventType?: string;
+  verificationStatus?: string; from?: string; to?: string; cursor?: string; limit?: number;
+}, signal?: AbortSignal) {
+  const q = new URLSearchParams({ projectId: params.projectId });
+  for (const k of ['brandId', 'dimension', 'eventType', 'verificationStatus', 'from', 'to', 'cursor'] as const) {
+    const v = params[k];
+    if (v) q.set(k, String(v));
+  }
+  if (params.limit) q.set('limit', String(params.limit));
+  return apiGet<InboxResponse>(`/api/intel/inbox?${q.toString()}`, signal);
+}
+
 export function fetchIntelligence(params: { projectId: string; brandId?: string; type?: string; from?: string; to?: string }, signal?: AbortSignal) {
   const q = new URLSearchParams({ projectId: params.projectId });
   if (params.brandId) q.set('brandId', params.brandId);
