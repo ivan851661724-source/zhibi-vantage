@@ -11,8 +11,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || 'F:/知彼-竞品雷达/.workbuddy/tmp/zbtest-sc06';
 const fs = require('fs');
+// 可移植 + 可重复：不依赖个人机器路径；每次运行用全新临时目录（确定性 attempt id 复跑不撞终态不可变）。
+process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'zbtest-sc06-'));
 fs.mkdirSync(process.env.ZB_DATA_DIR, { recursive: true });
 
 const Registry = require('../services/capability-registry.js');
