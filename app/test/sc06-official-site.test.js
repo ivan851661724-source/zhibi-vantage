@@ -11,14 +11,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-// r3：测试隔离修复——旧实现用仓库外固定目录 + 模块内递增幂等键，
-// 第二次运行会命中上一次的终态 attempt（createAttempt 去重 → completeAttempt 报
-// 'attempt already terminal'），与本轮改动无关，是既有缺陷。改为每次运行独立临时目录。
-const os = require('os');
-const path = require('path');
-process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || fs_mkdtemp();
-function fs_mkdtemp() { return require('fs').mkdtempSync(path.join(os.tmpdir(), 'zhibi-sc06-')); }
 const fs = require('fs');
+// 可移植 + 可重复：不依赖个人机器路径；每次运行用全新临时目录（确定性 attempt id 复跑不撞终态不可变）。
+process.env.ZB_DATA_DIR = process.env.ZB_DATA_DIR || fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'zbtest-sc06-'));
 fs.mkdirSync(process.env.ZB_DATA_DIR, { recursive: true });
 
 const Registry = require('../services/capability-registry.js');
