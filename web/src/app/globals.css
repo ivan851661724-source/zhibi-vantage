@@ -523,6 +523,8 @@ input,select,textarea{font-family:inherit}
 .pf-m .v{font-size:14px;font-weight:700;margin-top:2px}
 .pf-m .v small{font-size:11px;color:var(--ink3);font-weight:500}
 .pf-acts{display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+/* 信息架构收敛（评审 2026-10-21）：维度数据唯一入口指向品牌档案容器 */
+.pf-surface-link{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border:1px dashed var(--line1);border-radius:var(--r-md);padding:11px 15px;margin-bottom:13px}
 
 .field-box{border:1px solid var(--line1);border-radius:var(--r-md);background:var(--bg2);margin-bottom:13px;overflow:hidden}
 .fb-head{display:flex;align-items:center;gap:10px;padding:13px 17px;cursor:pointer;user-select:none;transition:background .12s}

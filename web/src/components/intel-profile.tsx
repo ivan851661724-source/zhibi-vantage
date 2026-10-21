@@ -3,14 +3,15 @@
 // 六字段折叠：价格 / 渠道 / 品类 / 上新节奏 / 口碑 / 空白。每个字段带证据等级与来源，可逐条核对。
 // 值级核验渲染复刻：priceFieldHTML / channelFieldHTML / scalarFieldHTML / themeChip / L1_ITEMS（L2837-3267）
 import { useEffect, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { apiGet, apiPost } from '@/lib/api';
+import { fetchBrands } from '@/lib/core-api';
 import { toast } from '@/lib/toast';
 import { useZhibiState, useStateOperation } from '@/hooks/use-zhibi-state';
 import { LABELS, lbl } from '@/lib/labels';
 import type { Competitor, ZhibiState } from '@/types/state';
 import { PriceMetricBlock, metricPrice } from '@/components/price-metric-detail';
 import { MonitoringControls } from '@/components/monitoring-controls';
-import { DataSurfaceOverview } from '@/components/data-surface/data-surface-overview';
 
 // ---- 基础字典（移植 app.js 顶部常量） ----
 const REL_LABEL: Record<string, string> = {
@@ -657,10 +658,40 @@ export function IntelProfile({
         <BlankItems c={c} />
       </IntelFieldBox>
 
-      {/* 五维数据覆盖总览（SC-02：官网与商品=真实采集；其余维度读 Registry 能力状态，未接入如实显示） */}
-      <DataSurfaceOverview competitorId={c.id} />
+      {/* 信息架构收敛（评审 2026-10-21）：五维数据覆盖与逐维度观察只在品牌档案
+          「数据覆盖与来源」渲染一次——本页保留六字段画像与逐字段纠错，不再重复
+          渲染维度面板（社媒/广告/评论接入后也不散落到第二处）。 */}
+      <BrandSurfaceLink competitorId={c.id} projectId={state.projectId || null} />
 
       <NoteBox cid={c.id} />
+    </div>
+  );
+}
+
+// 维度数据唯一入口指引：按 competitorId 解析品牌档案并深链到其「数据覆盖与来源」；
+// 解析不到（品牌未建档）时诚实说明并指回竞品数据库，不在此处降级重复渲染维度面板。
+function BrandSurfaceLink({ competitorId, projectId }: { competitorId: string; projectId: string | null }) {
+  const [brandId, setBrandId] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!projectId) { setBrandId(null); return; }
+    let alive = true;
+    const ctrl = new AbortController();
+    fetchBrands(projectId, ctrl.signal)
+      .then(r => { if (alive) setBrandId((r.brands || []).find(b => b.competitorId === competitorId)?.brandId || null); })
+      .catch(() => { if (alive) setBrandId(null); });
+    return () => { alive = false; ctrl.abort(); };
+  }, [competitorId, projectId]);
+  const pid = projectId ? encodeURIComponent(projectId) : '';
+  return (
+    <div className="pf-surface-link">
+      <span className="hint">
+        五维数据覆盖与逐维度观察（官网与商品 / 社媒 / 广告 / 评论 / 搜索热度）在品牌档案的「数据覆盖与来源」中统一查看。
+      </span>
+      {brandId ? (
+        <Link className="btn-ghost" href={`/brands/${encodeURIComponent(brandId)}?projectId=${pid}&tab=coverage`}>打开该品牌的数据覆盖 →</Link>
+      ) : (
+        <Link className="btn-ghost" href={`/brands?projectId=${pid}`}>前往竞品数据库 →</Link>
+      )}
     </div>
   );
 }
