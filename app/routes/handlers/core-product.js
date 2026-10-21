@@ -52,7 +52,13 @@ async function brandsList(ctx, req, res, url) {
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const items = BrandSvc.listBrandViews(tid, rp.projectId);
-  ctx.sendJSON(res, 200, { projectId: rp.projectId, brands: items, count: items.length });
+  ctx.sendJSON(res, 200, {
+    projectId: rp.projectId, brands: items, count: items.length,
+    // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细），竞品数据库与情报库统一口径
+    collectionCoverage: (() => {
+      try { return BrandSvc.buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
+    })(),
+  });
   return true;
 }
 
@@ -119,6 +125,12 @@ async function intelligence(ctx, req, res, url) {
     // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径；
     // 独立字段，不与采集观察 items 混排）
     voiceChanges: VoiceUnified.buildProjectVoiceSummary(tid, rp.projectId, { brandId }),
+    // SC-07 §3：没有实际观察的品牌不再逐条出卡，改由项目级覆盖摘要承载
+    //（零结果 / 失败 / 未采集分别计数；失败可查品牌与原因）
+    voiceCoverage: VoiceUnified.buildProjectVoiceCoverage(tid, rp.projectId),
+    collectionCoverage: (() => {
+      try { return require('../../services/brand-service.js').buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
+    })(),
     filters: { brandId: brandId || null, type: q(url, 'type') || null, from: q(url, 'from') || null, to: q(url, 'to') || null },
     legend: {
       natures: BrandSvc.NATURE_TEXT,

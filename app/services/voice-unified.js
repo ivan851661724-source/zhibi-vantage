@@ -342,6 +342,10 @@ function buildProjectVoiceSummary(tenantId, projectId, opts) {
     try { u = buildUnifiedVoice({ tenantId, projectId, brandId: b.brandId, competitorId: comp ? comp.id : null, comp: comp || {} }); } catch (e) { u = null; }
     if (!u) continue;
     const gate = buildOpportunityInput(u);
+    // 🔴 SC-07 §3：没有实际公开评论观察的品牌不生成独立评论卡（此前 18 个品牌 → 18 条
+    // 相同空状态噪音）。空状态由项目级「采集覆盖」汇总表达。
+    const verifiedCount = (u.verified && Array.isArray(u.verified.items)) ? u.verified.items.length : 0;
+    if (!verifiedCount) continue;
     out.push({
       brandId: b.brandId,
       brandName: b.canonicalName || null,
@@ -361,10 +365,63 @@ function buildProjectVoiceSummary(tenantId, projectId, opts) {
   return out;
 }
 
+/**
+ * 项目级「公开评论采集覆盖」摘要（情报库/竞品数据库共用，替代逐品牌空卡）。
+ * 只统计：检查过多少品牌、有观察的品牌数、零结果与失败各多少、失败原因。
+ */
+function buildProjectVoiceCoverage(tenantId, projectId) {
+  const BrandStore = require('./brand-store.js');
+  const BrandSvc = require('./brand-service.js');
+  const state = BrandSvc.loadProjectState(tenantId, projectId);
+  const links = BrandStore.listBrandLinksForProject(tenantId, projectId) || [];
+  let checked = 0; let withObservations = 0; let empty = 0; let failed = 0; let notCollected = 0;
+  let observations = 0;
+  const failures = [];
+  for (const b of links) {
+    const comp = b.competitorRef ? BrandSvc.findCompetitor(state, b.competitorRef) : null;
+    let u = null;
+    try { u = buildUnifiedVoice({ tenantId, projectId, brandId: b.brandId, competitorId: comp ? comp.id : null, comp: comp || {} }); } catch (e) { u = null; }
+    if (!u) { notCollected += 1; continue; }
+    const n = (u.verified && Array.isArray(u.verified.items)) ? u.verified.items.length : 0;
+    const sum = u.verified && u.verified.summary;
+    if (n > 0) { withObservations += 1; observations += n; checked += 1; continue; }
+    // 无观察：区分「检查完成但零结果」与「采集失败」与「尚未采集」
+    let last = null;
+    try {
+      const atts = require('./surface-store.js').listAttempts(tenantId, projectId, comp ? comp.id : null, 'public_reviews', 5) || [];
+      last = atts[0] || null;
+    } catch (e) { last = null; }
+    if (last && (last.status === 'failed')) {
+      failed += 1;
+      if (failures.length < 20) {
+        failures.push({
+          brandId: b.brandId, brandName: b.canonicalName || null,
+          competitorId: comp ? comp.id : null,
+          reason: last.errorUserText || last.errorClass || '采集失败',
+          at: last.endedAt || last.startedAt || null,
+        });
+      }
+    } else if (last && (last.status === 'success' || last.status === 'partial')) {
+      empty += 1;
+      checked += 1;
+    } else {
+      notCollected += 1;
+    }
+    if (sum && sum.emptyReason) { /* 保留成因，不展示为「没有口碑」 */ }
+  }
+  return {
+    brands: links.length,
+    checked, withObservations, empty, failed, notCollected,
+    observations,
+    failures,
+    note: '情报库主列表只展示有内容的观察；零结果与失败在此汇总，不进主列表。',
+  };
+}
+
 module.exports = {
   VOICE_MODEL_VERSION, POLARITIES, SENTIMENT_BASIS_KINDS, OPP_GATE, OPP_GATE_TEXT,
   MIN_QUALIFIED_ITEMS,
   normalizeClassification, isOpportunityEligible,
   buildUnifiedVoice, buildOpportunityInput, toOpportunityInput, buildOpportunityInputForComps,
-  buildProjectVoiceSummary,
+  buildProjectVoiceSummary, buildProjectVoiceCoverage,
 };

@@ -116,12 +116,16 @@ function registerAll() {
   registry.register('GET', '/api/watch-targets', 'tenant', WatchH.listTargets);
   registry.register('PATCH', '/api/watch-targets/:id', 'tenant', WatchH.patchTarget);
   registry.register('DELETE', '/api/watch-targets/:id', 'tenant', WatchH.deleteTarget);
+  // SC-07 §2：监控意向（非 Shopify 品牌「建立来源中」）——与正式监控对象分开
+  registry.register('DELETE', '/api/watch-intents/:id', 'tenant', WatchH.deleteIntent);
   registry.register('GET', '/api/digests/daily', 'tenant', WatchH.dailyDigest);
   registry.register('GET', '/api/watch-targets/coverage', 'tenant', WatchH.coverageDay);
   // —— 五维数据面（SC-02 / 03 §7 扩展；admin 端点对租户 403） ——
   registry.register('GET', '/api/data-surface/overview', 'tenant', DataSurfaceH.overview);
   registry.register('GET', '/api/data-surface/dimension', 'tenant', DataSurfaceH.dimension);
   registry.register('POST', '/api/data-surface/refresh', 'tenant', DataSurfaceH.refresh);
+  // SC-07 §1：项目首轮采集补建（有界、可重复；幂等由采集链路保证）
+  registry.register('POST', '/api/data-surface/bootstrap', 'tenant', DataSurfaceH.bootstrap);
   registry.register('GET', '/api/data-surface/refresh-policy', 'tenant', DataSurfaceH.refreshPolicy); // SC-02 §6.3：capability 级 cooldown/额度
 
   // —— 核心产品主闭环（SC-04）：竞品库 → 情报库 → 机会视图 → 调研报告 ——

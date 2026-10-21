@@ -972,6 +972,8 @@ const youtubeAdapter = {
         periodStart: res.periodStart || null, periodEnd: res.periodEnd || null,
         comments,
         partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+        emptyReason: res.emptyReason || null,
+        pageAttempts: typeof res.pageAttempts === 'number' ? res.pageAttempts : null,
       },
       snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
       currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
@@ -1557,6 +1559,26 @@ const tiktokAdapter = {
   },
 };
 
+// 候选页检查结果的判定（纯函数，便于单测；不涉网络与证据链）
+//   failed  : 所有候选页都没抓成功（限流/拒访/不可达）→ 真实失败，不是「零评论」
+//   empty   : 检查确实完成了，但没有可归属页面 / 没有候选页 → 成功零结果（带成因）
+function classifyReviewPages(input) {
+  const o = input || {};
+  const pages = Array.isArray(o.pages) ? o.pages : [];
+  const attempts = Number(o.pageAttempts) || 0;
+  const failed = Number(o.pageFetchFailed) || 0;
+  const unattributed = Number(o.pageUnattributed) || 0;
+  const candidates = Number(o.candidates) || 0;
+  if (pages.length) return { kind: 'ok', emptyReason: null };
+  if (!candidates) return { kind: 'empty', emptyReason: 'no_candidate_pages' };
+  if (attempts > 0 && failed === attempts) {
+    const st = Number(o.lastStatus);
+    const sourceStatus = st === 429 ? 'rate_limited' : ((st === 401 || st === 403 || st === 407) ? 'blocked' : 'unavailable');
+    return { kind: 'failed', sourceStatus };
+  }
+  return { kind: 'empty', emptyReason: unattributed > 0 ? 'no_attributable_pages' : 'no_candidate_pages' };
+}
+
 const reviewsAdapter = {
   code: 'reviews',
   displayName: '口碑与评论（公开页面）',
@@ -1670,16 +1692,24 @@ const reviewsAdapter = {
       return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey, emptyWindow: true });
     }
     // 逐页抓取：FetchGate/robots/SSRF 全合规（Net.fetchPage）；品牌归属粗校验（标题/URL 含品牌名或域名）
+    // 🔴 SC-07 §1：候选页「全部抓不到」与「检查完成但没有可归属页面」必须分开——
+    // 前者是真实失败（限流/拒访/不可达），不得落成「成功且零评论」。
     const pages = []; const snapshotIds = [];
+    let pageAttempts = 0, pageFetchFailed = 0, pageUnattributed = 0, lastFailStatus = null;
     for (const c of candidates) {
+      pageAttempts += 1;
       const fr = await Net.fetchPage(c.url, 15000, { trigger, tenantId: ctx.tenantId });
-      if (!fr || fr.ok !== true) continue; // robots 禁止/失败页不入库（不伪装成功）
+      if (!fr || fr.ok !== true) {
+        pageFetchFailed += 1;
+        if (fr && fr.status) lastFailStatus = fr.status;
+        continue; // robots 禁止/失败页不入库（不伪装成功）
+      }
       if (fr.snapshotId) snapshotIds.push(fr.snapshotId);
       let text = '';
       try { text = Net.stripHtml(fr.html || '').slice(0, 800); } catch (e) { text = String(fr.html || '').slice(0, 800); }
       const urlL = String(c.url).toLowerCase(); const titleL = String(c.title || '').toLowerCase(); const brandL = brand.toLowerCase();
       const related = (domain && urlL.includes(domain)) || (brandL && (urlL.includes(brandL) || titleL.includes(brandL)));
-      if (!related) continue; // 归属校验不过 → 不入库（identity 保持 unresolved）
+      if (!related) { pageUnattributed += 1; continue; } // 归属校验不过 → 不入库（identity 保持 unresolved）
       // 评分抽取：schema.org aggregateRating（JSON-LD）→ meta → 评分模式（可信度递减）
       let rating = null, reviewCount = null;
       try {
@@ -1701,11 +1731,29 @@ const reviewsAdapter = {
         rating, reviewCount, snippet: text.slice(0, 200), fetchedAt: new Date().toISOString(),
       });
     }
+    // 全失败 ≠ 成功零结果（评审要求：限流/拒访/抓取失败必须保留失败状态）
+    const verdict = classifyReviewPages({
+      pages, candidates: candidates.length, pageAttempts, pageFetchFailed, pageUnattributed, lastStatus: lastFailStatus,
+    });
+    if (verdict.kind === 'failed') {
+      const cls = { sourceStatus: verdict.sourceStatus };
+      const text = cls.sourceStatus === 'rate_limited'
+        ? '对方站点限制了本次公开页面访问频率，稍后可重试。'
+        : cls.sourceStatus === 'blocked'
+          ? '对方站点拒绝了公开页面访问，稍后可重试。'
+          : '候选公开页面暂不可读，稍后可重试。';
+      return failAttempt(ctx, { ok: false, status: lastFailStatus || null, error: 'candidate_pages_unreadable', snapshotId: snapshotIds[snapshotIds.length - 1] || null }, { errorUserText: text });
+    }
     const res = {
       ok: true, pages, snapshotIds, partialScan: false,
       periodStart: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
       periodEnd: new Date().toISOString().slice(0, 10),
       sourceUrl: pages.length ? pages[0].url : null,
+      // 成功零结果的两种成因要能区分（供摘要与运维查看）：
+      //   no_candidate_pages   搜索完成但没找到候选页
+      //   no_attributable_pages 抓到了页面但没有可归属本品牌的页面
+      emptyReason: verdict.emptyReason || null,
+      pageAttempts, pageFetchFailed, pageUnattributed,
     };
     const out = this.normalize(res, ctx);
     if (suppress) return { providerOk: true, ident, raw: res, out };
@@ -2077,6 +2125,6 @@ module.exports = {
   ADAPTERS, ADAPTER_METHODS, SUMMARY_KINDS, ADAPTER_STRATEGIES, OUTCOMES,
   getAdapter, listAdapters, validateAdapter, validateOutput, assertAdaptersIntegrity,
   redactSecretParams, SENSITIVE_QUERY_KEYS, fetchApiJson,
-  resolveAdapterChain, classifyFetchFailure, summarize, summarizeObservations, assertFence,
+  resolveAdapterChain, classifyFetchFailure, classifyReviewPages, summarize, summarizeObservations, assertFence,
   runProviderOutput, commitProviderTerminal, finalizeOutput, commitProviderEmpty, FAILURE_TEXT,
 };

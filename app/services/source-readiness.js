@@ -57,16 +57,59 @@ function rid(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// 🔴 SC-07 §1：凭据来源有两处——环境变量 与 运行配置文件（app/data/config.json，
+// 落盘加密、内存解密）。此前只读 process.env，导致「配置写在配置文件里」的部署被判未配置。
+// 搜索类凭据还可能来自配置文件里的 search.serperKey / serperKeys / tavilyKey / apiKey /
+// braveKey / bochaKey——与 ENV 名一一对应。
+const ENV_TO_SEARCH_PROVIDER = Object.freeze({
+  SERPER_API_KEY: 'serper',
+  TAVILY_API_KEY: 'tavily',
+  BRAVE_API_KEY: 'brave',
+  BOCHA_API_KEY: 'bocha',
+});
+
+let _cfgCache = { at: 0, cfg: null };
+function runtimeConfig() {
+  // 配置文件改动后 10s 内生效即可（readiness 本身实时调用，缓存只为避免每次读盘解密）
+  const now = Date.now();
+  if (_cfgCache.cfg && now - _cfgCache.at < 10000) return _cfgCache.cfg;
+  let cfg = null;
+  try { cfg = require('../core/config.js').loadConfig(); } catch (e) { cfg = null; }
+  _cfgCache = { at: now, cfg };
+  return cfg;
+}
+
+function searchProviderReady(providerName) {
+  try {
+    const Search = require('../research/search.js');
+    return !!Search.providerConfigured(runtimeConfig(), providerName);
+  } catch (e) { return false; }
+}
+
+// 单个 configKey 是否已具备：env 优先，其次运行配置文件中的对应字段
+function keyPresent(key) {
+  if (String(process.env[key] || '').trim()) return { present: true, from: 'env' };
+  const provider = ENV_TO_SEARCH_PROVIDER[key];
+  if (provider && searchProviderReady(provider)) return { present: true, from: 'config' };
+  return { present: false, from: null };
+}
+
+// 凭据模式：any_of（任选其一，如搜索链）/ all_of（默认：全部齐备才算配置完成）
 function configState(cap) {
   const keys = Array.isArray(cap.configKeys) ? cap.configKeys : [];
+  const mode = cap.credentialMode === 'any_of' ? 'any_of' : 'all_of';
   const present = {};
-  let missing = [];
+  const presentKeys = [];
+  const missing = [];
   for (const k of keys) {
-    const v = String(process.env[k] || '').trim();
-    present[k] = !!v;
-    if (!v) missing.push(k);
+    const r = keyPresent(k);
+    present[k] = r.present;
+    if (r.present) presentKeys.push(k); else missing.push(k);
   }
-  return { keys, present, missing };
+  // any_of：只要有一个通道可用就算已配置（missing 记为「未配置的备选通道」，
+  // 不得据此判 not_configured）；all_of：沿用原语义（有任一缺失即未配置）
+  const satisfied = mode === 'any_of' ? presentKeys.length > 0 : missing.length === 0;
+  return { keys, present, presentKeys, missing, mode, satisfied };
 }
 
 // 最近一次失败分类（verification failed 记录优先，collection_attempts 真实失败兜底）
@@ -103,10 +146,10 @@ function getReadiness(capabilityCode) {
   const cap = Registry.getCapability(capabilityCode);
   if (!cap) return { state: 'unavailable', userText: USER_TEXT.unavailable, reason: 'capability_not_found' };
   const cfg = configState(cap);
-  if (cfg.missing.length) {
+  if (!cfg.satisfied) {
     return {
       state: 'not_configured', userText: USER_TEXT.not_configured,
-      configKeys: cfg.keys, configKeysPresent: cfg.present,
+      configKeys: cfg.keys, configKeysPresent: cfg.present, credentialMode: cfg.mode,
       reason: 'system_credentials_missing',
     };
   }
@@ -149,7 +192,7 @@ function getReadiness(capabilityCode) {
     return {
       state: 'operational', userText: '',
       lastVerifiedAt: ok.created_at, provider: ok.provider,
-      configKeys: cfg.keys, configKeysPresent: cfg.present,
+      configKeys: cfg.keys, configKeysPresent: cfg.present, credentialMode: cfg.mode,
     };
   }
   if (fail) {
@@ -158,12 +201,12 @@ function getReadiness(capabilityCode) {
         : 'unavailable';
     return {
       state, userText: USER_TEXT[state], lastFailureClass: fail.failureClass, lastFailureAt: fail.at,
-      configKeys: cfg.keys, configKeysPresent: cfg.present,
+      configKeys: cfg.keys, configKeysPresent: cfg.present, credentialMode: cfg.mode,
     };
   }
   return {
     state: 'ready_to_verify', userText: USER_TEXT.ready_to_verify,
-    configKeys: cfg.keys, configKeysPresent: cfg.present,
+    configKeys: cfg.keys, configKeysPresent: cfg.present, credentialMode: cfg.mode,
   };
 }
 
@@ -203,6 +246,7 @@ function adminView() {
       lastVerifiedAt: r.lastVerifiedAt || null,
       lastFailureClass: r.lastFailureClass || null,
       lastFailureAt: r.lastFailureAt || null,
+      credentialMode: r.credentialMode || 'all_of',
       configKeys: (r.configKeys || []).map(k => ({ name: k, present: !!(r.configKeysPresent && r.configKeysPresent[k]) })),
     };
   });

@@ -517,6 +517,93 @@ function buildPublicProductsStatus(tenantId, projectId, competitor) {
   };
 }
 
+// ---------- 采集状态（SC-07 §1/§3） ----------
+// 逐品牌表达「排队中 / 采集中 / 有证据数据 / 检查完成但无结果 / 失败 / 来源待配置」，
+// 全部从真实 attempt / job / readiness 派生——不再用一句「尚未开始采集」盖住所有情况。
+const COLLECTION_STATE_TEXT = Object.freeze({
+  queued: '排队中',
+  collecting: '采集中',
+  has_data: '有证据数据',
+  empty: '检查完成但无结果',
+  failed: '采集失败',
+  source_pending: '来源待配置',
+  not_started: '尚未开始采集',
+});
+
+function buildCollectionState(tenantId, projectId, comp) {
+  const c = comp || {};
+  const out = { state: 'not_started', stateText: COLLECTION_STATE_TEXT.not_started, observedDimensions: 0, lastAttemptAt: null, reason: null };
+  if (!c.id) return out;
+  let atts = [];
+  try { atts = (SurfaceStore.listAttemptsByCompetitor ? SurfaceStore.listAttemptsByCompetitor(tenantId, projectId, c.id, 50) : SurfaceStore.listAttempts(tenantId, projectId, c.id, 'official_site_profile', 20)) || []; } catch (e) { atts = []; }
+  let pendingJobs = 0;
+  try {
+    const db = require('./collect-jobs.js').getDb();
+    pendingJobs = db.prepare(
+      "SELECT COUNT(*) AS n FROM collection_jobs WHERE tenant_id=? AND project_id=? AND competitor_id=? AND status IN ('pending','claimed')"
+    ).get(tenantId, projectId, c.id).n;
+  } catch (e) { pendingJobs = 0; }
+  const running = atts.find(a => a.status === 'running') || null;
+  const ok = atts.filter(a => a.status === 'success' || a.status === 'partial');
+  const failed = atts.filter(a => a.status === 'failed');
+  const obsCount = ok.reduce((n, a) => n + ((Array.isArray(a.observations) ? a.observations.length : 0)), 0);
+  const last = atts[0] || null;
+  const dims = new Set(ok.filter(a => (Array.isArray(a.observations) ? a.observations.length : 0) > 0).map(a => a.dimension));
+  out.observedDimensions = dims.size;
+  out.lastAttemptAt = last ? (last.endedAt || last.startedAt || null) : null;
+  if (running || pendingJobs > 0) {
+    out.state = running ? 'collecting' : 'queued';
+    out.stateText = COLLECTION_STATE_TEXT[out.state];
+    return out;
+  }
+  if (ok.length && obsCount > 0) { out.state = 'has_data'; out.stateText = COLLECTION_STATE_TEXT.has_data; return out; }
+  if (ok.length && obsCount === 0) {
+    out.state = 'empty'; out.stateText = COLLECTION_STATE_TEXT.empty;
+    out.reason = '本轮检查完成但未观察到可归属数据';
+    return out;
+  }
+  if (failed.length) {
+    out.state = 'failed'; out.stateText = COLLECTION_STATE_TEXT.failed;
+    out.reason = (last && (last.errorUserText || last.errorClass)) || '采集失败';
+    return out;
+  }
+  // 从未采集：区分「来源待配置」与「尚未开始」
+  try {
+    const Registry = require('./capability-registry.js');
+    const Readiness = require('./source-readiness.js');
+    const caps = Registry.listCapabilities().filter(x => x.maturity !== 'not_integrated');
+    const anyConfigured = caps.some(x => Readiness.getReadiness(x.code).state !== 'not_configured');
+    if (!anyConfigured) {
+      out.state = 'source_pending'; out.stateText = COLLECTION_STATE_TEXT.source_pending;
+      out.reason = '数据来源尚未配置，暂不能采集';
+    }
+  } catch (e) { /* 保持 not_started */ }
+  return out;
+}
+
+// 项目级采集覆盖：按状态计数 + 失败明细（情报库/竞品数据库共用）
+function buildProjectCollectionCoverage(tenantId, projectId) {
+  syncProjectBrands(tenantId, projectId);
+  const state = loadProjectState(tenantId, projectId);
+  const brands = BrandStore.listBrandLinksForProject(tenantId, projectId) || [];
+  const counts = { queued: 0, collecting: 0, has_data: 0, empty: 0, failed: 0, source_pending: 0, not_started: 0 };
+  const failures = [];
+  for (const b of brands) {
+    const comp = b.competitorRef ? findCompetitor(state, b.competitorRef) : null;
+    const cs = buildCollectionState(tenantId, projectId, comp || {});
+    counts[cs.state] = (counts[cs.state] || 0) + 1;
+    if (cs.state === 'failed' && failures.length < 20) {
+      failures.push({ brandId: b.brandId, brandName: b.canonicalName || null, competitorId: b.competitorRef || null, reason: cs.reason, at: cs.lastAttemptAt });
+    }
+  }
+  return {
+    brands: brands.length, counts, failures,
+    stateText: COLLECTION_STATE_TEXT,
+    anyInFlight: counts.queued + counts.collecting > 0,
+    note: '状态由真实采集任务与 attempt 派生，随任务进展更新。',
+  };
+}
+
 // ---------- 品牌视图 ----------
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
@@ -536,6 +623,8 @@ function listBrandViews(tenantId, projectId) {
       coverageDimensions: cov.dimensions,
       officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
       publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
+      // SC-07 §3：逐品牌真实采集状态（排队/采集/有数据/空/失败/来源待配置）
+      collection: buildCollectionState(tenantId, projectId, comp || {}),
       firstObservedAt: firstObservedAt(tenantId, b.brandId),
       lastObservedAt: last ? last.at : null,
       lastChange: last ? { at: last.at, kind: last.kind, kindText: INTEL_TYPE_TEXT[last.kind] || last.kind, title: last.title } : null,
@@ -587,6 +676,7 @@ function getBrandView(tenantId, brandId, projectId) {
     coverage: cov,
     officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
     publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
+    collection: buildCollectionState(tenantId, projectId, comp || {}),
     unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, competitorId: comp ? comp.id : null, comp: comp || {} }),
     products,
     timeline: timelineView(tenantId, brandId, { limit: 100 }),
@@ -604,4 +694,5 @@ module.exports = {
   buildCoverage, rebuildTimeline, timelineView, firstObservedAt,
   listIntelligence, buildBrandIntelligence, constructionDimensions,
   listBrandViews, getBrandView, buildOfficialSiteStatus, buildPublicProductsStatus,
+  buildCollectionState, buildProjectCollectionCoverage, COLLECTION_STATE_TEXT,
 };

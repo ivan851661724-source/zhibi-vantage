@@ -415,6 +415,18 @@ async function tick(options) {
   try {
     const out = await executeJob(job);
     finish(job.jobId, job.claimToken, 'done');
+    // SC-07 r2 §二：公开商品采集完成 → 推进该品牌的监控意向建立流程
+    //（晋升 / 安排下一次探测 / 按失败分类落终态）。读 attempt 库内真值，
+    // 不依赖 executeJob 返回形态。取消/已晋升的意向由 onProbeFinished 忽略。
+    try {
+      if (job.capability === 'public_site_products') {
+        const att = SurfaceStore.getAttempt(job.tenantId, job.attemptId);
+        require('./watch-intent.js').onProbeFinished({
+          tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+          attempt: att,
+        });
+      }
+    } catch (e) { /* 意向推进失败不影响采集结果 */ }
     return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: !!(out && out.deduped) };
   } catch (e) {
     const msg = String((e && e.message) || e);

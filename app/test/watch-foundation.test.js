@@ -356,8 +356,18 @@ const fakeRes = () => ({ headersSent: false, writeHead() {}, end() {} });
     ctxDns.loadState = ctxD.loadState;
     ctxDns.projFile = () => null;
     await WatchH.createTarget(ctxDns, { method: 'POST' }, st, new URL('http://x/api/watch-targets'), '/api/watch-targets');
-    assert.strictEqual(ctxDns.status, 400, '§9 无直接源不得加入必然失败的监控');
-    assert.strictEqual(ctxDns.body.error, 'CAPABILITY_NOT_SUPPORTED');
+    // 🔴 SC-07 §2 契约变更：无直接源不再 400 丢掉用户意向，而是保存「监控意向」并
+    // 触发公开来源基线建立；仍不得创建 WatchTarget、不得显示「监控中」。
+    // 正式监控门槛不变：只有在取得可重复抓取的商品身份与可比较字段、并完成
+    // 「首次基线 → 下一次采集 → 确定性 Diff」后才升级。
+    assert.ok(ctxDns.status === 200 || ctxDns.status === 202, '保存监控意向（202/200），不再 400: ' + ctxDns.status);
+    assert.ok(ctxDns.body.intent && ctxDns.body.intent.intentId, '返回监控意向');
+    assert.strictEqual(ctxDns.body.intent.state, 'establishing', '意向状态为建立中: ' + JSON.stringify(ctxDns.body.intent));
+    assert.strictEqual(ctxDns.body.intent.monitoring, false, '意向不得声称「监控中」');
+    // 关键：不得偷偷创建正式 WatchTarget（调度器只看 watch_targets）
+    const WT = require('../services/watch-store.js');
+    const leaked = (WT.listWatchTargets(TID_D, 'projD') || []).filter(x => x.competitorId === 'compD2');
+    assert.strictEqual(leaked.length, 0, '自动/意向流程不得偷偷创建正式 WatchTarget');
     // 暂停/恢复
     ctxD._body = { action: 'pause' };
     await WatchH.patchTarget(ctxD, { method: 'PATCH' }, st, new URL('http://x/api/watch-targets/' + wtId), '/api/watch-targets/' + wtId);

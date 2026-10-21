@@ -43,10 +43,42 @@ export interface BrandListItem {
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; lastCollectedAt?: string | null } | null;
   // SC-06 r2：官网公开商品（非目录接口）——未验证时 status='not_collected' 且带说明
   publicProducts?: PublicProductsStatus | null;
+  collection?: BrandCollectionState | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
   lastChange: { at: string; kind: string; kindText: string; title: string | null } | null;
   gaps: { code: string; displayName: string; state: CoverState; stateText: string }[];
+}
+
+// SC-07 §3：逐品牌真实采集状态（由后端 attempt/job/readiness 派生）
+export interface BrandCollectionState {
+  state: 'queued' | 'collecting' | 'has_data' | 'empty' | 'failed' | 'source_pending' | 'not_started';
+  stateText: string;
+  observedDimensions?: number;
+  lastAttemptAt?: string | null;
+  reason?: string | null;
+}
+
+export interface VoiceCoverage {
+  brands: number;
+  checked: number;
+  withObservations: number;
+  empty: number;
+  failed: number;
+  notCollected: number;
+  observations: number;
+  failures: { brandId: string; brandName: string | null; competitorId: string | null; reason: string; at: string | null }[];
+  note?: string;
+}
+
+// SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细；后端从真实 attempt/job/readiness 派生）
+export interface CollectionCoverage {
+  brands: number;
+  counts: { queued: number; collecting: number; has_data: number; empty: number; failed: number; source_pending: number; not_started: number };
+  failures: { brandId: string; brandName: string | null; competitorId: string | null; reason: string | null; at: string | null }[];
+  stateText: Record<string, string>;
+  anyInFlight: boolean;
+  note?: string;
 }
 
 export interface PublicProductsStatus {
@@ -292,6 +324,8 @@ export interface BrandDetail {
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
   // SC-06 r2：官网公开商品采集状态（与官方资料分离；未验证不写「已采集」）
   publicProducts?: PublicProductsStatus | null;
+  // SC-07 §3：逐品牌真实采集状态
+  collection?: BrandCollectionState | null;
   // SC-06 三：统一「用户声音与公开评论」读模型
   unifiedVoice?: UnifiedVoice | null;
   products: {
@@ -307,7 +341,7 @@ export interface BrandDetail {
 }
 
 export function fetchBrands(projectId: string, signal?: AbortSignal) {
-  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number }>(
+  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; collectionCoverage?: CollectionCoverage | null }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
 export function fetchBrand(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
@@ -334,7 +368,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; voiceCoverage?: VoiceCoverage | null; collectionCoverage?: CollectionCoverage | null; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {

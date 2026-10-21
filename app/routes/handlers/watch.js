@@ -91,9 +91,38 @@ async function createTarget(ctx, req, res, url, p) {
     ? body.enabledSignals.map(s => String(s || '').trim().toLowerCase()).filter(s => WS.SIGNALS.has(s))
     : null;
   if (!supportedSignals.length || (requested && !requested.some(s => supportedSignals.includes(s)))) {
-    ctx.sendJSON(res, 400, {
-      error: 'CAPABILITY_NOT_SUPPORTED',
-      message: '当前品牌没有可用的直接监控源，暂不能加入持续监控（当前仅支持 Shopify 店铺的价格/上新/断货直采）。',
+    // 🔴 SC-07 §2：非 Shopify 品牌不再直接 400 丢掉用户意向。
+    // 保存监控意向 + 触发/复用公开来源基线建立；状态是「正在建立监控来源」，
+    // 绝不创建 WatchTarget（调度器不会调度它），也不显示「监控中」。
+    const WIntent = require('../../services/watch-intent.js');
+    const r0 = WIntent.requestIntent({
+      tenantId: tid, projectId, competitorId,
+      reasonCode: 'no_direct_source',
+      reasonText: '该品牌没有可直接巡检的商品来源，正在建立公开商品页来源。',
+      signals: ['price', 'launch'],
+    });
+    if (r0.error) { ctx.sendJSON(res, 400, { error: r0.error, message: '无法保存监控意向。' }); return true; }
+    // r2 §二：保存意向后**安排第一次 public_site_products 探测**（持久化 next_probe_at，
+    // 由 watch-intent 调度器执行；重启后仍能恢复）。
+    try { WIntent.scheduleFirstProbe({ tenantId: tid, projectId, competitorId }); } catch (e) { /* 调度安排失败不阻塞意向保存 */ }
+    // 基线建立走统一采集链路（幂等/冷却/额度/attempt/worker fencing 全复用）
+    let baseline = null;
+    try {
+      const Plan = require('../../services/collection-plan.js');
+      baseline = Plan.planForCompetitor({ tenantId: tid, projectId, competitorId: comp.id, comp, trigger: 'manual' });
+    } catch (e) { baseline = null; }
+    let intent = WIntent.getIntent(tid, r0.intent.intentId);
+    // 连官网都不可采（无 URL）→ 如实标来源失败，不制造「建立中」假象
+    if (comp.url == null || !/^https?:\/\//i.test(String(comp.url || ''))) {
+      intent = WIntent.setFailed(tid, r0.intent.intentId, 'no_official_url', '该品牌没有可核验的官网地址，暂无法建立监控来源。');
+    }
+    ctx.sendJSON(res, r0.existed ? 200 : 202, {
+      intent: WIntent.view(intent),
+      existed: !!r0.existed,
+      baseline: baseline ? baseline.decisions : [],
+      message: intent && intent.state === 'source_failed'
+        ? (intent.reasonText || '监控来源建立失败。')
+        : '已保存监控意向，正在建立可重复抓取的公开商品来源；建立并进行两次可比较采集后才会进入正式监控。',
     });
     return true;
   }
@@ -119,7 +148,12 @@ async function listTargets(ctx, req, res, url, p) {
   if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可查看监控对象。' }); return true; }
   const projectId = url.searchParams.get('projectId');
   const targets = WS.listWatchTargets(tid, projectId);
-  ctx.sendJSON(res, 200, { targets: targets.map(t => targetView(t, WS.latestWindowFor(tid, t.watchTargetId))) });
+  // SC-07 §2：监控意向单列返回——前端据此显示「建立中/来源失败」，与 target（监控中）严格分开
+  const WIntent = require('../../services/watch-intent.js');
+  ctx.sendJSON(res, 200, {
+    targets: targets.map(t => targetView(t, WS.latestWindowFor(tid, t.watchTargetId))),
+    intents: (WIntent.listIntents(tid, projectId) || []).map(WIntent.view),
+  });
   return true;
 }
 
@@ -185,4 +219,21 @@ async function coverageDay(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { createTarget, listTargets, patchTarget, deleteTarget, dailyDigest, coverageDay };
+// ---------- DELETE /api/watch-intents/:id（退出监控意向，不再自动激活） ----------
+async function deleteIntent(ctx, req, res, url, p) {
+  const m = /^\/api\/watch-intents\/([^/]+)$/.exec(p);
+  if (!m || req.method !== 'DELETE') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可操作监控意向。' }); return true; }
+  const id = decodeURIComponent(m[1]).slice(0, 90);
+  const WIntent = require('../../services/watch-intent.js');
+  const r = WIntent.cancelIntent(tid, id);
+  if (!r) { ctx.sendJSON(res, 404, { error: 'WATCH_INTENT_NOT_FOUND', message: '监控意向不存在。' }); return true; }
+  if (r.error) {
+    ctx.sendJSON(res, 409, { error: r.error, message: '该品牌已进入正式监控，请移出正式监控对象。' }); return true;
+  }
+  ctx.sendJSON(res, 200, { intent: WIntent.view(r), cancelled: true, message: '已退出监控意向，不会自动激活。' });
+  return true;
+}
+
+module.exports = { createTarget, listTargets, patchTarget, deleteTarget, deleteIntent, dailyDigest, coverageDay };

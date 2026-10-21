@@ -367,4 +367,7 @@ try { require('./services/report-service.js').startWorker(); } catch (e) { conso
 // SC-05：历史回补常驻 worker（history_backfill_jobs：reclaim + 认领 + CDX 发现 + 存档取回）。
 // 重启后 pending / 租约过期的 running 自动恢复；attempts 超限 → dead，不永久 running。
 try { require('./services/backfill-service.js').startWorker(); } catch (e) { console.error('[backfill-service] worker 启动失败（忽略，可在品牌档案重试）:', e.message); }
+// SC-07 r2 §二：监控意向建立流程调度（到期执行第二次/后续 public_site_products 探测；
+// next_probe_at 持久化，重启后照常恢复）。ZB_INTENT_SCHEDULER=0 可停。
+try { require('./services/watch-intent.js').startScheduler(console); } catch (e) { console.error('[watch-intent] scheduler 启动失败（忽略，意向保留可在恢复后继续）:', e.message); }
 startServer(PORT0);
