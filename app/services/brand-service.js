@@ -17,7 +17,9 @@ const Registry = require('./capability-registry.js');
 const Surface = require('./data-surface.js');
 const SurfaceStore = require('./surface-store.js');
 const EvidenceStore = require('../research/evidence-store.js');
+const Snapshot = require('../research/source-snapshot.js');
 const DomainEvent = require('../research/domain-event.js');
+const VoiceUnified = require('./voice-unified.js');
 
 // 数据性质（nature）→ 用户语言
 const NATURE_TEXT = Object.freeze({
@@ -53,6 +55,7 @@ const COVER_STATE_TEXT = Object.freeze({
   loading: '采集中',
   failed: '最近采集失败，尚无可展示数据',
   unsupported: '未接入',
+  pending_config: '数据服务暂不可用',
   unknown: '尚未采集',
 });
 
@@ -99,10 +102,40 @@ function buildCoverage(tenantId, projectId, competitor) {
   const comp = competitor || {};
   const compId = comp.id || null;
   const dims = [];
+  // SC-05：时序档案里已有的已核验事实也算「有数据」——否则顶部会写「有数据 0 个」，
+  // 与下方时序覆盖的「有可核验证据」自相矛盾。只读投影，不写库。
+  let memStats = null;
+  try {
+    if (compId) memStats = require('./competitive-memory-store.js').coverageStats(tenantId, projectId, compId);
+  } catch (e) { memStats = null; }
+  const memDimOf = (code) => (code === 'website_products' ? (memStats && (memStats.product || memStats.catalog)) : null);
   for (const d of Registry.listDimensions()) {
     const caps = Registry.capabilitiesByDimension(d.code);
     const ga = caps.filter(c => c.maturity === 'ga');
-    if (!ga.length) {
+    // P0-2 整改 r2：实现态（pending_config）与运行态（readiness）分离——用户侧
+    // 只显示四种口径之一（此处=数据服务暂不可用）；凭据等技术细节仅管理员
+    // 健康接口可见（GET /api/admin/data-surface/capabilities），不进用户投影。
+    const pending = caps.filter(c => c.maturity === 'pending_config');
+    // R4.15：maturity 未升级但已有真实可用尝试（success/partial）的能力，按「已采到数据」参与聚合——
+    // 否则顶部覆盖面板会与下方数据面卡片自相矛盾（卡片有数据、面板说"暂不可用"）。
+    const pendingActive = (!ga.length && compId)
+      ? pending.filter(c => {
+        try {
+          return SurfaceStore.listAttempts(tenantId, projectId, compId, c.code, 10)
+            .some(a => a.status === 'success' || a.status === 'partial');
+        } catch (e) { return false; }
+      })
+      : [];
+    if (!ga.length && pending.length && !pendingActive.length) {
+      dims.push({
+        code: d.code, displayName: d.displayName, state: 'pending_config', stateText: '数据服务暂不可用',
+        capabilities: pending.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity, measurementMethod: c.measurementMethod || null })),
+        lastObservedAt: null, reason: 'service_credential_required',
+        note: '数据服务暂不可用，请稍后再试。当前不生成数据、估算或结论。',
+      });
+      continue;
+    }
+    if (!ga.length && !pendingActive.length) {
       dims.push({
         code: d.code, displayName: d.displayName, state: 'unsupported', stateText: '未接入',
         capabilities: caps.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity, limitations: c.limitations })),
@@ -111,8 +144,10 @@ function buildCoverage(tenantId, projectId, competitor) {
       });
       continue;
     }
+    // 参与本维度聚合的能力：ga + 已采到数据的 pending
+    const capsForAgg = ga.concat(pendingActive);
     if (!compId) {
-      dims.push({ code: d.code, displayName: d.displayName, state: 'unknown', stateText: '尚未采集', capabilities: ga.map(c => ({ code: c.code, displayName: c.displayName })), lastObservedAt: null, reason: 'no_competitor' });
+      dims.push({ code: d.code, displayName: d.displayName, state: 'unknown', stateText: '尚未采集', capabilities: capsForAgg.map(c => ({ code: c.code, displayName: c.displayName })), lastObservedAt: null, reason: 'no_competitor' });
       continue;
     }
     let best = null; best = null;
@@ -126,14 +161,17 @@ function buildCoverage(tenantId, projectId, competitor) {
     // 该维度下所有已接入能力都**没有任何 attempt** 时，一律「尚未采集」。
     let hasAttempt = false;
     let latestFailed = false;
-    for (const c of ga) {
+    for (const c of capsForAgg) {
       const a = SurfaceStore.latestAttempt(tenantId, projectId, compId, c.code);
       if (a) {
         hasAttempt = true;
         if (a.status === 'failed') latestFailed = true;
       }
     }
-    const finalState = hasAttempt ? state : 'unknown';
+    let finalState = hasAttempt ? state : 'unknown';
+    const memDim = memDimOf(d.code);
+    // 没有任何采集 attempt，但时序档案里有已核验事实（历史采集/存档回补）→ 不能说「未采集」
+    if (!hasAttempt && memDim && memDim.factCount > 0) finalState = 'ok';
     let lastObservedAt = null;
     if (aggregated && Array.isArray(aggregated.aggregations)) {
       for (const a of aggregated.aggregations) {
@@ -145,6 +183,9 @@ function buildCoverage(tenantId, projectId, competitor) {
     // 🔴 诚实备注：「保留旧数据」只在确有上次成功数据（ok/partial/stale）时允许出现；
     //    首次采集失败（failed，无历史成功）只说失败，不声称保留任何数据。
     const notes = [];
+    if (!hasAttempt && memDim && memDim.factCount > 0) {
+      notes.push('当前没有本次采集记录；展示的是时序档案中已核验的历史记录（最早 ' + String(memDim.firstAt).slice(0, 10) + '）。');
+    }
     if (['ok', 'partial', 'stale'].includes(finalState) && latestFailed) {
       notes.push('最近一次更新失败，当前展示上次成功数据。');
     }
@@ -154,13 +195,14 @@ function buildCoverage(tenantId, projectId, competitor) {
     dims.push({
       code: d.code, displayName: d.displayName,
       state: finalState, stateText: COVER_STATE_TEXT[finalState] || '尚未采集',
-      capabilities: ga.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity })),
+      capabilities: capsForAgg.map(c => ({ code: c.code, displayName: c.displayName, maturity: c.maturity })),
       lastObservedAt,
       notes,
       reason: finalState === 'unsupported' ? 'not_supported_for_object' : (hasAttempt ? null : 'not_collected_yet'),
     });
   }
-  const integrated = dims.filter(d => d.state !== 'unsupported');
+  // Wave 1：integrated 只计真正可采集的维度；pending_config 单列（不是已接入）
+  const integrated = dims.filter(d => d.state !== 'unsupported' && d.state !== 'pending_config');
   const withData = integrated.filter(d => ['ok', 'partial', 'stale'].includes(d.state));
   return {
     dimensions: dims,
@@ -168,6 +210,7 @@ function buildCoverage(tenantId, projectId, competitor) {
       totalDimensions: dims.length,
       integratedDimensions: integrated.length,
       notIntegrated: dims.filter(d => d.state === 'unsupported').map(d => d.code),
+      pendingConfig: dims.filter(d => d.state === 'pending_config').map(d => d.code),
       dimensionsWithData: withData.length,
       notCollected: integrated.filter(d => d.state === 'unknown').map(d => d.code),
     },
@@ -318,19 +361,160 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
 // （该维度下无 ga 能力 → 未接入）；按 code 去重恰一条；纯静态投影——
 // 不含品牌 ID、事件 ID、时间戳、Evidence/Snapshot 或任何模拟数据。
 // 暴露路径在租户鉴权后的 /api/intelligence 内，天然 tenant/project scoped。
-function constructionDimensions() {
+function attemptHasEvidenceBackedData(tenantId, attempt) {
+  if (!attempt || !['success', 'partial'].includes(attempt.status)) return false;
+  const evidenceIds = Array.isArray(attempt.evidenceIds) ? attempt.evidenceIds : [];
+  const attemptSnapshotIds = new Set(Array.isArray(attempt.snapshotIds) ? attempt.snapshotIds : []);
+  if (!evidenceIds.length || !attemptSnapshotIds.size) return false;
+  for (const evidenceId of evidenceIds) {
+    let evidence = null;
+    try { evidence = EvidenceStore.getEvidenceById(tenantId, evidenceId); } catch (e) { evidence = null; }
+    if (!evidence || evidence.evidence_status !== 'verified') continue;
+    const evidenceSnapshotIds = Array.isArray(evidence.source_snapshot_ids) ? evidence.source_snapshot_ids : [];
+    for (const snapshotId of evidenceSnapshotIds) {
+      if (!attemptSnapshotIds.has(snapshotId)) continue;
+      let snapshot = null;
+      try { snapshot = Snapshot.getById(tenantId, snapshotId); } catch (e) { snapshot = null; }
+      if (snapshot && snapshot.raw_payload_ref && snapshot.raw_payload_ref.path) return true;
+    }
+  }
+  return false;
+}
+
+// 某 capability 在 scope 内只有存在「成功/部分成功 + Evidence + 同 attempt Snapshot」
+// 才算真正可展示数据。running、failed、无证据的测试或损坏记录均不能掩盖建设中状态。
+function capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, capability) {
+  for (const competitorId of competitorIds || []) {
+    if (!competitorId) continue;
+    let attempts = [];
+    try { attempts = SurfaceStore.listAttempts(tenantId, projectId, competitorId, capability, 20); } catch (e) { attempts = []; }
+    if (attempts.some(a => attemptHasEvidenceBackedData(tenantId, a))) return true;
+  }
+  return false;
+}
+
+// ---------- 项目/品牌范围建设中维度（r4.10 + r6） ----------
+// 这仍是底部单一、去重的覆盖投影，不是情报事件。它必须与真实数据面一致：
+// pending_config 能力一旦在当前 scope 有 Evidence 支持的可展示数据，就从建设中列表移除。
+// 无 brandId 时按项目所有品牌判断；传 brandId 时只按该品牌在当前项目的 competitor 判断。
+function constructionDimensions(tenantId, projectId, brandId) {
+  if (!tenantId || !projectId) return [];
+  const state = loadProjectState(tenantId, projectId);
+  const allCompetitors = (state && Array.isArray(state.competitors)) ? state.competitors : [];
+  let competitorIds = allCompetitors.map(c => c && c.id).filter(Boolean);
+  if (brandId) {
+    const link = BrandStore.getLink(tenantId, brandId, projectId);
+    if (!link || !link.competitorRef) return [];
+    competitorIds = [link.competitorRef];
+  }
   const out = [];
   for (const d of Registry.listDimensions()) {
-    const ga = Registry.capabilitiesByDimension(d.code).filter(c => c.maturity === 'ga');
+    const caps = Registry.capabilitiesByDimension(d.code);
+    const ga = caps.filter(c => c.maturity === 'ga');
     if (ga.length) continue;
-    out.push({
-      code: d.code,
-      displayName: d.displayName,
-      state: 'not_integrated',
-      message: '尚未接入，当前不生成数据、估算或结论。',
-    });
+    // SC-06 r2：待验证（能力就绪、尚无真实成功）与需配置（缺凭据）分开报，不混成一类
+    const pendingVerify = caps.filter(c => c.maturity === 'pending_verification');
+    if (pendingVerify.some(c => capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, c.code))) continue;
+    if (pendingVerify.length) {
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'pending_verification',
+        message: '能力已实现，但尚未完成一次真实采集验证；验证前不展示数据、估算或结论。',
+      });
+      continue;
+    }
+    const pending = caps.filter(c => c.maturity === 'pending_config');
+    if (pending.some(c => capabilityHasEvidenceBackedData(tenantId, projectId, competitorIds, c.code))) continue;
+    if (pending.length) {
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'pending_config',
+        message: '尚未采到可核验数据，当前不生成数据、估算或结论。',
+      });
+    } else {
+      out.push({
+        code: d.code,
+        displayName: d.displayName,
+        state: 'not_integrated',
+        message: '尚未接入，当前不生成数据、估算或结论。',
+      });
+    }
   }
   return out;
+}
+
+// ---------- 官网确认状态（SC-06 二） ----------
+// 语义：official_site_profile（通用官网公开资料）有真实成功采集 → 「官网已确认」；
+// 只有失败无成功 → 「来源暂不可达」（不是「官网不支持」）；从未采集 → 「未采集」。
+// Shopify 目录接口是否可用不影响本状态（两能力分离）。
+function buildOfficialSiteStatus(tenantId, projectId, competitor) {
+  const comp = competitor || {};
+  if (!comp.id) return { status: 'not_collected', statusText: '未采集' };
+  let atts = [];
+  try { atts = SurfaceStore.listAttempts(tenantId, projectId, comp.id, 'official_site_profile', 10); } catch (e) { atts = []; }
+  const usable = atts.find(a => a.status === 'success' || a.status === 'partial');
+  if (usable) {
+    const sum = usable.summary || {};
+    return {
+      status: 'confirmed', statusText: '官网已确认',
+      lastCollectedAt: usable.endedAt || usable.startedAt || null,
+      canonical: sum.canonical || null,
+      siteName: sum.siteName || null,
+      hasOrganization: !!sum.hasOrganization,
+      sampleNote: '确认依据：公开页面成功采集（含快照与证据引用）',
+    };
+  }
+  if (atts.length) return { status: 'unavailable', statusText: '来源暂不可达', lastAttemptAt: atts[0].startedAt || null };
+  return { status: 'not_collected', statusText: '未采集' };
+}
+
+// ---------- 官网公开商品状态（SC-06 r2：成熟度与真实验证分开表达） ----------
+// 第四层区分「当前品牌已有可展示证据」：只看本品牌本项目的 public_site_products attempt。
+//   verified            已成功/部分成功采集 → 有可展示商品观察
+//   unavailable         尝试过但失败（拒访/限流/不可达/无商品页可发现）→ 如实说明，不写「官网不支持」
+//   not_collected       从未采集
+// 与官方资料（official_site_profile）分离：Shopify 目录不可用不影响本状态。
+function buildPublicProductsStatus(tenantId, projectId, competitor) {
+  const comp = competitor || {};
+  const cap = Registry.getCapability('public_site_products');
+  const maturity = cap ? cap.maturity : null;
+  if (!comp.id) return { status: 'not_collected', statusText: '未采集', maturity };
+  let atts = [];
+  try { atts = SurfaceStore.listAttempts(tenantId, projectId, comp.id, 'public_site_products', 10); } catch (e) { atts = []; }
+  // 🔴 r2：只有「真的拿到了商品观察」才算已采集——partial 但 0 条观察（如商品页全被限流）
+  // 不得显示为已采集；这类情况如实说明来源限制。
+  const usable = atts.find(a => {
+    if (a.status !== 'success' && a.status !== 'partial') return false;
+    const observations = Array.isArray(a.observations) ? a.observations : [];
+    const sum = a.summary || {};
+    return observations.length > 0 || (typeof sum.productCount === 'number' && sum.productCount > 0);
+  });
+  if (usable) {
+    const sum = usable.summary || {};
+    const n = Array.isArray(usable.observations) ? usable.observations.length : (typeof sum.productCount === 'number' ? sum.productCount : null);
+    return {
+      status: 'verified', statusText: '已采集到公开商品页观察', maturity,
+      lastCollectedAt: usable.endedAt || usable.startedAt || null,
+      observedCount: n,
+      discoveryPath: sum.discoveryPath || null,
+      sampleNote: sum.sampleNote || '样本来自公开商品页（含快照与证据引用），受发现路径限制，不代表全量商品',
+    };
+  }
+  if (atts.length) {
+    const last = atts[0];
+    return {
+      status: 'unavailable', statusText: '最近一次公开商品页采集未成功', maturity,
+      lastAttemptAt: last.startedAt || null,
+      failureText: last.errorUserText || '来源暂不可达，稍后可重试。',
+      note: '这不代表官网不支持或没有商品；可能没有可发现的商品页（无 sitemap / 无 JSON-LD Product）。',
+    };
+  }
+  return {
+    status: 'not_collected', statusText: '未采集', maturity,
+    note: '该能力已实现但尚无一次真实成功采集验证；验证完成前不展示商品数据。',
+  };
 }
 
 // ---------- 品牌视图 ----------
@@ -350,6 +534,9 @@ function listBrandViews(tenantId, projectId) {
       competitorId: b.competitorRef,
       coverageSummary: cov.summary,
       coverageDimensions: cov.dimensions,
+      officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
+      publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
+      firstObservedAt: firstObservedAt(tenantId, b.brandId),
       lastObservedAt: last ? last.at : null,
       lastChange: last ? { at: last.at, kind: last.kind, kindText: INTEL_TYPE_TEXT[last.kind] || last.kind, title: last.title } : null,
       gaps: cov.dimensions.filter(d => d.state === 'unsupported' || d.state === 'unknown')
@@ -398,6 +585,9 @@ function getBrandView(tenantId, brandId, projectId) {
     projectId,
     links,
     coverage: cov,
+    officialSite: buildOfficialSiteStatus(tenantId, projectId, comp || {}),
+    publicProducts: buildPublicProductsStatus(tenantId, projectId, comp || {}),
+    unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, competitorId: comp ? comp.id : null, comp: comp || {} }),
     products,
     timeline: timelineView(tenantId, brandId, { limit: 100 }),
     intelligence: comp ? buildBrandIntelligence(tenantId, projectId, brandId, comp, {}) : [],
@@ -413,5 +603,5 @@ module.exports = {
   syncProjectBrands, loadProjectState, findCompetitor, domainOfUrl,
   buildCoverage, rebuildTimeline, timelineView, firstObservedAt,
   listIntelligence, buildBrandIntelligence, constructionDimensions,
-  listBrandViews, getBrandView,
+  listBrandViews, getBrandView, buildOfficialSiteStatus, buildPublicProductsStatus,
 };

@@ -23,8 +23,34 @@
 const Registry = require('./capability-registry.js');
 const Adapters = require('./source-adapter.js');
 const SurfaceStore = require('./surface-store.js');
+const Snapshot = require('../research/source-snapshot.js');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 与 watch-store 同口径：running 超时视为崩溃残留（投影层只读标记）
+
+// R4.15：能力是否已有「可展示的真实尝试」（success / partial）。
+// 用途：maturity 仍为 pending_config 的能力一旦真的采到数据，数据必须可见——
+// 否则真实采集结果会被 readiness 占位状态挡住（用户看不到已采到的数据）。
+function hasUsableAttempt(tenantId, projectId, competitorId, capability) {
+  try {
+    return SurfaceStore.listAttempts(tenantId, projectId, competitorId, capability, 10)
+      .some(a => a.status === 'success' || a.status === 'partial');
+  } catch (e) { return false; }
+}
+
+// 可渲染能力集合：ga 能力，或 pending_config / pending_verification 且已有可用尝试。
+// not_integrated 永不渲染（未接入不构造数据）。
+// SC-06 r2：pending_verification（能力就绪、尚无真实验证）与 pending_config 同规则——
+// 只有真的采到过数据才渲染，绝不因为「代码存在」就把空结果当已采集展示。
+function renderableCaps(allCaps, scope) {
+  const ctx = scope || {};
+  return allCaps.filter(c => {
+    if (c.maturity === 'ga') return true;
+    if (c.maturity === 'pending_config' || c.maturity === 'pending_verification') {
+      return hasUsableAttempt(ctx.tenantId, ctx.projectId, ctx.competitorId, c.code);
+    }
+    return false;
+  });
+}
 
 // 单能力投影（SC-02 §7 规则 + 整改轮三拆状态）
 // 返回 { surfaceState, latestAttempt, latestUsable, isRefreshing, gaps[] , ... }
@@ -33,7 +59,19 @@ function deriveCapabilityState({ tenantId, projectId, competitorId, capability, 
   const now = nowMs || Date.now();
   if (!cap) return { surfaceState: 'unsupported', reasonCode: 'capability_undefined', reasonText: '能力尚未定义', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
   if (cap.maturity !== 'ga') {
-    return { surfaceState: 'unsupported', reasonCode: 'source_not_integrated', reasonText: '数据源尚未接入，暂时无法采集该维度', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
+    // R4.15：maturity 未升级但已有可用尝试 → 继续按数据推导（数据可见优先于占位）；
+    // 无可用尝试时保持原语义（pending_config / pending_verification / not_integrated 占位，不构造数据）。
+    if (!hasUsableAttempt(tenantId, projectId, competitorId, cap.code)) {
+      // SC-06 r2：能力已实现但尚无真实成功采集 → 「待验证」，与「未接入」「需配置」区分
+      if (cap.maturity === 'pending_verification') {
+        return {
+          surfaceState: 'pending_verification', reasonCode: 'awaiting_real_verification',
+          reasonText: '该数据来源尚未完成真实采集验证，暂不展示数据。',
+          gaps: [{ code: 'awaiting_real_verification', text: '尚未完成真实采集验证' }],
+        };
+      }
+      return { surfaceState: 'unsupported', reasonCode: 'source_not_integrated', reasonText: '数据源尚未接入，暂时无法采集该维度', gaps: [{ code: 'source_not_integrated', text: '该数据维度尚未接入' }] };
+    }
   }
   const chain = Adapters.resolveAdapterChain(cap.code);
   if (!chain.ok || !chain.chain.length) {
@@ -125,16 +163,26 @@ function summarizeObservations(observations) {
 
 // evidenceRefs：snapshot/证据成对；sourceUrl = 公开来源页（04 §11 用户可核对）。
 // 多 Evidence 全量展开（整改 §四.6：抽屉支持多条）。
-function evidenceRefsOf(attempt, comp) {
+// 🔴 Wave 1 修复：sourceUrl 优先反查 SourceSnapshot 的精确 source_url/final_url，
+// 品牌主页 URL（comp.url）只作最后回退——禁止把品牌主页 URL 当所有证据的来源。
+function evidenceRefsOf(attempt, comp, tenantId) {
   const out = [];
   const evIds = (attempt && attempt.evidenceIds) || [];
   const snapIds = (attempt && attempt.snapshotIds) || [];
   const n = Math.max(evIds.length, snapIds.length);
   for (let i = 0; i < n; i++) {
+    let preciseUrl = null;
+    const sid = snapIds[i] || null;
+    if (sid && tenantId) {
+      try {
+        const meta = Snapshot.getById(tenantId, sid);
+        if (meta) preciseUrl = meta.final_url || meta.source_url || null;
+      } catch (e) { /* 反查失败回退品牌主页 URL */ }
+    }
     out.push({
       evidenceId: evIds[i] || null,
-      snapshotId: snapIds[i] || null,
-      sourceUrl: (comp && comp.url) || null,
+      snapshotId: sid,
+      sourceUrl: preciseUrl || (comp && comp.url) || null,
     });
   }
   return out;
@@ -183,7 +231,7 @@ function capabilityBlock({ tenantId, projectId, competitorId, cap, comp, nowMs }
     latestAttempt: attemptUserView(derived.latestAttempt),
     gaps,
     actions,
-    evidenceRefs: evidenceRefsOf(usable, comp),
+    evidenceRefs: evidenceRefsOf(usable, comp, tenantId),
     pagination: { total: (usable && usable.observationCount) || 0 },
   };
 }
@@ -196,9 +244,42 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
   const identity = identityRows.length ? identityRows[0] : null;
 
   const dims = Registry.listDimensions().map(d => {
-    const caps = Registry.capabilitiesByDimension(d.code).filter(c => c.maturity === 'ga');
+    const allCaps = Registry.capabilitiesByDimension(d.code);
+    // R4.15：已采到真实数据的能力必须渲染（含 maturity=pending_config 的已成功采集）
+    const caps = renderableCaps(allCaps, { tenantId, projectId, competitorId });
     if (!caps.length) {
-      const placeholder = Registry.capabilitiesByDimension(d.code)[0] || null;
+      const placeholder = allCaps[0] || null;
+      // P0-2 整改 r2：pending_config 维度用户侧口径收敛——「数据服务暂不可用」；
+      // 凭据要求等技术细节仅管理员健康接口可见（不出现环境变量名/key 名）。
+      // SC-06 r2：待验证能力单列（能力已实现、尚无真实成功采集）——用户侧不写「已采集」
+      const verifyPending = allCaps.filter(c => c.maturity === 'pending_verification');
+      if (verifyPending.length) {
+        return {
+          code: d.code, displayName: d.displayName, capability: null,
+          surfaceState: 'pending_verification', reasonText: '该数据来源尚未完成真实采集验证，暂不展示数据。',
+          freshness: { status: 'unknown', slaHours: null, lastSuccessAt: null },
+          summary: null, coverage: {},
+          isRefreshing: false, latestAttempt: null,
+          gaps: [{ code: 'awaiting_real_verification', text: '尚未完成真实采集验证' }],
+          actions: [], evidenceRefs: [],
+          capabilityView: placeholder ? Registry.userView(placeholder) : null,
+          aggregations: [], pagination: { total: 0 },
+        };
+      }
+      const pending = allCaps.filter(c => c.maturity === 'pending_config');
+      if (pending.length) {
+        return {
+          code: d.code, displayName: d.displayName, capability: null,
+          surfaceState: 'pending_config', reasonText: '数据服务暂不可用，请稍后再试。',
+          freshness: { status: 'unknown', slaHours: null, lastSuccessAt: null },
+          summary: null, coverage: {},
+          isRefreshing: false, latestAttempt: null,
+          gaps: [{ code: 'service_credential_required', text: '数据服务暂不可用' }],
+          actions: [], evidenceRefs: [],
+          capabilityView: placeholder ? Registry.userView(placeholder) : null,
+          aggregations: [], pagination: { total: 0 },
+        };
+      }
       return {
         code: d.code, displayName: d.displayName, capability: null,
         surfaceState: 'unsupported', reasonText: '数据源尚未接入，暂时无法采集该维度',
@@ -223,16 +304,31 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
     }
   // gaps 汇总：latest_failure/interrupted 在卡片专门提示区渲染，投影 gaps 去重（§八.7）
   const DEDUP_IN_CARD = new Set(['latest_failure', 'interrupted']);
+  // 同一维度内按「用户可见文案」去重：shopify_catalog 与 shopify_collections 对非 Shopify 站
+  // 会各产出一次「Shopify 公开商品目录不可用」，同一句提示在一张卡里只显示一次（评审 §二.5）。
   const gaps = [];
+  const seenGapText = new Set();
   for (const b of aggregations) for (const g of b.gaps) {
     if (DEDUP_IN_CARD.has(g.code)) continue;
+    const key = String(g.text || g.code || '');
+    if (key && seenGapText.has(key)) continue;
+    if (key) seenGapText.add(key);
     gaps.push(Object.assign({ capability: b.capability.code }, g));
   }
     const evidenceRefs = [];
     for (const b of aggregations) for (const e of b.evidenceRefs) evidenceRefs.push(e);
     const total = aggregations.reduce((s, b) => s + ((b.pagination && b.pagination.total) || 0), 0);
+    // SC-06 r2：本维度里「能力已实现但尚无真实成功采集」的项单独列出——
+    // 它们是能力盘点的一部分，但不得混进已采集结果（不显示观察数、不显示 0 值）
+    const pendingVerification = allCaps
+      .filter(c => c.maturity === 'pending_verification' && !caps.some(x => x.code === c.code))
+      .map(c => ({
+        code: c.code, displayName: c.displayName, maturity: c.maturity,
+        stateText: '待验证：能力已实现，尚未完成真实采集',
+      }));
     return {
       code: d.code, displayName: d.displayName,
+      pendingVerification,
       capability: aggregations[0].capability, // 兼容旧字段（首能力）
       capabilityView: aggregations[0].capability,
       surfaceState,
@@ -274,7 +370,9 @@ function buildOverview({ tenantId, projectId, competitorId, comp, nowMs }) {
 function buildDimensionDetail({ tenantId, projectId, competitorId, dimension, offset, limit, comp }) {
   const off = Math.max(0, Number(offset) || 0);
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
-  const gaCaps = Registry.capabilitiesByDimension(dimension).filter(c => c.maturity === 'ga');
+  const allCaps = Registry.capabilitiesByDimension(dimension);
+  // R4.15：与总览同口径——ga 能力 + 已有可用尝试的 pending_config 能力
+  const gaCaps = renderableCaps(allCaps, { tenantId, projectId, competitorId });
   const caps = gaCaps.map(cap => {
     const derived = deriveCapabilityState({
       tenantId, projectId, competitorId, capability: cap.code,
@@ -295,7 +393,7 @@ function buildDimensionDetail({ tenantId, projectId, competitorId, dimension, of
       summary: usable ? (usable.summary || summarizeObservations(observations)) : null,
       observations: page,
       pagination: { offset: off, limit: lim, total: observations.length, hasMore: off + lim < observations.length },
-      evidenceRefs: evidenceRefsOf(usable, comp),
+      evidenceRefs: evidenceRefsOf(usable, comp, tenantId),
       gaps: derived.gaps,
       interrupted: runningExpired,
     };

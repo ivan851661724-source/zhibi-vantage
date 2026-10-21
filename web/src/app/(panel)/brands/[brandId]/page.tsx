@@ -1,22 +1,45 @@
 'use client';
-// 品牌详情（SC-04 UI 框架轮）：Tabs 档案——概览 / 商品与价格 / 竞争动态时间线 /
-// 数据覆盖与来源 / 相关情报 / 相关报告。
-// 🔴 项目边界：所有读取与跳转显式携带 projectId；tab 状态进 URL（深链接可分享）。
-import { Suspense, useEffect, useState } from 'react';
+// 品牌详情（SC-05）：从「当前卡片」升级为「时序档案」。
+//   Tab：概览 / 商品与价格 / 历史时间线 / 数据覆盖与来源 / 相关情报 / 相关报告
+// 🔴 项目边界：所有读取与跳转显式携带 projectId；tab 与时间范围进 URL（深链接可分享）。
+// 🔴 诚实纪律：无历史 → 明确说明「尚未形成可核验历史记录」；单点 → 不画趋势；
+//    存档点与实时点标签不同；覆盖缺口与「没有变化」严格区分。
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { fetchBrand, priceText, type BrandDetail } from '@/lib/core-api';
-import { CoveragePanel, IntelList, TimelineList } from '@/components/brand/coverage-panel';
+import { CoveragePanel, IntelList } from '@/components/brand/coverage-panel';
 import { ReportPanel } from '@/components/brand/report-panel';
 import { DataSurfaceOverview } from '@/components/data-surface/data-surface-overview';
+import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 import { BuildingDims } from '@/components/core-ui';
+import {
+  fetchBrandMemory, fetchBrandMemoryTimeline, fetchHistoryCoverage,
+  presetToRange, type HistoryCoverage, type MemoryTimeline, type MemoryView, type RangePreset,
+} from '@/lib/memory-api';
+import { TimeRangePicker } from '@/components/memory/time-range-picker';
+import { ProductMemoryList, type EvidenceRef } from '@/components/memory/price-track';
+import { MemoryTimelineList } from '@/components/memory/memory-timeline';
+import { CoverageLegend, CoverageTimeline } from '@/components/memory/coverage-timeline';
+import { BackfillCard } from '@/components/memory/backfill-card';
+import { VoicePanel } from '@/components/brand/voice-panel';
 
+// SC-06 r2：公开商品的发现路径（只描述「怎么找到的」，不暗示覆盖率更高）
+function discoveryPathText(p: string): string {
+  if (p === 'jsonld') return '商品页 JSON-LD';
+  if (p === 'sitemap') return 'robots 声明的 sitemap';
+  if (p === 'homepage_links') return '首页内链商品页';
+  return p;
+}
+
+// SC-06 一：品牌长期数据库分区（六区块对齐任务书；reports 为附加入口）
 const TABS: { key: string; label: string }[] = [
   { key: 'overview', label: '概览' },
-  { key: 'products', label: '商品与价格' },
-  { key: 'timeline', label: '竞争动态' },
+  { key: 'timeline', label: '时间线' },
+  { key: 'products', label: '官网与商品' },
+  { key: 'voice', label: '用户声音与公开评论' },
+  { key: 'intel', label: '内容与广告' },
   { key: 'coverage', label: '数据覆盖与来源' },
-  { key: 'intel', label: '相关情报' },
   { key: 'reports', label: '相关报告' },
 ];
 
@@ -35,8 +58,15 @@ function BrandDetailInner() {
   const projectId = String(searchParams?.get('projectId') || '');
   const router = useRouter();
   const [tab, setTab] = useState<string>(searchParams?.get('tab') || 'overview');
+  const [preset, setPreset] = useState<RangePreset>((searchParams?.get('range') as RangePreset) || 'all');
+  const [range, setRange] = useState<{ from: string | null; to: string | null }>({ from: null, to: null });
   const [d, setD] = useState<BrandDetail | null>(null);
+  const [mem, setMem] = useState<MemoryView | null>(null);
+  const [tl, setTl] = useState<MemoryTimeline | null>(null);
+  const [cov, setCov] = useState<HistoryCoverage | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [evRefs, setEvRefs] = useState<EvidenceRef[] | null>(null);
 
   useEffect(() => {
     if (!brandId || !projectId) return;
@@ -49,17 +79,45 @@ function BrandDetailInner() {
     return () => { alive = false; ctrl.abort(); };
   }, [brandId, projectId]);
 
+  // 「全部可用历史」的起点来自后端覆盖投影（不在此处猜）
+  const effectiveRange = useMemo(() => {
+    if (preset === 'custom') return range;
+    if (preset === 'all') {
+      const earliest = cov?.summary?.earliestAvailableAt || null;
+      return earliest ? { from: String(earliest).slice(0, 10), to: null } : { from: null, to: null };
+    }
+    return presetToRange(preset);
+  }, [preset, range, cov]);
+
+  const reload = useCallback(() => {
+    if (!brandId || !projectId) return;
+    setLoadErr(null);
+    fetchHistoryCoverage(brandId, { projectId })
+      .then(setCov)
+      .catch(e => setLoadErr(e instanceof Error ? e.message : String(e)));
+    fetchBrandMemory(brandId, {
+      projectId, from: effectiveRange?.from || undefined, to: effectiveRange?.to || undefined,
+      factTypes: ['product.price', 'product.available', 'product.title', 'product.currency'], limit: 400,
+    }).then(setMem).catch(e => setLoadErr(e instanceof Error ? e.message : String(e)));
+    fetchBrandMemoryTimeline(brandId, {
+      projectId, from: effectiveRange?.from || undefined, to: effectiveRange?.to || undefined, limit: 150,
+    }).then(setTl).catch(e => setLoadErr(e instanceof Error ? e.message : String(e)));
+  }, [brandId, projectId, effectiveRange?.from, effectiveRange?.to]);
+
+  useEffect(() => { reload(); }, [reload]);
+
   function switchTab(k: string) {
     setTab(k);
-    // tab 进 URL：刷新/分享后仍停留在原分区，projectId 不丢
-    router.replace(`/brands/${brandId}?projectId=${encodeURIComponent(projectId)}&tab=${encodeURIComponent(k)}`, { scroll: false });
+    const qs = new URLSearchParams({ projectId, tab: k });
+    if (preset !== 'all') qs.set('range', preset);
+    router.replace(`/brands/${brandId}?${qs.toString()}`, { scroll: false });
   }
 
-  if (!projectId) return <p className="core-err">缺少项目参数：请从竞品库进入品牌详情。</p>;
+  if (!projectId) return <p className="core-err">缺少项目参数：请从竞品数据库进入品牌详情。</p>;
   if (err) return (
     <div>
       <p className="core-err">{err}</p>
-      <p className="hint"><Link href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品库</Link></p>
+      <p className="hint"><Link href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品数据库</Link></p>
     </div>
   );
   if (!d) return <p className="hint">加载品牌档案…</p>;
@@ -67,10 +125,21 @@ function BrandDetailInner() {
   const b = d.brand;
   const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
   const keep = `projectId=${encodeURIComponent(projectId)}`;
+  const earliest = cov?.summary?.earliestAvailableAt || null;
+  const rangePicker = (
+    <TimeRangePicker
+      preset={preset} from={effectiveRange?.from || null} to={effectiveRange?.to || null}
+      earliest={earliest}
+      onChange={(next) => {
+        setPreset(next.preset);
+        if (next.preset === 'custom') setRange({ from: next.from, to: next.to });
+      }}
+    />
+  );
 
   return (
     <div className="core-brand-detail">
-      <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品库</Link></p>
+      <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品数据库</Link></p>
       <h2>{b.name}</h2>
 
       <nav className="core-tabs" role="tablist" aria-label="品牌档案分区">
@@ -92,24 +161,91 @@ function BrandDetailInner() {
         <section className="core-sec">
           <h3>概览</h3>
           <ul>
-            <li>官网：{b.officialDomain || '未核实'}</li>
+            <li>官网：{b.officialDomain || '未核实'}{d.officialSite ? <span className={'core-site-badge core-site-' + d.officialSite.status}>（{d.officialSite.statusText}）</span> : null}</li>
             <li>市场：{b.market || '—'}　品类：{b.category || '—'}</li>
             <li>关系：{b.relation || '竞品'}</li>
             <li>开始观察：{b.firstObservedAt ? new Date(b.firstObservedAt).toLocaleString() : '尚未采集'}</li>
+            <li>时序积累起点：{earliest ? String(earliest).slice(0, 10) : '尚未开始积累'}</li>
           </ul>
           <CoveragePanel coverage={d.coverage} compact />
-          <p className="hint">无历史存档接入时只展示开始观察日期，不暗示拥有更早历史。</p>
+          <p className="hint">
+            时序档案从 Vantage 开始采集或回补到公开存档的那一天起有证据；更早的时间没有记录，不代表当时没有变化。
+          </p>
         </section>
       )}
 
       {tab === 'products' && (
         <section className="core-sec">
-          <h3>商品与价格</h3>
-          {!products.observations.length ? (
-            <p className="hint">尚未采集（不等于该品牌没有商品或价格）。</p>
-          ) : (
-            <>
-              <p className="hint">采集时间：{products.collectedAt ? new Date(products.collectedAt).toLocaleString() : '—'}</p>
+          <h3>官网与商品</h3>
+          {d.officialSite ? (
+            <div className={'core-site-status core-site-' + d.officialSite.status}>
+              {d.officialSite.status === 'confirmed' ? (
+                <>
+                  <b>官网已确认</b>
+                  <p className="hint">
+                    {d.officialSite.canonical ? <>确认地址：<a href={d.officialSite.canonical} target="_blank" rel="noopener noreferrer nofollow">{d.officialSite.canonical}</a>　</> : null}
+                    {d.officialSite.lastCollectedAt ? <>采集时间：{new Date(d.officialSite.lastCollectedAt).toLocaleString()}　</> : null}
+                    确认依据：公开页面成功采集（含快照与证据引用）。
+                  </p>
+                </>
+              ) : d.officialSite.status === 'unavailable' ? (
+                <>
+                  <b>官网来源暂不可达</b>
+                  <p className="hint">最近一次官网采集未成功，稍后可重试；此状态不代表官网不存在或不支持。</p>
+                </>
+              ) : (
+                <>
+                  <b>官网资料未采集</b>
+                  <p className="hint">还没有对官网公开资料发起过采集；可在「数据覆盖与来源」中发起。</p>
+                </>
+              )}
+            </div>
+          ) : null}
+          {/* SC-06 r2：官网公开商品（非目录接口）与「官网已确认」分离——
+              能力已实现但尚未完成一次真实商品页采集时显示「待验证」，绝不写「已采集」 */}
+          {d.publicProducts ? (
+            <div className="core-site-status core-site-wrap">
+              {d.publicProducts.status === 'verified' ? (
+                <>
+                  <b>官网公开商品：已采集到公开商品页观察</b>
+                  <p className="hint">
+                    {d.publicProducts.observedCount != null ? <>观察条数：{d.publicProducts.observedCount}　</> : null}
+                    {d.publicProducts.lastCollectedAt ? <>采集时间：{new Date(d.publicProducts.lastCollectedAt).toLocaleString()}　</> : null}
+                    {d.publicProducts.discoveryPath ? <>发现路径：{discoveryPathText(d.publicProducts.discoveryPath)}　</> : null}
+                    {d.publicProducts.sampleNote || ''}
+                  </p>
+                </>
+              ) : d.publicProducts.status === 'unavailable' ? (
+                <>
+                  <b>官网公开商品：最近一次采集未成功</b>
+                  <p className="hint">{d.publicProducts.failureText || '来源暂不可达，稍后可重试。'} {d.publicProducts.note || ''}</p>
+                </>
+              ) : (
+                <>
+                  <b>官网公开商品：待验证</b>
+                  <p className="hint">{d.publicProducts.note || '该能力已实现但尚无一次真实成功采集验证；验证完成前不展示商品数据。'}</p>
+                </>
+              )}
+            </div>
+          ) : null}
+          {rangePicker}
+          {loadErr ? <p className="core-err">{loadErr}</p> : null}
+          {mem ? <ProductMemoryList facts={mem.facts} onEvidence={setEvRefs} /> : <p className="hint">加载中…</p>}
+          {mem && !mem.facts.length ? (
+            <div className="mem-empty">
+              <p><b>尚未形成可核验的历史价格记录</b></p>
+              <p className="hint">
+                {mem.note || '系统从首次成功采集开始积累；不足两个可比观察点时不判断价格变化。'}
+              </p>
+            </div>
+          ) : null}
+          {products.observations.length ? (
+            <details className="mem-current">
+              <summary>本次采集的当前观察（{products.observations.length} 条，未进入时序库）</summary>
+              <p className="hint">
+                采集时间：{products.collectedAt ? new Date(products.collectedAt).toLocaleString() : '—'}。
+                这些是最近一次采集的即时结果，只有写入时序库后才会形成可回溯历史。
+              </p>
               <ul className="core-products">
                 {products.observations.slice(0, 30).map((o, i) => (
                   <li key={o.id || i}>
@@ -119,19 +255,23 @@ function BrandDetailInner() {
                   </li>
                 ))}
               </ul>
-              {products.evidenceRefs.length ? (
-                <p className="hint">证据：{products.evidenceRefs.length} 条（可在「数据覆盖与来源」中核对原始快照）。</p>
-              ) : null}
-            </>
-          )}
+            </details>
+          ) : null}
+        </section>
+      )}
+
+      {tab === 'voice' && (
+        <section className="core-sec">
+          <VoicePanel voice={d.unifiedVoice} onEvidence={setEvRefs} />
         </section>
       )}
 
       {tab === 'timeline' && (
         <section className="core-sec">
-          <h3>竞争动态时间线</h3>
-          <TimelineList events={d.timeline || []} firstObservedAt={b.firstObservedAt}
-            note="无历史存档接入，只展示 Vantage 开始观察之后的记录。" />
+          <h3>时间线</h3>
+          {rangePicker}
+          {loadErr ? <p className="core-err">{loadErr}</p> : null}
+          {tl ? <MemoryTimelineList data={tl} onEvidence={setEvRefs} /> : <p className="hint">加载中…</p>}
         </section>
       )}
 
@@ -139,17 +279,55 @@ function BrandDetailInner() {
         <section className="core-sec">
           <h3>数据覆盖与来源</h3>
           <CoveragePanel coverage={d.coverage} />
-          {b.competitorId ? <DataSurfaceOverview competitorId={b.competitorId} /> : null}
+          <div className="mem-cov-block">
+            <div className="mem-cov-block-head">
+              <b>时间覆盖</b>
+              <CoverageLegend />
+            </div>
+            {cov ? (
+              cov.dimensions.length ? (
+                <>
+                  <p className="hint">窗口：{cov.window.from} ~ {cov.window.to}（默认近 12 个月）。{cov.note}</p>
+                  {cov.dimensions.map(dim => <CoverageTimeline key={dim.key} dimension={dim} />)}
+                </>
+              ) : <p className="hint">{cov.note}</p>
+            ) : <p className="hint">加载中…</p>}
+          </div>
+          <BackfillCard
+            brandId={brandId}
+            projectId={projectId}
+            canBackfill={!!b.competitorId}
+            disabledReason={b.competitorId ? null : '该品牌还没有可核验的官网，暂不能回补历史。'}
+            initialJob={cov?.backfill || null}
+            onFinished={reload}
+          />
+          {b.competitorId ? <DataSurfaceOverview competitorId={b.competitorId} projectId={projectId} /> : null}
           <BuildingDims dimensions={d.coverage.dimensions} />
         </section>
       )}
 
       {tab === 'intel' && (
         <section className="core-sec">
-          <h3>相关情报</h3>
-          <IntelList items={d.intelligence || []} />
+          <h3>内容与广告</h3>
+          {(() => {
+            const dims = (d.coverage && d.coverage.dimensions || []).filter(x => x.code === 'social_content' || x.code === 'ad_campaigns');
+            if (!dims.length) return <p className="hint">尚无内容与广告维度的覆盖状态。</p>;
+            return (
+              <ul className="core-voice-limits">
+                {dims.map(x => (
+                  <li key={x.code}>
+                    <b>{x.displayName}</b>：{x.stateText}
+                    {x.notes && x.notes.length ? <span className="hint">（{x.notes.join('；')}）</span> : null}
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
           <p className="hint">
-            <Link href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>在情报库中查看该品牌的全部情报 →</Link>
+            社媒内容与广告活动维度由系统数据服务承载：凭据可用并通过真实验证后，这里会展示公开内容与广告素材的可核验观察；当前不生成数据、估算或结论。
+          </p>
+          <p className="hint">
+            <Link href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>在情报库中查看该品牌的全部动态 →</Link>
           </p>
         </section>
       )}
@@ -164,6 +342,10 @@ function BrandDetailInner() {
           />
         </section>
       )}
+
+      {evRefs && evRefs.length ? (
+        <EvidenceDrawer refs={evRefs} onClose={() => setEvRefs(null)} />
+      ) : null}
     </div>
   );
 }

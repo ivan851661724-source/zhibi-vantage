@@ -10,6 +10,8 @@ const STATE_META: Record<SurfaceState, { icon: string; text: string; cls: string
   partial: { icon: '◔', text: '部分覆盖', cls: 'partial' },
   stale: { icon: '◷', text: '数据过期', cls: 'stale' },
   unsupported: { icon: '⃠', text: '暂未接入', cls: 'unsupported' },
+  pending_config: { icon: '⚿', text: '数据服务暂不可用', cls: 'pending-config' },
+  pending_verification: { icon: '◌', text: '待验证', cls: 'pending-verify' },
 };
 
 export function SurfaceStateBadge({ state }: { state: SurfaceState }) {

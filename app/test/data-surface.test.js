@@ -191,21 +191,25 @@ function okFetchResult(tid, url, opts) {
     const ig = Registry.assertRegistryIntegrity();
     assert.ok(ig.ok, 'registry integrity: ' + ig.errors.join(';'));
     assert.strictEqual(Registry.listDimensions().length, 5);
-    assert.strictEqual(Registry.listCapabilities().length, 6, 'shopify_catalog + shopify_collections + 4 占位');
+    assert.strictEqual(Registry.listCapabilities().length, 8, 'shopify_catalog + shopify_collections + SC-06 official_site_profile/public_site_products + 4 占位');
     const shop = Registry.getCapability('shopify_catalog');
     assert.strictEqual(shop.maturity, 'ga');
     assert.notStrictEqual(shop.parserVersion, shop.collectorVersion, 'SC-01：parser ≠ collector');
     assert.ok(shop.refreshPolicy.cooldownMinutes > 0, 'ga 能力必须有 cooldown 保护');
     const wpCaps = Registry.capabilitiesByDimension('website_products');
-    assert.strictEqual(wpCaps.length, 2, 'website_products = catalog + collections 双能力');
+    assert.strictEqual(wpCaps.length, 4, 'website_products = catalog + collections + SC-06 官网资料/公开商品 四能力');
     assert.deepStrictEqual(Registry.adaptersForCapability('shopify_catalog'), ['shopify']);
     assert.deepStrictEqual(Registry.adaptersForCapability('shopify_collections'), ['shopify_collections']);
-    for (const code of ['social_content', 'ad_activity', 'review_rating', 'search_interest']) {
+    for (const code of ['youtube_content', 'tiktok_commercial_content', 'public_reviews', 'dataforseo_trends']) {
+      // Wave 1：四维占位升级为 pending_config 真实 capability（结构就绪、未过 staging）
       const c = Registry.getCapability(code);
-      assert.strictEqual(c.maturity, 'not_integrated');
-      assert.strictEqual(c.manualRefresh, false);
-      assert.strictEqual(c.adapter, null, '未接入能力不得虚设 adapter');
-      assert.strictEqual(c.adapters.length, 0);
+      assert.ok(c, code + ' capability 存在');
+      assert.strictEqual(c.maturity, 'pending_config');
+      assert.strictEqual(c.manualRefresh, true);
+      assert.ok(c.adapter && c.provider, code + ' 结构就绪（adapter/provider）');
+      assert.strictEqual(c.adapters.length, 1);
+      assert.ok(Array.isArray(c.configKeys) && c.configKeys.length, code + ' configKeys 显式');
+      assert.ok(c.measurementMethod, code + ' measurementMethod 显式');
     }
   });
 
@@ -476,12 +480,21 @@ function okFetchResult(tid, url, opts) {
       assert.strictEqual(s.includes('shopify_catalog'), false, dim + ' 不得引用 Shopify capability');
       assert.strictEqual(s.includes('P1'), false, dim + ' 不得出现商品');
       assert.strictEqual(s.includes('products.json'), false, dim + ' 不得出现抓取 URL');
-      // 刷新未接入 capability → 400
+      // 刷新 pending_config capability（凭据未配置）→ 400 SOURCE_NOT_CONFIGURED，
+      // 用户侧文案不出现环境变量名（r2 §P0-2）
       const ctxX = mkCtx(TID_A);
-      ctxX._body = { competitorId: 'compA1', projectId: 'projA', capability: 'social_content' };
+      ctxX._body = { competitorId: 'compA1', projectId: 'projA', capability: 'youtube_content' };
       await DataSurfaceH.refresh(ctxX, { method: 'POST' }, fakeRes(), new URL('http://x/api/data-surface/refresh'), '/api/data-surface/refresh');
       assert.strictEqual(ctxX.status, 400);
-      assert.strictEqual(ctxX.body.error, 'CAPABILITY_NOT_SUPPORTED');
+      assert.strictEqual(ctxX.body.error, 'SOURCE_NOT_CONFIGURED');
+      assert.ok(/数据服务暂不可用/.test(ctxX.body.message), '用户侧文案口径');
+      assert.strictEqual(/API_KEY|DATAFORSEO|TIKTOK_/.test(ctxX.body.message), false, '不得出现凭据变量名');
+      // 已下线的旧占位 code → 404 CAPABILITY_NOT_FOUND（不复活占位）
+      const ctxY = mkCtx(TID_A);
+      ctxY._body = { competitorId: 'compA1', projectId: 'projA', capability: 'social_content' };
+      await DataSurfaceH.refresh(ctxY, { method: 'POST' }, fakeRes(), new URL('http://x/api/data-surface/refresh'), '/api/data-surface/refresh');
+      assert.strictEqual(ctxY.status, 404);
+      assert.strictEqual(ctxY.body.error, 'CAPABILITY_NOT_FOUND');
     }
   });
 
@@ -501,9 +514,13 @@ function okFetchResult(tid, url, opts) {
     } finally { stC.restore(); }
     const ov = Surface.buildOverview({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', comp, nowMs: NOW + 3600e3 });
     const wp = ov.dimensions.find(d => d.code === 'website_products');
-    assert.strictEqual(wp.aggregations.length, 2, '双能力聚合块');
+    // SC-06 r2（评审 §二）：public_site_products 尚无真实成功采集 → 不得作为「已采集」能力渲染；
+    // 它出现在 pendingVerification 里（能力已实现、待验证），聚合块只剩 3 个。
+    assert.strictEqual(wp.aggregations.length, 3, 'SC-06 r2：三能力聚合块（catalog + collections + official_site_profile）');
     const codes = wp.aggregations.map(a => a.capability.code).sort();
-    assert.deepStrictEqual(codes, ['shopify_catalog', 'shopify_collections']);
+    assert.deepStrictEqual(codes, ['official_site_profile', 'shopify_catalog', 'shopify_collections']);
+    assert.ok(Array.isArray(wp.pendingVerification) && wp.pendingVerification.some(x => x.code === 'public_site_products'),
+      '待验证能力单列：public_site_products 不得显示为已采集');
     const catAgg = wp.aggregations.find(a => a.capability.code === 'shopify_catalog');
     const colAgg = wp.aggregations.find(a => a.capability.code === 'shopify_collections');
     assert.strictEqual(catAgg.summary.kind, 'storefront_catalog');
@@ -511,7 +528,8 @@ function okFetchResult(tid, url, opts) {
     assert.notStrictEqual(catAgg.summary.kind, colAgg.summary.kind, '摘要不共用固定模板');
     // 明细维度返回双 capability 视图
     const det = Surface.buildDimensionDetail({ tenantId: TID_A, projectId: 'projA', competitorId: 'compA1', dimension: 'website_products', offset: 0, limit: 10, comp });
-    assert.strictEqual(det.capabilities.length, 2);
+    // SC-06 r2：明细只含可渲染能力（未验证的 public_site_products 不混进明细观察）
+    assert.strictEqual(det.capabilities.length, 3);
     assert.ok(det.capabilities.every(c => c.capabilityCode), '明细按 capability 维度组织');
   });
 

@@ -2,7 +2,8 @@
 // 数据面共享类型（对齐 GET /api/data-surface/overview|dimension 响应，SC-02 §8）
 // 2026-10-18 整改轮：summary 判别联合（可扩展摘要协议）+ currency 贯通 +
 // latestAttempt / latestUsable / isRefreshing 状态三拆 + 多 Evidence 引用。
-export type SurfaceState = 'ok' | 'loading' | 'failed' | 'empty' | 'partial' | 'stale' | 'unsupported';
+// SC-06 r2：pending_verification = 能力已实现、尚无真实成功采集（待验证，不是已采集）
+export type SurfaceState = 'ok' | 'loading' | 'failed' | 'empty' | 'partial' | 'stale' | 'unsupported' | 'pending_config' | 'pending_verification';
 
 // ---------- 摘要判别联合（SC-02 §4 整改：禁止跨维度共用固定模板） ----------
 export interface StorefrontCatalogSummary {
@@ -28,10 +29,77 @@ export interface StorefrontCollectionsSummary {
   partialScan: boolean;
   partialScanReason: string | null;
 }
+// ---------- Wave 1：四个新维度各自的摘要形状（不复用 Shopify 价格卡模板） ----------
+/** 社媒内容：公开视频观察（measurementMethod=public_source_observation） */
+export interface SocialVideosSummary {
+  kind: 'social_videos';
+  videoCount: number;
+  channelTitle: string | null;
+  channelId: string | null;
+  matchReasons: string[];
+  measurementMethod: 'public_source_observation';
+  periodStart: string | null;
+  periodEnd: string | null;
+  comments: { text: string; videoId: string | null; sourceUrl: string | null }[];
+  partialScan: boolean;
+  partialScanReason?: string | null;
+}
+/** 搜索与热度：数据服务估算趋势点（measurementMethod=licensed_estimate） */
+export interface TrendSeriesSummary {
+  kind: 'trend_series';
+  pointCount: number;
+  keyword: string | null;
+  region: string | null;
+  measurementMethod: 'licensed_estimate';
+  periodStart: string | null;
+  periodEnd: string | null;
+  providerRecordId: string | null;
+  methodologyVersion: string | null;
+  partialScan: boolean;
+  partialScanReason?: string | null;
+}
+/** 广告活动：平台公开披露（official_disclosure；花费/ROI/转化率/GMV 不可观测；覆盖范围受官方支持国家限制） */
+export interface AdCreativesSummary {
+  kind: 'ad_creatives';
+  creativeCount: number;
+  measurementMethod: 'official_disclosure';
+  periodStart: string | null;
+  periodEnd: string | null;
+  countryScope?: string | null;
+  /** 官方支持国家数量：由后端唯一事实源派生（不得在前端写死） */
+  coverageCountryCount?: number | null;
+  coverageScope?: string | null;
+  /** covered=品牌市场在官方覆盖内；out_of_coverage=官方无覆盖；unknown=市场未知 */
+  coverageState?: 'covered' | 'out_of_coverage' | 'unknown' | null;
+  brandMarket?: string | null;
+  brandMarketCovered?: boolean | null;
+  coverageNote?: string | null;
+  providerRecordId: string | null;
+  methodologyVersion: string | null;
+  partialScan: boolean;
+  partialScanReason?: string | null;
+}
+/** 口碑与评论：公开页面评论摘要（样本量/时间范围/来源数必须明示） */
+export interface ReviewsDigestSummary {
+  kind: 'reviews_digest';
+  reviewCount: number;
+  sourceCount: number;
+  measurementMethod: 'public_source_observation';
+  periodStart: string | null;
+  periodEnd: string | null;
+  methodologyVersion: string | null;
+  sampleNote: string | null;
+  partialScan: boolean;
+  partialScanReason?: string | null;
+}
 /** 未来新维度的摘要形状在此扩展；前端对未知 kind 走通用键值渲染（不假装看得懂） */
 export type SurfaceSummary =
   | StorefrontCatalogSummary
   | StorefrontCollectionsSummary
+  | SocialVideosSummary
+  | TrendSeriesSummary
+  | AdCreativesSummary
+  | ReviewsDigestSummary
   | { kind: string; [key: string]: unknown };
 
 export interface SurfaceEvidenceRef {
@@ -58,6 +126,9 @@ export interface SurfaceCapability {
   maturity: string;
   limitations: string;
   refreshPolicy: { cooldownMinutes: number; dailyQuota: number | null };
+  /** Wave 1：凭据要求（产品面声明）与测量方法标签 */
+  configKeys?: string[] | null;
+  measurementMethod?: string | null;
 }
 
 /** attempt 用户可视图（剔除内部字段） */
@@ -89,6 +160,7 @@ export interface SurfaceCapabilityBlock {
   pagination?: { total: number };
 }
 
+/** 观察行：价格字段对非商品维度恒 null；Wave 1 各维度扩展字段可选 */
 export interface SurfaceObservation {
   id: string | null;
   title: string;
@@ -96,6 +168,30 @@ export interface SurfaceObservation {
   currency: string | null;
   available: boolean;
   publishedAt: string | null;
+  // social_videos
+  viewCount?: number | null;
+  likeCount?: number | null;
+  commentCount?: number | null;
+  thumbnailUrl?: string | null;
+  videoUrl?: string | null;
+  // trend_series
+  value?: number | null;
+  region?: string | null;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  // ad_creatives
+  advertiser?: string | null;
+  creativeUrl?: string | null;
+  reach?: number | null;
+  status?: string | null;
+  /** 官方 status_statement：仅在平台实际返回时存在（缺失即 null，不用占位文案） */
+  statusStatement?: string | null;
+  lastShownDate?: string | null;
+  // reviews_digest
+  rating?: number | null;
+  reviewCount?: number | null;
+  snippet?: string | null;
+  sourceUrl?: string | null;
 }
 
 export interface SurfaceDimension {
@@ -118,6 +214,8 @@ export interface SurfaceDimension {
   evidenceRefs?: SurfaceEvidenceRef[];
   /** 多能力聚合（同维度并行）；未接入维度为空数组 */
   aggregations?: SurfaceCapabilityBlock[];
+  /** SC-06 r2：本维度内「能力已实现、尚无真实成功采集」的项（不混进已采集结果） */
+  pendingVerification?: { code: string; displayName: string; maturity: string; stateText: string }[];
   pagination?: { total: number };
 }
 

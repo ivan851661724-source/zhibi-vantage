@@ -310,6 +310,15 @@ export function ReportDetailView({ reportId }: { reportId: string }) {
       ) : null}
       {d.markdown ? <article className="core-report-md core-report-md-render">{renderMarkdown(d.markdown)}</article> : null}
 
+      {/* SC-05：冻结的时序基线——存档时间 / 观察时间 / 实际发生时间分开说明，不混为一谈 */}
+      {d.factPack && d.factPack.memoryBasis ? (
+        <p className="hint core-report-memory">
+          时序事实基线：已冻结 {d.factPack.memoryBasis.factCount || 0} 条时序事实
+          （范围 {d.factPack.memoryBasis.from || '不限'} ~ {d.factPack.memoryBasis.to || '生成时'}）；
+          每条都带事实 ID、版本 ID 与证据引用。存档观察的时间取存档快照时间，实时观察只记录 Vantage 的观察时间。
+        </p>
+      ) : null}
+
       <h4>事实引用</h4>
       {!d.citations.length ? <p className="hint">暂无引用。</p> : (
         <ul className="core-report-cit">

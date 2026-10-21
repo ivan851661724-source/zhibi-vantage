@@ -1,5 +1,15 @@
 # Vantage Specification Change Log
 
+## v0.4.0-SC05 修订（2026-10-19，Competitive Memory Foundation，未合并——随 review/competitive-memory-foundation 分支）
+
+- 新增 SC-05：竞品时序数据库地基（双时间语义、四类来源、五态覆盖、五张表、五个 API、前端时序档案、明确不做清单）。
+- 新增 `app/services/competitive-memory-store.js`（competitive_memory.db：memory_entities / entity_versions / temporal_facts / derived_timeline_events / history_backfill_jobs）、`app/services/competitive-memory.js`（live 写入与确定性派生）、`app/research/web-archive.js`（CDX 发现 + 存档正文受控抓取）、`app/services/backfill-service.js`（回补任务队列与恢复）。
+- 接入点：`collect-jobs.js` 在既有 attempt/Evidence 落账后追加 Memory 写入（复用既有 Snapshot，不二次抓取、不生成第二份快照）；`net.js` 的 `mapShopifyItems` 补 `handle`（商品稳定键所需，不改变既有字段语义）。
+- 新增 5 个 tenant-scoped API：`/api/brands/:brandId/memory|timeline|history-coverage`、`POST /api/brands/:brandId/history-backfill`、`GET /api/history-backfill/:jobId`。
+- 前端：品牌详情三 Tab 升级（商品与价格 / 历史时间线 / 数据覆盖与来源），新增 `web/src/components/memory/*` 共享组件；情报库、机会视图、报告冻结事实包最小接入时序事实。
+- 本变更不新增任何外部 provider；商品与目录是唯一进入时序库的维度，其余维度保持「未接入」。
+- 上线纪律：真实 Shopify 链路可验证；网页存档链路须在可访问 archive.org 的环境验证，本环境如实落 `source_unavailable`，不得写成已回补。
+
 ## v1.5.0 / v0.4.0 · 产品宪法与 SC-03 生效（2026-10-18）
 
 - 01：v1.5.0 正式生效并替代 v1.3.3；冻结外部竞争情报边界，不要求或依赖用户订单、ERP、CRM、广告账户和客户数据。

@@ -1000,6 +1000,23 @@ async function deepResearchOne(comp, state, config, runIdOverride) {
     stage: 'voice_collection', durationMs: Date.now() - _tVoice, status: 'ok', provider: 'voice-collector' });
 
   comp.status = 'done';
+
+  // 🔴 SC-06 r2（评审 §三.1）：官网公开资料（official_site_profile）无需凭据、已真实验证，
+  // 不应只靠用户手动刷新才出现。品牌官网在本次调研确认后立刻进入正常采集队列——
+  // 走与手动刷新**完全相同**的链路（collect-request：幂等/冷却/额度/attempt/入队 +
+  // worker fencing + SSRF/robots/重定向/脱敏/Snapshot/Evidence/租户隔离）。
+  // · 先落盘：worker 认领时要能从项目档案解析该 competitor，抢跑会误判 not resolvable；
+  // · 不自动采集 public_site_products：该能力尚未真实验证，不得因此自动大规模抓取（§三.2）；
+  // · 任何失败只记日志，绝不改变调研结果。
+  try {
+    saveState(state);
+    const CollectReq = require('../services/collect-request.js');
+    comp.autoCollect = CollectReq.autoCollectAfterResearch({
+      tenantId: state.tenantId, projectId: state.projectId, comp, who: 'deepResearchOne',
+    });
+  } catch (e) {
+    comp.autoCollect = { enqueued: false, reason: 'exception' };
+  }
 }
 
 // 用户直接指定品牌检索（绕过赛道发现，单独深研）

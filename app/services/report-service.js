@@ -19,6 +19,8 @@ const Report = require('../research/report.js');
 const { computeWhiteSpace, assessPositioning } = require('../research/whitespace.js');
 const { evidenceDistribution } = require('../lib/evidence-dist.js');
 const { computeOpportunityMap } = require('../lib/opportunity.js');
+const VoiceUnified = require('./voice-unified.js'); // SC-06 r2：机会算法唯一评论来源
+const MemView = require('./memory-view.js'); // SC-05：报告冻结时序事实基线（只读投影）
 
 let workerTimer = null;
 let running = false;
@@ -118,15 +120,25 @@ function buildFactPack(tenantId, projectId, state, scope) {
   for (const g of ws.opps) {
     if ((g.sources || []).some(s => flaggedNames.has(s && s.name))) g.suspect = true;
   }
-  // 用户声音机会（口碑驱动补充层）
+  // 用户声音机会（口碑驱动补充层）——🔴 SC-06 r2：只吃统一评论事实链，
+  // 旧 voiceItems / reviews / painPoints 不进分母（评审 §一.1/§一.4）
   let voiceOpp = { hidden: true, themes: [], doneBrands: 0, brandsWithVoice: 0 };
   try {
     const _oppEx = new Set(scoped.excluded || []);
     (scoped.competitors || []).forEach(c => { if (c && (c.entityAmbiguous || c.categoryTearing)) _oppEx.add(c.id); });
     const _oppComps = (scoped.competitors || []).filter(c => c && c.status === 'done' && !_oppEx.has(c.id));
-    const _voice = [];
-    _oppComps.forEach(c => (c.voiceItems || []).forEach(v => { if (v) _voice.push(v); }));
-    const m = computeOpportunityMap(_oppComps, { excluded: _oppEx, voiceItems: _voice });
+    // competitor → brand 归属映射以 brand_project_links 为准（不猜）
+    const _brandByRef = new Map();
+    for (const l of (BrandStore.listBrandLinksForProject(tenantId, projectId) || [])) {
+      if (l && l.competitorRef && l.brandId) _brandByRef.set(l.competitorRef, l.brandId);
+    }
+    const vi = VoiceUnified.buildOpportunityInputForComps({
+      tenantId, projectId, comps: _oppComps,
+      brandIdOf: (c) => _brandByRef.get(c.id) || null,
+    });
+    const m = computeOpportunityMap(_oppComps.map(c => ({ id: c.id, name: c.name, status: 'done' })), {
+      excluded: _oppEx, voiceItems: vi.items, voiceCollected: vi.collected,
+    });
     if (m) voiceOpp = m;
   } catch (e) { /* 不可用即隐藏，不填充 */ }
   const pos = (() => { try { return assessPositioning(scoped) || { hasProfile: false }; } catch (e) { return { hasProfile: false }; } })();
@@ -159,7 +171,8 @@ function buildFactPack(tenantId, projectId, state, scope) {
     const cov = BrandSvc.buildCoverage(tenantId, projectId, comp || {});
     coverage.push({ brandId: x.bid, name: brand.canonicalName, summary: cov.summary, dimensions: cov.dimensions.map(d => ({ code: d.code, state: d.state, stateText: d.stateText, lastObservedAt: d.lastObservedAt })) });
     for (const d of cov.dimensions) {
-      if (d.state === 'unsupported') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_integrated', text: '该数据源尚未接入，不提供任何数据或估算。' });
+      if (d.state === 'pending_config') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'pending_config', text: '需要系统数据服务配置：当前不生成数据、估算或结论。' });
+      else if (d.state === 'unsupported') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_integrated', text: '该数据源尚未接入，不提供任何数据或估算。' });
       else if (d.state === 'unknown') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'not_collected', text: '尚未采集（不等于未发现数据）。' });
       else if (d.state === 'failed') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'collect_failed', text: '最近采集失败，尚无可展示数据。' });
       else if (d.state === 'partial') gaps.push({ brandId: x.bid, dimension: d.code, displayName: d.displayName, kind: 'partial', text: '部分采集，枚举不完整。' });
@@ -196,9 +209,14 @@ function buildFactPack(tenantId, projectId, state, scope) {
     }
   } catch (e) { opportunities = []; }
 
+  // SC-05：冻结时序事实基线（事实 id / 版本 id / 双时间 / 证据引用），执行期不再读实时 Memory
+  let memoryBasis = null;
+  try { memoryBasis = MemView.buildMemoryBasis(tenantId, projectId, linkRefs, norm.from, norm.to, 120); } catch (e) { memoryBasis = null; }
+
   return {
     generatedAt: new Date().toISOString(),
     scope: { brandIds: norm.brandIds, from: norm.from, to: norm.to, sections: norm.sections },
+    memoryBasis,
     brandIds: linkRefs.map(x => x.bid),
     brandNames,
     track: (state && state.track) || null,
@@ -207,7 +225,12 @@ function buildFactPack(tenantId, projectId, state, scope) {
     timeUnresolved,
     dimensionCoverage: { cov: dimCov.cov || {}, detected: dimCov.detected || [], undetected: dimCov.undetected || [] },
     whitespace: ws,
-    voiceOpp: { hidden: !!voiceOpp.hidden, themes: voiceOpp.hidden ? [] : (voiceOpp.themes || []), doneBrands: voiceOpp.doneBrands || 0, brandsWithVoice: voiceOpp.brandsWithVoice || 0 },
+    voiceOpp: {
+      hidden: !!voiceOpp.hidden, themes: voiceOpp.hidden ? [] : (voiceOpp.themes || []),
+      doneBrands: voiceOpp.doneBrands || 0, brandsWithVoice: voiceOpp.brandsWithVoice || 0,
+      reason: voiceOpp.reason || null,
+      voiceBasis: voiceOpp.voiceBasis || null, // SC-06 r2：冻结时点的评论事实链资格状态
+    },
     positioning: pos,
     positioningText,
     evidenceDist,
@@ -216,6 +239,11 @@ function buildFactPack(tenantId, projectId, state, scope) {
 }
 
 // ---------- 机会视图（接统一读模型，样本不足不输出结论） ----------
+// 🔴 SC-06 r2（评审 §一）：机会相关数据只能经统一评论事实链读取公开评论事实。
+//   · 不再把竞品档案里的 reviews / painPoints / voiceItems 当独立统计来源；
+//   · 不把 sentiment:'neu' 当正面或负面，也不把未分类评论塞进满意度分母；
+//   · 没有带 sentimentBasis 的正负主题时：不出满意度×重要性散点、不按相对百分位
+//     强行分「重点机会」，而是如实返回 insufficient_voice 与「下一步建议」。
 function buildOpportunities(tenantId, projectId, stateArg, opts) {
   const o = opts || {};
   const state = stateArg || BrandSvc.loadProjectState(tenantId, projectId);
@@ -243,21 +271,37 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
     }
   }
   const MIN_BRANDS = 3;
-  // 只读视图扩展（UI 轮）：机会页「数据基础」需要维度级构成——已接入 / 建设中 / 实际有数据
-  const allDims = require('./capability-registry.js').listDimensions();
+  // 只读视图扩展（UI 轮）：机会页「数据基础」需要维度级构成——已接入 / 待验证 / 需要配置 / 未接入 / 实际有数据
+  // Wave 1：pending_config 单列（需要系统数据服务配置 ≠ 未接入）
+  // SC-06 r2：pending_verification 单列（能力代码就绪但尚无真实成功采集 ≠ 已接入 ≠ 需要配置）
+  const Registry = require('./capability-registry.js');
+  const allDims = Registry.listDimensions();
   const integratedNames = [];
+  const pendingVerificationNames = [];
+  const pendingConfigNames = [];
   const notIntegratedNames = [];
   for (const d of allDims) {
-    const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
-    (caps.some(c => c.maturity === 'ga') ? integratedNames : notIntegratedNames).push(d.displayName);
+    const caps = Registry.capabilitiesByDimension(d.code);
+    if (caps.some(c => c.maturity === 'ga')) integratedNames.push(d.displayName);
+    else if (caps.some(c => c.maturity === 'pending_verification')) pendingVerificationNames.push(d.displayName);
+    else if (caps.some(c => c.maturity === 'pending_config')) pendingConfigNames.push(d.displayName);
+    else notIntegratedNames.push(d.displayName);
   }
   const limits = [];
   for (const d of allDims) {
-    const caps = require('./capability-registry.js').capabilitiesByDimension(d.code);
-    if (!caps.some(c => c.maturity === 'ga')) limits.push(d.displayName + '：数据源未接入，本版不据此生成机会结论');
+    const caps = Registry.capabilitiesByDimension(d.code);
+    if (caps.some(c => c.maturity === 'ga')) continue;
+    const isPendingVerify = caps.some(c => c.maturity === 'pending_verification');
+    const isPending = caps.some(c => c.maturity === 'pending_config');
+    limits.push(d.displayName + (isPendingVerify
+      ? '：能力已实现，但尚无一次真实成功采集验证，验证前不据此生成机会结论'
+      : (isPending ? '：需要系统数据服务配置，配置并验证前不据此生成机会结论'
+        : '：数据源未接入，本版不据此生成机会结论')));
   }
   const dimensionBasis = {
     integrated: integratedNames,
+    pendingVerification: pendingVerificationNames,
+    pendingConfig: pendingConfigNames,
     notIntegrated: notIntegratedNames,
     covered: [...dimsWithData],
   };
@@ -272,27 +316,84 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
       note: '机会判断需要至少 ' + MIN_BRANDS + ' 个已具备真实数据覆盖的竞争品牌；当前不满足，Vantage 不给出机会结论（不做估算填充）。',
     };
   }
+
+  // —— 统一评论事实链（唯一来源）——
+  const brandByRef = new Map();
+  for (const l of (BrandStore.listBrandLinksForProject(tenantId, projectId) || [])) {
+    if (l && l.competitorRef && l.brandId) brandByRef.set(l.competitorRef, l.brandId);
+  }
+  const vi = VoiceUnified.buildOpportunityInputForComps({
+    tenantId, projectId, comps,
+    brandIdOf: (c) => brandByRef.get(c.id) || null,
+  });
+  // 机会算法只拿到「已就绪品牌的最小投影」——旧 reviews/painPoints/voiceItems 结构性不可达
+  const compsForOpp = comps.map(c => ({ id: c.id, name: c.name, status: 'done' }));
   let map = null;
   try {
-    const excluded = new Set(state.excluded || []);
-    const voiceItems = [];
-    comps.forEach(c => (c.voiceItems || []).forEach(v => v && voiceItems.push(v)));
-    map = computeOpportunityMap(comps, { excluded, voiceItems });
+    map = computeOpportunityMap(compsForOpp, {
+      excluded: new Set(state.excluded || []),
+      voiceItems: vi.items,
+      voiceCollected: vi.collected,
+    });
   } catch (e) { map = null; }
+
+  const voiceBasis = {
+    collected: vi.collected,
+    qualified: vi.qualified,
+    brandsWithQualifiedVoice: vi.brandsWithVoice,
+    gate: vi.reason,
+    gateText: vi.reasonText,
+    sampleNote: '合格输入 = 带 polarity + sentimentBasis + Evidence/Snapshot + 来源 URL + 观察时间 + 项目内竞品归属（competitorId）的公开评论',
+  };
+  const nextSteps = vi.eligible ? [] : [
+    '在「用户声音与公开评论」中补齐更多公开评论页的采集（来源、快照与证据会一并留痕）',
+    '情绪/主题分类需要可解释依据（来源原始字段、确定性规则或可追溯模型提取）；在此之前本页不生成满意度判断',
+  ];
+
+  // 无合格输入：不出图、不给相对百分位分区，如实说明并保留数据基础与下一步
+  if (!map || map.hidden) {
+    const gate = (map && map.voiceBasis && map.voiceBasis.gate) || vi.reason;
+    return {
+      status: gate === 'no_public_reviews' ? 'insufficient' : 'insufficient_voice',
+      statusText: gate === 'no_public_reviews'
+        ? '资料不足，暂不生成机会判断'
+        : vi.reasonText || '用户声音已采集，但尚不足以形成满意度机会判断',
+      items: [],
+      sample: { brandCount: comps.length, brandsWithData: withData, required: MIN_BRANDS },
+      dimensionBasis,
+      limits,
+      voiceBasis,
+      nextSteps,
+      note: gate === 'no_public_reviews'
+        ? '尚未采集到可核验的公开评论；机会判断不使用评论主题或抱怨点等旧链路口径。'
+        : '用户声音已采集，但尚不足以形成满意度机会判断：缺的是带依据的正负分类，不是评论条数。',
+    };
+  }
+
+  // 🔴 SC-06 r2 修复：computeOpportunityMap 的真正产出是 themes[]（zones 是分区计数对象，
+  // 不可迭代）。此前只有 hidden 分支会被走到，这段从未执行——一旦有合格输入就会抛
+  // TypeError。这里改为按 themes 投影，并保留 O/I/S 与置信度供前端展示。
   let items = [];
-  const zones = (map && (map.zones || map.items || map.opportunities)) || [];
-  for (const z of zones) {
-    if (!z) continue;
+  const themes = (map && Array.isArray(map.themes)) ? map.themes : [];
+  for (const t of themes) {
+    if (!t) continue;
+    // 时间范围来自该主题下的真实观察时间（没有观察时间的主题在时间窗筛选下不命中）
+    const stamps = (t.sources || []).map(x => x && x.observedAt).filter(Boolean).sort();
     items.push({
-      id: z.gid || z.id || null,
-      theme: z.theme || z.label || z.title || null,
-      level: z.level || null,
-      basis: z.basis || z.evidence || null,
-      brandCount: z.brandCount != null ? z.brandCount : (z.brands ? z.brands.length : null),
-      from: z.from || null, to: z.to || null,
-      caveats: (z.caveats || []).slice(0, 6),
+      id: t.oid || null,
+      theme: t.label || null,
+      level: t.zone || null,
+      basis: t.denominatorText || null,
+      brandCount: t.brandsMentioned != null ? t.brandsMentioned : null,
+      from: stamps.length ? stamps[0] : null, to: stamps.length ? stamps[stamps.length - 1] : null,
+      caveats: [t.note].filter(Boolean).concat((map.caveats || []).slice(0, 2)).slice(0, 6),
       status: '线索（待验证）',
       note: '机会只是待验证线索，不是经营建议或确定结论。',
+      importance: t.importance != null ? t.importance : null,
+      satisfaction: t.satisfaction != null ? t.satisfaction : null,
+      opportunity: t.opportunity != null ? t.opportunity : null,
+      confidence: t.confidence || null,
+      voices: (t.sources || []).slice(0, 6),
     });
   }
   // 时间窗口：带时间字段的机会项按窗口过滤；无法判定时间 → 不命中
@@ -307,12 +408,14 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
     });
   }
   return {
-    status: items.length ? 'ok' : 'insufficient',
-    statusText: items.length ? '已基于现有数据生成机会线索' : '资料不足，暂不生成机会判断',
+    status: items.length ? 'ok' : 'insufficient_voice',
+    statusText: items.length ? '已基于现有数据生成机会线索' : (vi.reasonText || '用户声音已采集，但尚不足以形成满意度机会判断'),
     items,
     sample: { brandCount: comps.length, brandsWithData: withData, required: MIN_BRANDS },
     dimensionBasis,
     limits,
+    voiceBasis,
+    nextSteps,
     note: items.length ? '每条机会均标注事实依据、覆盖品牌数与限制；不含未接入维度的推断。' : '资料不足，暂不生成机会判断。',
   };
 }

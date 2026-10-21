@@ -201,6 +201,22 @@ function positioningTextOf(pos) {
   }
   return posText;
 }
+// SC-06 r2：口碑机会口径（冻结包与实时路径共用）——样本不足与「已采集但不足以判断」分开说
+function voiceOppLine(voiceOpp) {
+  const v = voiceOpp || {};
+  if (!v.hidden) {
+    return (v.themes || []).map(t => `[O${t.onum}] (${t.zone}·机会分${t.opportunity}·重要性${t.importance}·满意度${t.satisfaction}) ${t.label}：${t.denominatorText}`).join('\n');
+  }
+  const gate = (v.voiceBasis && v.voiceBasis.gate) || v.reason || null;
+  if (gate === 'no_evidence_backed_polarity') {
+    return '(用户声音已采集，但尚不足以形成满意度机会判断：缺带依据的正负分类，不单列口碑机会；详见「我们不知道」清单)';
+  }
+  if (gate === 'no_public_reviews') {
+    return '(尚未采集到可核验的公开评论，不单列口碑机会)';
+  }
+  return `(用户声音机会暂不可比：样本不足（${v.brandsWithVoice || 0}/${v.doneBrands || 0} 家有用户声音），不单列；详见「我们不知道」清单)`;
+}
+
 async function buildReport(state, config) {
   const dsKey = llmApiKey(config);
   state.whiteSpace = computeWhiteSpace(state);
@@ -208,10 +224,27 @@ async function buildReport(state, config) {
   const _oppEx = new Set(state.excluded || []);
   (state.competitors || []).forEach(c => { if (c.entityAmbiguous || c.categoryTearing) _oppEx.add(c.id); });
   const _oppComps = (state.competitors || []).filter(c => c.status === 'done' && !_oppEx.has(c.id));
-  // R2.5：报告的用户声音机会层接真实声音（与 decorate 同口径）
-  const _reportVoice = [];
-  _oppComps.forEach(c => { (c.voiceItems || []).forEach(v => { if (v) _reportVoice.push(v); }); });
-  const voiceOpp = computeOpportunityMap(_oppComps, { excluded: _oppEx, voiceItems: _reportVoice });
+  // 🔴 SC-06 r2：报告的用户声音机会层只吃统一评论事实链（与 decorate / 机会页同口径）。
+  // 旧 voiceItems 不再拼进机会分母——没有合格输入时如实隐藏。
+  const _voiceInput = (() => {
+    try {
+      const VoiceUnified = require('../services/voice-unified.js');
+      const BrandStore = require('../services/brand-store.js');
+      const brandByRef = new Map();
+      if (state.tenantId && state.projectId) {
+        for (const l of (BrandStore.listBrandLinksForProject(state.tenantId, state.projectId) || [])) {
+          if (l && l.competitorRef && l.brandId) brandByRef.set(l.competitorRef, l.brandId);
+        }
+      }
+      return VoiceUnified.buildOpportunityInputForComps({
+        tenantId: state.tenantId, projectId: state.projectId, comps: _oppComps,
+        brandIdOf: (c) => brandByRef.get(c.id) || null,
+      });
+    } catch (e) { return { items: [], collected: 0, qualified: 0, eligible: false }; }
+  })();
+  const voiceOpp = computeOpportunityMap(_oppComps.map(c => ({ id: c.id, name: c.name, status: 'done' })), {
+    excluded: _oppEx, voiceItems: _voiceInput.items, voiceCollected: _voiceInput.collected,
+  });
   const allFacts = assembleFacts(state);
   // ▶ 报告-数据同源 原则3：维度完整性闸门 —— 未充分探测（覆盖率<50%）的维度，其事实不进入报告原料
   const dimCov = dimensionCoverage(state);
@@ -235,9 +268,7 @@ async function buildReport(state, config) {
   const singleGaps = ws.filter(g => g.singleCompetitor);
   const singleGapText = singleGaps.map(g => `[${g.gid}] (单家观察·推测·非群体共识) ${g.dim}·${g.value}：${g.note}`).join('\n');
   // ▶ #307：用户声音机会（口碑驱动）作为 brief §三 的补充层，与 G# 市场空缺并列
-  const voiceOppText = voiceOpp.hidden
-    ? `(用户声音机会暂不可比：样本不足（${voiceOpp.brandsWithVoice || 0}/${voiceOpp.doneBrands || 0} 家有用户声音），不单列；详见「我们不知道」清单)`
-    : (voiceOpp.themes || []).map(t => `[O${t.onum}] (${t.zone}·机会分${t.opportunity}·重要性${t.importance}·满意度${t.satisfaction}) ${t.label}：${t.denominatorText}`).join('\n');
+  const voiceOppText = voiceOppLine(voiceOpp);
   const singleMode = !!(state.whiteSpace && state.whiteSpace.singleMode);
 
   // ▶ 报告-数据同源 原则3/原则4："我们不知道"清单（未探测维度 + 文案空缺观察 + 降级数据）
@@ -486,9 +517,7 @@ async function buildReportFromPack(pack, config) {
   const gapText = opps.map(g => `[${g.gid}] (${g.dim}·置信${g.confidence}${g.speculative ? '·推测' : ''}) ${g.value}：${g.note}`).join('\n');
   const copyGapText = copyGaps.map(g => `[${g.gid}] (文案空缺·观察级) ${g.dim}·${g.value}：${g.note}`).join('\n');
   const singleGapText = singleGaps.map(g => `[${g.gid}] (单家观察·推测·非群体共识) ${g.dim}·${g.value}：${g.note}`).join('\n');
-  const voiceOppText = voiceOpp.hidden
-    ? `(用户声音机会暂不可比：样本不足（${voiceOpp.brandsWithVoice || 0}/${voiceOpp.doneBrands || 0} 家有用户声音），不单列；详见「我们不知道」清单)`
-    : (voiceOpp.themes || []).map(t => `[O${t.onum}] (${t.zone}·机会分${t.opportunity}·重要性${t.importance}·满意度${t.satisfaction}) ${t.label}：${t.denominatorText}`).join('\n');
+  const voiceOppText = voiceOppLine(voiceOpp);
 
   const weDontKnow = [];
   (dimCov.undetected || []).forEach(d => {

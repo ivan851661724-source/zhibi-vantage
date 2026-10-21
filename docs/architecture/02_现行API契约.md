@@ -247,3 +247,23 @@ data: {"type":"<事件类型>", ...payload}
 1. 后端改 `routes/index.js` → 同步更新本文档对应表格。
 2. 前端 `web/src/types/` 中的 TS 类型随之调整，二者在同一 PR 内交付。
 3. 破坏性变更（字段删除/语义变化）须在文档中追加"变更记录"小节，注明日期与影响面。
+
+## 6. SC-05 Competitive Memory 端点（2026-10-19，新增，纯增量）
+
+时序数据库（`competitive_memory.db`）的读取与回补入口。全部 `tenant` 鉴权 + `projectId` 归属校验 +
+品牌必须已关联该项目；跨项目/跨租户统一 `404`；响应不含文件路径、密钥、调用栈或内部错误码。
+语义与字段定义见 `docs/spec/changes/SC-05_competitive_memory_foundation.md`。
+
+| 方法 | 路径 | 参数 | 返回要点 |
+|---|---|---|---|
+| GET | `/api/brands/:brandId/memory` | `projectId`（必填）、`from`/`to`、`entityType`、`factTypes`、`cursor`、`limit` | `facts[]`（含 `value`/`unit`/`currency`/`sourceKind`/`timePrecision`/`evidenceIds`/`snapshotIds`/`versionId`）、`versions[]`、`coverage`、`nextCursor` |
+| GET | `/api/brands/:brandId/timeline` | `projectId`、`from`/`to`、`limit` | `items[]`（`live_observation` / `archived_observation` / `derived_event` / `coverage_gap`）、`firstRecordedAt`、`note` |
+| GET | `/api/brands/:brandId/history-coverage` | `projectId` | `dimensions[]`（`earliestAvailableAt`/`lastSuccessAt`/`coveredRanges`/`partialRanges`/`unknownRanges`/`evidenceCount`/`snapshotCount`）、`backfill`（最近任务） |
+| POST | `/api/brands/:brandId/history-backfill` | body `projectId`、`capability`、`from`、`to` | `202 {jobId, deduped}`；不支持的能力 `400 CAPABILITY_NOT_SUPPORTED`（不排队） |
+| GET | `/api/history-backfill/:jobId` | — | `status`/`progress`/`counts`/`coverageSummary`/`failureClass`/`errorUserText` |
+
+约束（与 §5 契约变更流程一致）：
+
+- `factTypes` 白名单：`product.price`、`product.currency`、`product.available`、`product.title`、`catalog.product_count`、`catalog.price_min`、`catalog.price_max`、`catalog.price_median`；未知类型返回 `400 INVALID_FACT_TYPE`。
+- 第一阶段 `capability` 仅接受 `shopify_catalog`。
+- 分页为游标式（`cursor` 不透明串），不提供 offset 分页。

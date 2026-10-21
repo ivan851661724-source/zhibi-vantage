@@ -53,6 +53,71 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
       </div>
     );
   }
+  // ---------- Wave 1：四个新维度各自的摘要形状（不复用 Shopify 价格卡模板） ----------
+  if (summary.kind === 'social_videos') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'social_videos' }>;
+    return (
+      <div className="ds-card-sum">
+        公开视频 <b className="num">{s.videoCount}</b> 个
+        {s.channelTitle ? <> · 频道 {s.channelTitle}</> : null}
+        {s.periodStart && s.periodEnd ? <> · 期间 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="公开来源观察：YouTube Data API 实际返回的公开字段">公开来源观察</span>
+        {s.matchReasons && s.matchReasons.length ? <span className="ds-mm-note">归属依据：{s.matchReasons.join('；')}</span> : null}
+      </div>
+    );
+  }
+  if (summary.kind === 'trend_series') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'trend_series' }>;
+    return (
+      <div className="ds-card-sum">
+        趋势点 <b className="num">{s.pointCount}</b> 个
+        {s.keyword ? <> · 关键词 {s.keyword}</> : null}
+        {s.region ? <> · 地区 {s.region}</> : null}
+        {s.periodStart && s.periodEnd ? <> · 期间 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="数据服务估算：非平台原始事实">数据服务估算</span>
+      </div>
+    );
+  }
+  if (summary.kind === 'ad_creatives') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'ad_creatives' }>;
+    // 覆盖国家数只能来自后端唯一事实源（summary.coverageCountryCount），前端不写死数字
+    const cc = s.coverageCountryCount;
+    const scopeText = cc != null
+      ? `覆盖范围受 TikTok 官方支持国家限制（当前 ${cc} 国，不含美国）`
+      : '覆盖范围受 TikTok 官方支持国家限制（不含美国）';
+    const ooc = s.coverageState === 'out_of_coverage';
+    return (
+      <div className="ds-card-sum">
+        {ooc ? (
+          <>该维度在品牌主要市场（{s.brandMarket || '未知'}）无公开来源覆盖</>
+        ) : s.creativeCount > 0 ? (
+          <>公开广告素材 <b className="num">{s.creativeCount}</b> 条</>
+        ) : (
+          <>官方覆盖范围内本轮未观察到结果</>
+        )}
+        <span className="ds-mm-tag" title="平台公开披露：TikTok Commercial Content API 官方公开数据">平台公开披露</span>
+        {ooc ? (
+          <span className="ds-mm-note ds-mm-warn">
+            该公开来源当前无覆盖：TikTok 官方支持国家不含 {s.brandMarket || '该市场'}；零结果不代表该市场没有广告
+          </span>
+        ) : null}
+        {s.periodStart && s.periodEnd ? <> · 投放窗口 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-note">{scopeText}；未覆盖国家不代表没有广告</span>
+        <span className="ds-mm-note">广告花费 / 获客成本 / ROI / 转化率 / GMV 当前公开来源无法直接观测</span>
+      </div>
+    );
+  }
+  if (summary.kind === 'reviews_digest') {
+    const s = summary as Extract<SurfaceSummary, { kind: 'reviews_digest' }>;
+    return (
+      <div className="ds-card-sum">
+        评论样本 <b className="num">{s.reviewCount}</b> 条 · 来源页面 <b className="num">{s.sourceCount}</b> 个
+        {s.periodStart && s.periodEnd ? <> · 采集范围 {s.periodStart} ~ {s.periodEnd}</> : null}
+        <span className="ds-mm-tag" title="公开来源观察：通过 robots 与归属校验的公开页面">公开来源观察</span>
+        {s.sampleNote ? <span className="ds-mm-note">{s.sampleNote}</span> : null}
+      </div>
+    );
+  }
   // 未知 kind：诚实降级为通用键值（不假装看得懂，也不编数）
   return (
     <div className="ds-card-sum ds-card-sum-unknown">
@@ -62,10 +127,11 @@ function SummaryView({ summary }: { summary: SurfaceSummary }) {
 }
 
 export function DimensionCard({
-  dim, competitorId, busy, onRefresh, onOpenEvidence,
+  dim, competitorId, projectId, busy, onRefresh, onOpenEvidence,
 }: {
   dim: SurfaceDimension;
   competitorId: string;
+  projectId?: string;
   busy: boolean;
   onRefresh: (capability: string) => void;
   onOpenEvidence: (refs: SurfaceEvidenceRef[]) => void;
@@ -97,7 +163,17 @@ export function DimensionCard({
         </div>
       ) : null))}
       {dim.surfaceState === 'unsupported' && dim.reasonText ? <p className="ds-card-note">{dim.reasonText}</p> : null}
+      {/* P0-2 整改 r2：pending_config 用户侧口径「数据服务暂不可用」（reasonText 后端下发） */}
+      {dim.surfaceState === 'pending_config' && dim.reasonText ? <p className="ds-card-note ds-note-config">{dim.reasonText}</p> : null}
       {dim.surfaceState === 'empty' ? <p className="ds-card-note">该维度受支持但还未采集过数据，点「刷新数据」开始第一次采集。</p> : null}
+      {/* SC-06 r2：能力已实现但尚无真实成功采集的项单列——不混进已采集结果、不显示观察数 */}
+      {dim.pendingVerification && dim.pendingVerification.length ? (
+        <ul className="ds-gaps">
+          {dim.pendingVerification.map(pv => (
+            <li key={'pv_' + pv.code}><span aria-hidden>◌</span> {pv.displayName}：{pv.stateText || '待验证（能力已实现，尚未完成真实采集）'}</li>
+          ))}
+        </ul>
+      ) : null}
       {dim.surfaceState === 'loading' ? <p className="ds-card-note">正在采集该维度数据，完成后自动更新（无需重复点击）。</p> : null}
 
       {/* 最近更新失败 + 旧数据保留（整改 §三.2：失败不吞旧，明确告知） */}
@@ -142,7 +218,7 @@ export function DimensionCard({
           </button>
         ) : null}
       </div>
-      {showObs ? <ObservationList competitorId={competitorId} dimension={dim.code} /> : null}
+      {showObs ? <ObservationList competitorId={competitorId} projectId={projectId} dimension={dim.code} /> : null}
     </div>
   );
 }

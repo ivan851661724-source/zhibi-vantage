@@ -2,7 +2,8 @@
 // 只暴露用户可见字段：不含服务器路径、内部错误码、栈、密钥、原始 payload 路径。
 import { apiGet, apiPost } from '@/lib/api';
 
-export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'unknown';
+// SC-06 r2：pending_verification = 能力已实现但尚无真实成功采集（不得显示「已采集」）
+export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'pending_config' | 'pending_verification' | 'unknown';
 
 export interface CoverageDimension {
   code: string;
@@ -13,6 +14,8 @@ export interface CoverageDimension {
   lastObservedAt: string | null;
   reason?: string | null;
   note?: string | null;
+  // SC-05 起后端 buildCoverage 返回多条备注（notes[]）；note 为旧字段兼容
+  notes?: string[] | null;
 }
 export interface CoverageSummary {
   totalDimensions: number;
@@ -36,9 +39,27 @@ export interface BrandListItem {
   competitorId: string | null;
   coverageSummary: CoverageSummary;
   coverageDimensions: CoverageDimension[];
+  // SC-06：竞品数据库首页新增——官网确认状态与时间积累起点
+  officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; lastCollectedAt?: string | null } | null;
+  // SC-06 r2：官网公开商品（非目录接口）——未验证时 status='not_collected' 且带说明
+  publicProducts?: PublicProductsStatus | null;
+  firstObservedAt?: string | null;
   lastObservedAt: string | null;
   lastChange: { at: string; kind: string; kindText: string; title: string | null } | null;
   gaps: { code: string; displayName: string; state: CoverState; stateText: string }[];
+}
+
+export interface PublicProductsStatus {
+  status: 'verified' | 'unavailable' | 'not_collected';
+  statusText: string;
+  maturity?: string | null;
+  lastCollectedAt?: string | null;
+  lastAttemptAt?: string | null;
+  observedCount?: number | null;
+  discoveryPath?: string | null;
+  sampleNote?: string | null;
+  failureText?: string | null;
+  note?: string | null;
 }
 
 export interface ProductObservation {
@@ -93,15 +114,79 @@ export interface IntelItem {
 }
 
 // r4.10：项目级建设中维度（未接入维度不再作为情报事件出现在 items 中）
+// P0-2 整改 r2：pending_config（实现完成未验证；用户侧「数据服务暂不可用」）≠ not_integrated
 export interface ConstructionDimension {
   code: string;
   displayName: string;
-  state: 'not_integrated';
+  state: 'pending_config' | 'not_integrated';
   message: string;
+  configKeys?: string[];
+}
+
+// SC-05：情报库「时序变化」独立字段（derived_timeline_events 投影，与采集观察不混排）
+// SC-06 三：情报库「用户声音与公开评论」项目级投影（统一读模型 voice-unified.js）
+export interface VoiceChangeItem {
+  brandId: string;
+  brandName: string | null;
+  status: 'sufficient' | 'insufficient';
+  sampleSize: number;
+  sourceCount: number;
+  // SC-06 r2：统一事实链是否够格进入满意度机会判断（缺依据时明确写出原因）
+  opportunityEligible?: boolean;
+  opportunityReason?: string | null;
+  opportunityReasonText?: string | null;
+  recentItems: { title: string | null; sourceUrl: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null; evidenceId: string | null; snapshotId: string | null; polarity?: string | null; sentimentBasis?: string | null }[];
+}
+
+export interface MemoryEventItem {
+  id: string;
+  brandId: string | null;
+  brandName: string | null;
+  competitorId: string | null;
+  entityId: string;
+  entityName: string | null;
+  eventType: string;
+  eventText: string;
+  summary: string | null;
+  fromValue: number | null;
+  toValue: number | null;
+  currency: string | null;
+  unit: string | null;
+  at: string;
+  atBasis: string;
+  timePrecision: string;
+  timePrecisionText: string;
+  sourceKind: 'derived_event';
+  sourceKindText: string;
+  evidenceIds: string[];
+  snapshotIds: string[];
+  derivedFromFactIds: string[];
+  link?: { brandId: string; tab: string; from: string; to: string } | null;
+}
+
+export interface OpportunityHistoryBasis {
+  brandsWithHistory: number;
+  factCount: number;
+  comparableCount?: number;
+  earliestAvailableAt: string | null;
+  latestObservedAt: string | null;
+  availableHistoryDays: number;
+  enoughForTrend: boolean;
+  note: string;
+}
+
+export interface OpportunityVoiceBasis {
+  collected: number;
+  qualified: number;
+  brandsWithQualifiedVoice?: number;
+  gate: 'ok' | 'no_public_reviews' | 'no_evidence_backed_polarity' | 'insufficient_sample' | string;
+  gateText?: string;
+  sampleNote?: string;
 }
 
 export interface OpportunityView {
-  status: 'ok' | 'insufficient';
+  // insufficient_voice = 评论已采集但没有带依据的正负分类 → 不画满意度散点
+  status: 'ok' | 'insufficient' | 'insufficient_voice';
   statusText: string;
   items: {
     id: string | null; theme: string | null; level?: string | null; basis?: unknown;
@@ -109,7 +194,11 @@ export interface OpportunityView {
     caveats?: string[]; status?: string; note?: string;
   }[];
   sample: { brandCount: number; brandsWithData: number; required?: number };
-  dimensionBasis?: { integrated: string[]; notIntegrated: string[]; covered: string[] };
+  dimensionBasis?: { integrated: string[]; pendingVerification?: string[]; pendingConfig?: string[]; notIntegrated: string[]; covered: string[] };
+  historyBasis?: OpportunityHistoryBasis | null; // SC-05：可用历史跨度 + 本次使用的时间范围
+  // SC-06 r2：统一评论事实链的资格状态 + 下一步建议（缺合格输入时如实说明）
+  voiceBasis?: OpportunityVoiceBasis | null;
+  nextSteps?: string[];
   limits: string[];
   note?: string | null;
 }
@@ -147,12 +236,48 @@ export interface ReportDetail extends ReportListItem {
     coverage?: { brandId: string; name: string; summary: CoverageSummary }[];
     gaps?: { brandId: string; displayName?: string; dimension?: string; kind?: string; text?: string }[];
     opportunities?: unknown[];
+    // SC-05：冻结的时序事实基线（事实 id / 版本 id / 双时间 / 证据引用）
+    memoryBasis?: {
+      from?: string | null;
+      to?: string | null;
+      factCount?: number;
+      facts?: {
+        factId: string; versionId: string; entityId: string; brandId?: string | null;
+        factType: string; value: string | number | null; currency?: string | null;
+        sourceKind?: string; timePrecision?: string;
+        effectiveAt?: string | null; observedAt?: string | null; at?: string; atBasis?: string;
+        evidenceIds?: string[]; snapshotIds?: string[];
+      }[];
+      note?: string;
+    } | null;
   } | null;
   gaps: { brandId: string; displayName?: string; dimension?: string; kind?: string; text?: string }[] | null;
   opportunities: unknown[];
   errorText?: string | null;
   citations: ReportCitation[];
   jobs: { jobId: string; reportId: string; status: string; retry: number; attempts: number; lastError?: string | null }[];
+}
+
+// SC-06 三：「用户声音与公开评论」统一读模型（后端 voice-unified.js 投影）
+export interface UnifiedVoice {
+  version: string;
+  title: string;
+  status: 'sufficient' | 'insufficient';
+  insufficientText: string;
+  verified: {
+    items: {
+      kind: string; title: string | null; snippet: string | null; sourceUrl: string | null;
+      rating: number | null; reviewCount: number | null; observedAt: string | null;
+      brandId: string | null; competitorId?: string | null; evidenceId: string | null; snapshotId: string | null;
+      polarity: string | null; sentiment: string | null; sentimentBasis: string | null; sentimentBasisNote?: string | null;
+    }[];
+    summary: {
+      sampleSize: number; sourceCount: number;
+      periodStart: string | null; periodEnd: string | null;
+      measurementMethod: string; sampleNote: string; limitations: string[];
+    } | null;
+  };
+  legacy: { items: { kind: string; platform: string | null; text: string | null; url: string | null; date: string | null; brandId: string | null; note: string | null }[]; note: string | null };
 }
 
 export interface BrandDetail {
@@ -163,6 +288,12 @@ export interface BrandDetail {
   };
   links: { linkId: string; projectId: string; competitorRef: string | null }[];
   coverage: Coverage;
+  // SC-06 二：官网确认状态（confirmed/unavailable/not_collected，非「官网不支持」语义）
+  officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
+  // SC-06 r2：官网公开商品采集状态（与官方资料分离；未验证不写「已采集」）
+  publicProducts?: PublicProductsStatus | null;
+  // SC-06 三：统一「用户声音与公开评论」读模型
+  unifiedVoice?: UnifiedVoice | null;
   products: {
     observations: ProductObservation[];
     summary: Record<string, unknown> | null;
@@ -203,7 +334,7 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
   if (params.type) q.set('type', params.type);
   if (params.from) q.set('from', params.from);
   if (params.to) q.set('to', params.to);
-  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
+  return apiGet<{ projectId: string; items: IntelItem[]; count: number; constructionDimensions?: ConstructionDimension[]; memoryEvents?: MemoryEventItem[]; voiceChanges?: VoiceChangeItem[]; filters: Record<string, string | null>; legend: Record<string, Record<string, string>> }>(
     `/api/intelligence?${q.toString()}`, signal);
 }
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {
@@ -242,6 +373,7 @@ export const COVER_STATE_TEXT: Record<string, string> = {
   loading: '采集中',
   failed: '最近采集失败，尚无可展示数据',
   unsupported: '未接入',
+  pending_config: '数据服务暂不可用',
   unknown: '尚未采集',
 };
 

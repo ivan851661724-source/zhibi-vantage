@@ -364,4 +364,7 @@ try { require('./services/collect-jobs.js').startWorker(); } catch (e) { console
 // SC-04：调研报告生成常驻 worker（持久化 report_jobs：reclaim + 认领 + 执行）。
 // 重启后 pending/过期 running 自动恢复执行或诚实失败；生成只由用户显式触发。
 try { require('./services/report-service.js').startWorker(); } catch (e) { console.error('[report-service] worker 启动失败（忽略，可在报告列表重试）:', e.message); }
+// SC-05：历史回补常驻 worker（history_backfill_jobs：reclaim + 认领 + CDX 发现 + 存档取回）。
+// 重启后 pending / 租约过期的 running 自动恢复；attempts 超限 → dead，不永久 running。
+try { require('./services/backfill-service.js').startWorker(); } catch (e) { console.error('[backfill-service] worker 启动失败（忽略，可在品牌档案重试）:', e.message); }
 startServer(PORT0);

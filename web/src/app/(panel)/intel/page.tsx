@@ -4,6 +4,7 @@
 // 情报卡（证据入口/纠错入口）；无证据的条目永不使用「已核实」样式。
 // 空状态三分：尚无采集结果 / 当前筛选无结果 / 资料不足。
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { FieldCorrectModal } from '@/components/field-correct';
@@ -11,7 +12,7 @@ import { IntelProfile } from '@/components/intel-profile';
 import { EmptyState } from '@/components/core-ui';
 import type { Competitor } from '@/types/state';
 import { IntelList } from '@/components/brand/coverage-panel';
-import { fetchIntelligence, type ConstructionDimension, type IntelItem } from '@/lib/core-api';
+import { fetchIntelligence, type ConstructionDimension, type IntelItem, type MemoryEventItem, type VoiceChangeItem } from '@/lib/core-api';
 import { intelSummary } from '@/lib/core-logic';
 
 const INTEL_TYPES: { value: string; label: string }[] = [
@@ -44,6 +45,10 @@ function IntelInbox({ projectId }: { projectId: string }) {
   const [fcItem, setFcItem] = useState<IntelItem | null>(null);
   // r4.10：项目级建设中维度（后端独立字段，不再混入情报列表）
   const [construction, setConstruction] = useState<ConstructionDimension[]>([]);
+  // SC-05：项目级时序变化事件（后端独立字段；与采集观察分开呈现，不把推导当直接观察）
+  const [memoryEvents, setMemoryEvents] = useState<MemoryEventItem[]>([]);
+  // SC-06 三：评论变化统一读「用户声音与公开评论」读模型（一套口径，独立区块）
+  const [voiceChanges, setVoiceChanges] = useState<VoiceChangeItem[]>([]);
 
   // r3 修复：跨项目切换时重置全部筛选。brandId/type/status/from/to 都是原项目的
   // 筛选上下文；组件在同路由 query 变化时不会重挂载，若不重置会残留原项目的
@@ -66,7 +71,7 @@ function IntelInbox({ projectId }: { projectId: string }) {
     let alive = true;
     const ctrl = new AbortController();
     fetchIntelligence({ projectId, brandId: brandId || undefined, type: type || undefined, from: from || undefined, to: to || undefined }, ctrl.signal)
-      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setErr(null); } })
+      .then(r => { if (alive) { setApiItems(r.items || []); setConstruction(r.constructionDimensions || []); setMemoryEvents(r.memoryEvents || []); setVoiceChanges(r.voiceChanges || []); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId, brandId, type, from, to]);
@@ -114,11 +119,83 @@ function IntelInbox({ projectId }: { projectId: string }) {
 
       {err ? <p className="core-err">{err}</p> : null}
 
-      {!apiItems.length && !hasFilter ? (
+      {/* SC-05：时序变化（derived_timeline_events 投影）——独立区块，不与采集观察混排；
+          每条都能回到品牌档案的对应时间与证据。 */}
+      {memoryEvents.length ? (
+        <section className="core-mem-events">
+          <h3>时序变化（系统推导）</h3>
+          <p className="hint">由已验证的时序事实确定性计算得出，不是新的来源；点击可打开品牌档案中对应时间段与证据。</p>
+          <ul className="core-mem-event-list">
+            {memoryEvents.slice(0, 40).map(ev => (
+              <li key={ev.id}>
+                <div className="core-mem-event-top">
+                  <span className="mem-time">{String(ev.at).slice(0, 10)}</span>
+                  <span className="mem-badge mem-badge-derived-event">{ev.sourceKindText}</span>
+                  <span className="core-mem-event-brand">{ev.brandName || '—'}</span>
+                  <span className="core-mem-event-text">{ev.eventText}{ev.entityName ? '：' + ev.entityName : ''}</span>
+                  <span className="mem-precision">{ev.timePrecisionText}</span>
+                </div>
+                {ev.summary ? <div className="core-mem-event-sum">{ev.summary}</div> : null}
+                {ev.link ? (
+                  <Link className="core-mem-event-link" href={`/brands/${encodeURIComponent(ev.link.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=products`}>
+                    在品牌档案查看 →
+                  </Link>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {voiceChanges.length ? (
+        <section className="core-voice-changes">
+          <h3>用户声音与公开评论（统一读模型）</h3>
+          <p className="hint">
+            只有一套口径：公开评论页采集（来源 URL + 快照与证据引用 + 观察时间）。
+            样本不足的品牌只列状态，不做「满意/不满意」群体结论；已采集但缺带依据的正负分类时，
+            明确写「尚不足以形成满意度机会判断」，不拿历史主题凑成新结论。
+          </p>
+          <ul className="core-voice-changes-list">
+            {voiceChanges.map(v => (
+              <li key={v.brandId}>
+                <div className="core-voice-changes-top">
+                  <Link href={`/brands/${encodeURIComponent(v.brandId)}?projectId=${encodeURIComponent(projectId)}&tab=voice`}>{v.brandName || v.brandId}</Link>
+                  {v.status === 'sufficient' ? (
+                    <span>样本 {v.sampleSize} 条 · {v.sourceCount} 个来源页</span>
+                  ) : (
+                    <span className="hint">资料不足，暂不形成群体结论。</span>
+                  )}
+                </div>
+                {/* SC-06 r2：机会资格与样本充分性分开说——采到评论 ≠ 能形成满意度判断 */}
+                {v.opportunityEligible === false && v.opportunityReasonText ? (
+                  <p className="hint">{v.opportunityReasonText}</p>
+                ) : null}
+                {v.recentItems.length ? (
+                  <ul className="core-voice-changes-items">
+                    {v.recentItems.map((it, i) => (
+                      <li key={i}>
+                        {it.sourceUrl ? <a href={it.sourceUrl} target="_blank" rel="noopener noreferrer nofollow">{it.title || it.sourceUrl}</a> : (it.title || '公开评论页')}
+                        {typeof it.rating === 'number' ? <span> · 评分 {it.rating}</span> : null}
+                        {typeof it.reviewCount === 'number' ? <span> · {it.reviewCount} 条评价</span> : null}
+                        {it.polarity ? <span> · {it.polarity === 'pos' ? '正面' : '负面'}（依据 {it.sentimentBasis || '—'}）</span> : null}
+                        <span className="hint">（观察 {String(it.observedAt || '').slice(0, 10) || '—'}）</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {!apiItems.length && !memoryEvents.length && !hasFilter ? (
         <EmptyState
           title="尚无采集结果"
           sub="该项目还没有可展示的情报。采集由你的操作触发；完成后，可核实的变化会出现在这里。"
         />
+      ) : !shown.length && memoryEvents.length ? (
+        <p className="hint">采集观察暂无条目；上方「时序变化（系统推导）」来自已核验的时序事实，单独呈现，不计入上面的三个计数。</p>
       ) : !shown.length ? (
         <EmptyState
           title="当前筛选没有结果"
@@ -143,16 +220,18 @@ function IntelInbox({ projectId }: { projectId: string }) {
 
       {/* r4.10：数据覆盖与建设中维度——项目级单一去重区域（页面最底部）。
           未接入维度不是情报事件：无时间戳、无来源、无证据、无状态徽章、无 0 值；
-          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。 */}
+          每维度恰一条，来自后端 constructionDimensions 投影（前端不自建清单）。
+          P0-2 整改 r2：用户侧只有四种口径——数据服务暂不可用 / 正在验证数据服务 /
+          本轮未观察到结果 / 最近采集失败，可稍后重试；凭据细节仅管理员接口可见。 */}
       {construction.length ? (
         <details className="core-building core-building-fold">
           <summary>数据覆盖与建设中维度（{construction.length}）</summary>
-          <p className="hint">以下维度尚未接入，与具体品牌无关：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。</p>
+          <p className="hint">以下维度当前不生成数据、估算或结论；数据服务可用后这里会展示采集状态与来源。</p>
           <ul className="core-building-list">
             {construction.map(d => (
               <li key={d.code}>
                 <span className="core-building-name">{d.displayName}</span>
-                <span className="core-building-state">尚未接入</span>
+                <span className="core-building-state cfg">{d.state === 'pending_config' ? '数据服务暂不可用' : '尚未接入'}</span>
                 <span className="core-building-msg">{d.message}</span>
               </li>
             ))}

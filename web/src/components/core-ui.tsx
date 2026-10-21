@@ -100,19 +100,23 @@ export function EmptyState({ title, sub, action }: { title: string; sub?: string
   );
 }
 
-// ---------- 建设中维度区域（品牌详情 / 机会页共用；四项未接入维度统一在此表达） ----------
+// ---------- 建设中维度区域（品牌详情 / 机会页 / 情报库共用） ----------
+// 覆盖语义（P0-2 整改 r2）：unsupported = 未接入；pending_config = 数据服务暂不可用。
+// SC-06 r2：pending_verification = 能力已实现但尚无真实成功采集（待验证，不显示「已采集」）。
+// 两者都只显示覆盖状态本身——不生成 0 值、空图、模拟图表、时间戳或占位样本；
+// 凭据/环境变量等技术细节只在管理员健康接口可见，不进用户页面。
 export function BuildingDims({ dimensions, note }: { dimensions: CoverageDimension[]; note?: string }) {
-  const pending = (dimensions || []).filter((d) => d.state === 'unsupported');
+  const pending = (dimensions || []).filter((d) => d.state === 'unsupported' || d.state === 'pending_config' || d.state === 'pending_verification');
   if (!pending.length) return null;
   return (
     <div className="core-building">
       <div className="core-building-head">数据覆盖与建设中维度</div>
-      <p className="hint">{note || '以下维度尚未接入：当前不生成数据、估算或结论；接入后这里会展示采集状态与来源。'}</p>
+      <p className="hint">{note || '以下维度当前不生成数据、估算或结论；数据服务可用后这里会展示采集状态与来源。'}</p>
       <ul className="core-building-list">
         {pending.map((d) => (
           <li key={d.code}>
             <span className="core-building-name">{d.displayName}</span>
-            <span className="core-building-state">尚未接入</span>
+            <span className="core-building-state">{d.stateText || (d.state === 'pending_config' ? '数据服务暂不可用' : (d.state === 'pending_verification' ? '待验证' : '尚未接入'))}</span>
             <span className="core-building-meta">最近观察：—</span>
             <span className="core-building-meta">来源：未接入</span>
             <span className="core-building-meta">刷新：不可用</span>

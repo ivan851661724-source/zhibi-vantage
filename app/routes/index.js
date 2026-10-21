@@ -25,6 +25,7 @@ const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：�
 const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 const DataSurfaceH = require('./handlers/data-surface.js'); // 五维数据面（SC-02）：overview/dimension/refresh/admin matrix
 const CoreH = require('./handlers/core-product.js'); // 核心产品主闭环（SC-04）：竞品库/情报库/机会/报告
+const MemH = require('./handlers/memory.js'); // Competitive Memory（SC-05）：时序事实/时间线/覆盖/回补
 
 function registerAll() {
   for (const method of ['GET','POST','PUT']) registry.register(method, '/api/monitoring/workspaces', 'tenant', MonitoringH.monitoring);
@@ -126,13 +127,18 @@ function registerAll() {
   // —— 核心产品主闭环（SC-04）：竞品库 → 情报库 → 机会视图 → 调研报告 ——
   registry.register('GET', '/api/brands', 'tenant', CoreH.brandsList);
   registry.register('GET', '/api/brands/:brandId', 'tenant', CoreH.brandDetail);
-  registry.register('GET', '/api/brands/:brandId/timeline', 'tenant', CoreH.brandTimeline);
+  registry.register('GET', '/api/brands/:brandId/timeline', 'tenant', MemH.timeline);
   registry.register('GET', '/api/brands/:brandId/coverage', 'tenant', CoreH.brandCoverage);
   registry.register('GET', '/api/intelligence', 'tenant', CoreH.intelligence);
   registry.register('GET', '/api/opportunities', 'tenant', CoreH.opportunities);
   registry.register('GET', '/api/reports', 'tenant', CoreH.reportsList);
   registry.register('POST', '/api/reports', 'tenant', CoreH.reportsCreate);
   registry.register('GET', '/api/reports/:reportId', 'tenant', CoreH.reportDetail);
+  // —— Competitive Memory（SC-05）：时序事实 / 时间线 / 覆盖 / 历史回补 ——
+  registry.register('GET', '/api/brands/:brandId/memory', 'tenant', MemH.memoryView);
+  registry.register('GET', '/api/brands/:brandId/history-coverage', 'tenant', MemH.historyCoverage);
+  registry.register('POST', '/api/brands/:brandId/history-backfill', 'tenant', MemH.historyBackfillCreate);
+  registry.register('GET', '/api/history-backfill/:jobId', 'tenant', MemH.backfillJob);
   registry.register('GET', '/api/admin/data-surface/capabilities', 'admin', DataSurfaceH.adminCapabilities);
   // R5.2 候补名单（public，匿名可提交）+ R7.2 真实数据示例（闸门在 handler 内）
   registry.register('POST', '/api/waitlist', 'public', SystemH.waitlist);

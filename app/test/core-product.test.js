@@ -82,19 +82,25 @@ function pageBody(ids) {
     assert.ok(!/未发现数据/.test(txt), '不得出现「未发现数据」表述');
   });
 
-  await t('C2 未接入维度：广告/社媒/评论/搜索显式未接入，零伪数据', async () => {
+  await t('C2 建设中维度（r2 新语义）：pending_config 用户侧口径「数据服务暂不可用」，凭据变量名零泄漏', async () => {
+    // r2 规格变更：实现态与运行态分离——用户投影只显示四种口径之一；
+    // configKeys 从用户投影移除（仅管理员健康接口可见）
     const v = BrandSvc.listBrandViews(TID_A, PID_A)[0];
-    const notIntegrated = v.coverageSummary.notIntegrated;
+    const pending = v.coverageSummary.pendingConfig;
     for (const code of ['social_content', 'ad_campaigns', 'reviews_reputation', 'search_interest']) {
-      assert.ok(notIntegrated.includes(code), code + ' 必须列为未接入');
+      assert.ok(pending.includes(code), code + ' 必须列为 pending_config');
       const d = v.coverageDimensions.find(x => x.code === code);
-      assert.strictEqual(d.state, 'unsupported');
-      assert.strictEqual(d.stateText, '未接入');
-      assert.ok(/尚未接入/.test(d.note || ''), 'note 明示未接入');
+      assert.strictEqual(d.state, 'pending_config');
+      assert.strictEqual(d.stateText, '数据服务暂不可用');
+      assert.ok(/数据服务暂不可用/.test(d.note || ''), 'note 用户侧口径');
+      assert.strictEqual('configKeys' in d, false, code + ' configKeys 不得进用户投影');
     }
-    // 未接入维度不产生任何数值/图表数据
+    // 用户投影整体零凭据变量名泄漏
+    const all = JSON.stringify(v);
+    assert.strictEqual(/YOUTUBE_API_KEY|DATAFORSEO_LOGIN|DATAFORSEO_PASSWORD|TIKTOK_CLIENT_KEY|TIKTOK_CLIENT_SECRET/.test(all), false, '品牌视图无凭据变量名');
+    // 建设中维度不产生任何数值/图表数据
     for (const d of v.coverageDimensions) {
-      if (d.state === 'unsupported') assert.strictEqual(d.lastObservedAt, null, '未接入不得有观察时间');
+      if (d.state === 'pending_config') assert.strictEqual(d.lastObservedAt, null, '建设中维度不得有观察时间');
     }
   });
 
@@ -153,7 +159,7 @@ function pageBody(ids) {
     const gaps = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, type: 'gap' });
     assert.strictEqual(gaps.length, 0, '未接入维度不得生成情报事件');
     for (const i of all) assert.ok(!(i.title || '').includes('：未接入'), '无「XX：未接入」噪音卡片');
-    const cd = BrandSvc.constructionDimensions();
+    const cd = BrandSvc.constructionDimensions(TID_A, PID_A);
     assert.strictEqual(cd.length, 4, '建设中维度恰 4 条（独立字段）');
     // 按时间筛选
     const future = BrandSvc.listIntelligence(TID_A, { projectId: PID_A, from: new Date(Date.now() + 86400000).toISOString() });
@@ -168,7 +174,7 @@ function pageBody(ids) {
     const v = ReportSvc.buildOpportunities(TID_A, PID_A);
     assert.strictEqual(v.status, 'insufficient', '单品牌样本不足');
     assert.ok(/资料不足/.test(v.statusText));
-    assert.ok(v.limits.some(l => /未接入/.test(l)), '限制含未接入维度声明');
+    assert.ok(v.limits.some(l => /需要系统数据服务配置/.test(l)), '限制含需要系统数据服务配置声明（Wave 1）');
     assert.strictEqual(v.items.length, 0, '不得输出机会结论');
     // 补足样本：再加两个已采集品牌
     const st = BrandSvc.loadProjectState(TID_A, PID_A);
@@ -279,11 +285,25 @@ function pageBody(ids) {
     assert.ok(!/mock/i.test(src), 'brand-service 不得含 mock');
     const svc = fs.readFileSync(path.join(__dirname, '..', 'services', 'report-service.js'), 'utf8');
     assert.ok(!/mock/i.test(svc), 'report-service 不得含 mock');
-    // 未接入维度不得被标记为已实现
+    // Wave 1 语义：not_integrated 不得声明契约要件；pending_config 结构就绪
+    // （adapter/provider/configKeys/measurementMethod 必须显式），但禁止 ga
     for (const c of Registry.listCapabilities()) {
-      if (c.maturity !== 'ga') {
+      if (c.maturity === 'not_integrated') {
         assert.strictEqual(c.adapter, null, c.code + ' 未接入不得声明 adapter');
         assert.strictEqual(c.provider, null, c.code + ' 未接入不得声明 provider');
+      }
+      if (c.maturity === 'pending_config') {
+        assert.ok(c.adapter && c.provider, c.code + ' pending_config 必须声明 adapter/provider（结构就绪）');
+        assert.ok(Array.isArray(c.configKeys) && c.configKeys.length, c.code + ' pending_config 必须声明 configKeys');
+        assert.ok(c.measurementMethod, c.code + ' pending_config 必须声明 measurementMethod');
+        assert.notStrictEqual(c.maturity, 'ga', '未通过真实 staging 验证不得标 ga');
+      }
+      // SC-06 r2：待验证（无凭据公开来源、尚无真实成功采集）——结构就绪但不得宣称已接入
+      if (c.maturity === 'pending_verification') {
+        assert.ok(c.adapter && c.provider, c.code + ' pending_verification 必须声明 adapter/provider');
+        assert.ok(c.measurementMethod, c.code + ' pending_verification 必须声明 measurementMethod');
+        assert.strictEqual(c.requiresServerCredential, false, c.code + ' pending_verification 仅适用于无凭据公开来源');
+        assert.notStrictEqual(c.maturity, 'ga', '没有真实成功采集不得标 ga');
       }
     }
   });

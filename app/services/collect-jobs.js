@@ -26,6 +26,53 @@ const SurfaceStore = require('./surface-store.js');
 const Registry = require('./capability-registry.js');
 const Adapters = require('./source-adapter.js');
 
+// SC-05：采集成功后追加写入 Competitive Memory。
+// 🔴 只在「attempt 已落终态、Evidence/Snapshot 已齐备」之后调用——复用既有真值，
+//    **不二次抓取、不生成第二份原始快照**。Memory 失败不影响采集结果（如实记日志）。
+function memoryIngestAfterCollect(job, comp, raw, standardOut, fin) {
+  try {
+    if (!fin || !fin.attempt) return null;
+    const status = fin.attempt.status;
+    if (status !== 'success' && status !== 'partial') return null;
+    const evIds = Array.isArray(fin.attempt.evidenceIds) ? fin.attempt.evidenceIds : [];
+    const snapIds = Array.isArray(fin.attempt.snapshotIds) ? fin.attempt.snapshotIds : [];
+    if (!evIds.length || !snapIds.length) return null; // 无证据不入已核实历史
+    const r = raw || {};
+    const so = standardOut || {};
+    const items = Array.isArray(r.items) ? r.items : [];
+    if (!items.length) return null;
+    const summary = so.summary || (fin.attempt && fin.attempt.summary) || {};
+    const Memory = require('./competitive-memory.js');
+    const res = Memory.ingestCatalogObservation({
+      tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+      domain: Memory.domainOf(comp && comp.url),
+      brandName: (comp && comp.name) || null,
+      items,
+      summary,
+      snapshotIds: snapIds,
+      evidenceIds: evIds,
+      observedAt: fin.attempt.endedAt || new Date().toISOString(),
+      recordedAt: new Date().toISOString(),
+      sourceKind: 'live_observation',
+      timePrecision: 'captured_only',
+      effectiveAt: null,
+      parserVersion: so.parserVersion || (fin.attempt && fin.attempt.parserVersion) || Memory.MEMORY_PARSER_VERSION,
+      sourceUrl: so.sourceUrl || r.url || null,
+    });
+    try {
+      require('./logger.js').info('competitive_memory_ingest', {
+        competitorId: job.competitorId, capability: job.capability,
+        versions: res && res.versionsCreated, facts: res && res.factsCreated,
+        events: res && res.eventsCreated, skipped: res && res.skipped ? res.reason : null,
+      });
+    } catch (e2) {}
+    return res;
+  } catch (e) {
+    try { require('./logger.js').warn('competitive_memory_ingest_failed', { competitorId: job.competitorId, err: String(e && e.message || e).slice(0, 160) }); } catch (e2) {}
+    return null;
+  }
+}
+
 // CLAIM_TTL_MS：认领租期（heartbeat 每 25s 续租）。env ZB_COLLECT_CLAIM_TTL_MS
 // 可覆盖（确定性进程测试缩短租约窗口；生产默认 60s）。
 const CLAIM_TTL_MS = (() => {
@@ -177,6 +224,8 @@ let executor = null; // (job) => Promise<outcome>，测试专用
 function setExecutorForTest(fn) { executor = fn; }
 
 // 从项目档案解析竞品（worker 脱离请求上下文，走持久档案）
+// market 回退顺序与品牌读模型一致（brand-service 同步口径）：competitor.market → intent.regions[0]
+// ——覆盖判定需要品牌主要市场；缺失时保持 null（adapter 侧记为 unknown，不替平台下结论）。
 function loadCompetitor(job) {
   try {
     const { projFile } = require('../core/state-store.js');
@@ -184,7 +233,13 @@ function loadCompetitor(job) {
     if (!f || !fs.existsSync(f)) return null;
     const st = JSON.parse(fs.readFileSync(f, 'utf8'));
     if (!st || !Array.isArray(st.competitors)) return null;
-    return st.competitors.find(c => c && c.id === job.competitorId) || null;
+    const c = st.competitors.find(x => x && x.id === job.competitorId) || null;
+    if (!c) return null;
+    if (c.market == null) {
+      const region = st.intent && Array.isArray(st.intent.regions) ? st.intent.regions[0] : null;
+      if (region) return Object.assign({}, c, { market: region });
+    }
+    return c;
   } catch (e) { return null; }
 }
 
@@ -229,10 +284,34 @@ async function executeJob(job) {
     try { chk = adapter.supports ? adapter.supports(brandCtx) : chk; } catch (e) { chk = { supported: true }; }
     if (chk && chk.supported === false) { providerResults.push({ code, skipped: true, reason: chk.reasonCode || 'unsupported' }); return { skipped: true }; }
     let r = null;
-    try { r = await adapter.collect(runCtx); }
-    catch (e) {
+    // 🔴 SC-06 r2（评审 §三.3）：超时必须真正取消底层请求，不能只让 Promise.race 返回。
+    // AbortController 贯穿 adapter.collect → Net.fetchPage → safeRequestOnce(req.destroy)：
+    // 超时先 abort（网络请求被真正打断、socket 释放），再落终态；否则底层请求永久悬挂，
+    // worker 表面恢复、连接和字节流仍在漏。
+    const ctrl = new AbortController();
+    const providerCtx = Object.assign({}, runCtx, { signal: ctrl.signal });
+    const COLLECT_TIMEOUT_MS = Number(process.env.ZB_COLLECT_TIMEOUT_MS) || 10 * 60 * 1000;
+    let timer = null;
+    let timedOut = false;
+    try {
+      r = await Promise.race([
+        adapter.collect(providerCtx),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            try { ctrl.abort(new Error('collect_timeout')); } catch (e2) { /* abort 自身失败不改变结论 */ }
+            rej(new Error('collect_timeout'));
+          }, COLLECT_TIMEOUT_MS);
+        }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+    } catch (e) {
       if (e && e.fenced) return { fenced: true };
       executed.push(code);
+      if (timedOut || String(e && e.message || e) === 'collect_timeout') {
+        // 超时 → 如实按 timeout 分类落终态（不伪装成功、不写成「没数据」）
+        providerResults.push({ code, failed: true, errorClass: 'timeout', error: 'collect_timeout', aborted: true });
+        return { providerFailed: true, aborted: true };
+      }
       providerResults.push({ code, failed: true, error: String(e && e.message || e).slice(0, 120) });
       return { providerFailed: true };
     }
@@ -267,7 +346,13 @@ async function executeJob(job) {
       return null; // 视为该 provider 失败，链可继续
     }
     const fin = await Adapters.commitProviderTerminal(baseCtx, run, r.out, r.ident);
-    return Object.assign({ adapterCode: code, providerResults, externalCalls: executed.length }, fin);
+    // SC-05：终态 + Evidence 落账之后写入 Competitive Memory（复用本次快照，不重抓）
+    let memory = null;
+    if (fin && fin.attempt && (fin.attempt.status === 'success' || fin.attempt.status === 'partial')
+      && job.capability === 'shopify_catalog') {
+      memory = memoryIngestAfterCollect(job, comp, r.raw, r.out, fin);
+    }
+    return Object.assign({ adapterCode: code, providerResults, externalCalls: executed.length, memory }, fin);
   };
 
   if (chain.strategy === 'fanout') {
@@ -393,4 +478,5 @@ module.exports = {
   CLAIM_TTL_MS, HEARTBEAT_INTERVAL_MS, MAX_RETRY, RUNNING_LEASE_MS,
   getDb, enqueue, claim, heartbeat, finish, reclaimExpired, reconcileAbandoned,
   executeJob, tick, startWorker, stopWorker, setExecutorForTest, list, getJob,
+  loadCompetitor, // R4.14：暴露给回归测试（市场回退口径），不对外暴露 HTTP 面
 };

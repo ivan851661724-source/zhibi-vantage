@@ -109,12 +109,18 @@ function seedProjectRow(tenantId, projectId, track) {
   const brandB = (brandsB.json.brands || [])[0] || {};
   if (!brandB.brandId) throw new Error('项目B 品牌缺失');
 
+  // R4.15：TikTok 广告摘要的两个品牌（US=覆盖外 / DE=覆盖内），按名称从真实 brands API 取 id
+  const byName = {};
+  for (const b of (brands.json.brands || [])) byName[b.name] = b.brandId;
+
   // 5) seed.json
   const seed = {
     email: EMAIL, password: PASSWORD, token, tenantId,
     projectA: projA, projectB: projB, trackA: '潮玩手办出海', trackB: '家居香氛出海',
     brandA: brands.json.brands[0].brandId, brandAName: brands.json.brands[0].name,
     brandB: brandB.brandId, failedReportId: reportId,
+    brandAdUs: byName['PuppetLab'] || null,
+    brandAdDe: byName['ToyHive'] || null,
     generatedBy: final.generatedBy || null,
   };
   fs.mkdirSync(path.dirname(OUT), { recursive: true });

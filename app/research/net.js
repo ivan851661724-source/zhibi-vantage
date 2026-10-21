@@ -18,6 +18,7 @@ const { Buffer } = require('buffer');
 const Cache = require('../services/cache.js');
 const als = require('../core/als.js');
 const Snapshot = require('./source-snapshot.js');
+const UrlRedact = require('../lib/url-redact.js');
 const FetchGate = require('../services/fetch-gate.js');
 
 // 租户解析（P0-2，PR#2 评审）：显式参数 > ALS > null。fetch-page 缓存键按租户隔离——
@@ -36,7 +37,7 @@ const COLLECTOR_VERSION = Snapshot.COLLECTOR_VERSION;
 
 // 修正 9 兼容规则：快照落盘失败不得破坏 legacy 调研路径，但必须是可见运营错误（error 级，非静默）
 function loggerError(entry, e, url) {
-  try { require('../services/logger.js').error('source_snapshot_error', { entry, url: url || null, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
+  try { require('../services/logger.js').error('source_snapshot_error', { entry, url: url ? UrlRedact.redactUrlText(url) : null, error: String((e && e.message) || e).slice(0, 200) }); } catch (_) {}
 }
 
 function domainOf(url) {
@@ -96,19 +97,32 @@ async function assertPublicUrl(rawUrl) {
 async function fetchPage(url, timeoutMs, opts) {
   const o = opts || {};
   const tenant = tenantOf(o);
-  const ck = tenant ? 't:' + tenant + '|' + url : url; // P0-2：缓存键租户隔离
+  // SC-06：includeHtml 参与缓存键——先有普通缓存命中再要 HTML 会拿不到原始字节
+  const ck = (tenant ? 't:' + tenant + '|' : '') + (o.includeHtml ? 'h1|' : '') + url;
   const hit = Cache.get('fetch-page', ck);
   if (hit) return Snapshot.decorateCacheHit(hit);
   const fetchedAt = new Date().toISOString();
   // 旁路记录失败观察（00 §38：fetch_failed ≠ no_change）；业务返回值原样
   const recFail = (sourceStatus, errorCode, httpStatus, finalUrl, hops) => {
     try {
-      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: finalUrl || null, redirect_hops: hops || 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: UrlRedact.redactUrl(url), final_url: UrlRedact.redactUrl(finalUrl) || null, redirect_hops: hops || 0, http_status: httpStatus == null ? null : httpStatus, source_status: sourceStatus, error_code: errorCode || null, observed_at: null, fetched_at: fetchedAt, bodyBytes: null, trigger: o.trigger, tenantId: o.tenantId });
       return s.recorded ? s.meta.snapshot_id : undefined;
     } catch (e) { loggerError('fetchPage', e, url); return undefined; }
   };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || 12000);
+  // 🔴 SC-06 r2（评审 §三.3）：外部取消信号（worker attempt 超时）必须能打断本次抓取。
+  // 此前 fetchPage 只用自己的超时控制器，worker 侧 Promise.race 到点返回后，底层
+  // socket 仍在读字节——「超时」只是不再等待，不是真的取消。这里把外部 signal
+  // 级联到内部控制器，沿 safeRequestOnce → req.destroy 真正释放连接。
+  let onOuterAbort = null;
+  if (o.signal) {
+    if (o.signal.aborted) ctrl.abort();
+    else {
+      onOuterAbort = () => { try { ctrl.abort(); } catch (e2) { /* 忽略重复 abort */ } };
+      try { o.signal.addEventListener('abort', onOuterAbort, { once: true }); } catch (e2) { /* 非标准 signal：降级为仅自身超时 */ }
+    }
+  }
   let lastHost = null; // 网络异常（超时等）也计入同域失败熔断
   try {
     // 🔴 连接语义（复审 §一）：每跳 = safeRequestOnce（assertPublicUrl 先行 +
@@ -124,7 +138,10 @@ async function fetchPage(url, timeoutMs, opts) {
       if (gate.waitMs) await new Promise(r2 => setTimeout(r2, gate.waitMs));
       const robots = await FetchGate.robotsAllows(preU.origin, preU.pathname);
       if (robots === false) { FetchGate.recordResult(preU.hostname, true); return { ok: false, error: 'ROBOTS_DISALLOWED' }; }
-      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' } });
+      // Wave 1：受控自定义头（如 DataForSEO Basic auth）——仅合并进请求，
+      // 绝不进快照/日志/错误信息（凭据红线）；method 支持 JSON API POST。
+      const extraHeaders = (o.headers && typeof o.headers === 'object') ? o.headers : {};
+      res = await safeRequestOnce(current, { timeoutMs: timeoutMs || 12000, signal: ctrl.signal, method: o.method || 'GET', body: o.body != null ? o.body : undefined, headers: Object.assign({ 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.8' }, extraHeaders) });
       if (res.status >= 300 && res.status < 400 && res.headers && res.headers.location) {
         hops++;
         if (hops > 3) { const sid = recFail(Snapshot.SOURCE_STATUS.UNAVAILABLE, 'too_many_redirects', res.status, current, hops); return { ok: false, error: 'too_many_redirects', snapshotId: sid }; }
@@ -148,12 +165,15 @@ async function fetchPage(url, timeoutMs, opts) {
     let sid;
     let prov = { recorded: false };
     try {
-      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: url, final_url: current, redirect_hops: hops, http_status: res.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: resCt, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
+      const s = Snapshot.record({ capability: 'evidence_url', provider: 'generic_web_fetch', source_url: UrlRedact.redactUrl(url), final_url: UrlRedact.redactUrl(current), redirect_hops: hops, http_status: res.status, source_status: Snapshot.SOURCE_STATUS.SUCCESS, observed_at: observedAt, fetched_at: fetchedAt, bodyBytes: buf, contentType: resCt, source_updated_at: lastMod, trigger: o.trigger, tenantId: o.tenantId });
       if (s.recorded) { sid = s.meta.snapshot_id; prov = { recorded: true, source_snapshot_id: s.meta.snapshot_id, observed_at: s.meta.observed_at, source_status: s.meta.source_status, content_hash: s.meta.content_hash, fetched_at: s.meta.fetched_at }; }
       else prov = s;
     } catch (e) { loggerError('fetchPage', e, url); }
     const html = buf.toString('utf8');
+    // SC-06：需要原始 HTML 解析（JSON-LD/canonical 大小写敏感）的调用方显式
+    // 声明 includeHtml；默认不返回（控制既有调用方的内存足迹）。上限 2MB。
     const out = { ok: true, url: current || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
+    if (o.includeHtml) out.html = html.slice(0, 2 * 1024 * 1024);
     Cache.set('fetch-page', ck, out);
     return out;
   } catch (e) {
@@ -163,7 +183,12 @@ async function fetchPage(url, timeoutMs, opts) {
     try { if (lastHost) FetchGate.recordResult(lastHost, false); } catch (e2) { /* 熔断记账失败不影响返回 */ }
     return { ok: false, error: String(e && e.message || e), snapshotId: sid };
   }
-  finally { clearTimeout(timer); }
+  finally {
+    clearTimeout(timer);
+    if (onOuterAbort && o.signal && o.signal.removeEventListener) {
+      try { o.signal.removeEventListener('abort', onOuterAbort); } catch (e2) { /* 清理失败无害 */ }
+    }
+  }
 }
 // 变体价格中位数（商品代表价，规格 3.1 第 2 步：不用最低——引流小样拉低；不用最高——高配版不构成主流成交）
 function variantMedian(nums) {
@@ -197,6 +222,7 @@ function mapShopifyItems(products, cap) {
     return {
       title: p.title, type: p.product_type || '',
       id: p.id != null ? p.id : null,
+      handle: p.handle || null, // SC-05：商品稳定键来源（id 缺失时用 handle + 已核验域名）
       variantCount: variants.length, // 规格签名代理：变体集变化 → 价格不可直接比较（lib/watch-price §6）
       minPrice,
       maxPrice: prices.length ? Math.max(...prices) : (nums.length ? 0 : null),
@@ -259,6 +285,11 @@ const SAFE_FETCH_MAX_BYTES = 2 * 1024 * 1024; // shopify products.json 单页上
 // IP 字面量 host 不经过本函数（node 直连 IP 不回调 lookup），IP 形态已在
 // assertPublicUrl 逐跳判定。
 function safeLookup(hostname, options, cb) {
+  // 🔴 Node ≥ 20 的 net 连接层可能以 { all: true } 调用 lookup，期望回调第二个参数是
+  // **数组**；若只走 (err, address, family) 三参形式，Node 22 会因拿不到数组
+  // 抛 "Invalid IP address: undefined" → 所有真实出站请求在连接阶段即失败。
+  // 两种签名都支持：all:true 交数组，否则交单条（语义与 SSRF 校验完全不变）。
+  const wantAll = !!(options && options.all === true);
   dnsMod.lookup(hostname, { all: true }, (err, addrs) => {
     if (err) { cb(err); return; }
     const list = (Array.isArray(addrs) ? addrs : [addrs]).filter(Boolean);
@@ -271,6 +302,10 @@ function safeLookup(hostname, options, cb) {
     const first = list[0];
     const address = String(first.address);
     const family = first.family === 6 || (first.family == null && address.includes(':')) ? 6 : 4;
+    if (wantAll) {
+      cb(null, [{ address, family }]);
+      return;
+    }
     cb(null, address, family);
   });
 }
@@ -305,6 +340,16 @@ async function safeRequestOnce(rawUrl, opts) {
     });
     req.on('timeout', () => req.destroy(new Error('SAFE_FETCH_TIMEOUT')));
     req.on('error', reject);
+    // SC-06 修复：上层 AbortController（fetchPage 总超时）必须能打断请求——
+    // 否则对方服务器慢速滴漏字节时 socket timeout 永不触发，请求永久挂死
+    // （SC-06 实测 VAUDE 复现：8s 超时设置下 30s 无返回）。
+    if (o.signal) {
+      const onAbort = () => req.destroy(new Error('SAFE_FETCH_ABORTED'));
+      if (o.signal.aborted) onAbort();
+      else o.signal.addEventListener('abort', onAbort, { once: true });
+    }
+    // Wave 1：受控请求体（JSON API POST；凭据在 Authorization 头，体不进快照/日志）
+    if (o.body != null) req.write(o.body);
     req.end();
   });
   return res;
