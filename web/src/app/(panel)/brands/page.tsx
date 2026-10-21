@@ -91,16 +91,18 @@ function BrandsInner() {
     return () => { alive = false; ctrl.abort(); };
   }, [projectId]);
 
-  // SC-07 r2 §四：有排队/采集中任务时定时刷新，直到进入终态
-  //（不把运行中的任务写成「尚未开始」——终态前保持轮询）
+  // SC-07 r2 §四 / r3 P1：有排队/采集中任务时定时刷新，直到进入终态
+  // r3 修正：轮询必须同时更新品牌列表与采集覆盖——旧实现只刷覆盖，
+  // 品牌卡会一直停在「排队中」，用户看不到状态推进。
   useEffect(() => {
     if (!projectId || !coverage?.anyInFlight) return;
+    let alive = true;
     const t = setInterval(() => {
       fetchBrands(projectId)
-        .then(r => setCoverage(r.collectionCoverage || null))
+        .then(r => { if (!alive) return; setItems(r.brands || []); setCoverage(r.collectionCoverage || null); })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
     }, 5000);
-    return () => clearInterval(t);
+    return () => { alive = false; clearInterval(t); };
   }, [projectId, coverage?.anyInFlight]);
 
   // 竞争关系候选（来自数据本身，不预设枚举）

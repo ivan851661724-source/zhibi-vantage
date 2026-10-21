@@ -421,6 +421,23 @@ async function runProviderOutput(ctx, raw, out) {
   return { providerOk: true, evidenceId };
 }
 
+// 真实采集成功 → provider verification（P0-2：operational 只能由真实成功产生）。
+// r3 真实验收暴露：生产 worker 走 runProviderOutput → commitProviderTerminal，
+// 旧实现只有 legacy 的 finalizeOutput 才记 verification——真实 partial/success
+// 采集永远不把来源推到 operational，导致非 Shopify 意向的晋升门槛永远不满足。
+function recordProviderSuccess(ctx, out) {
+  try {
+    const capDef = Registry.getCapability(out.capability);
+    require('./source-readiness.js').recordVerification({
+      capability: out.capability,
+      provider: (capDef && capDef.provider) || out.evidenceProvider || '',
+      status: 'success',
+      tenantId: ctx.tenantId,
+      sourceUrl: out.sourceUrl || null,
+    });
+  } catch (e) { /* readiness 记录失败不影响 attempt 终态 */ }
+}
+
 async function commitProviderTerminal(ctx, providerRun, out, ident) {
   const endedAt = ctx.nowMs ? new Date(ctx.nowMs).toISOString() : undefined;
   const done = SurfaceStore.completeAttempt(ctx.tenantId, ctx.attemptId, {
@@ -430,6 +447,8 @@ async function commitProviderTerminal(ctx, providerRun, out, ident) {
     snapshotIds: out.snapshotIds, evidenceIds: providerRun.evidenceId ? [providerRun.evidenceId] : [],
     summary: out.summary ? Object.assign({}, out.summary, { currency: out.currency || null, currencyStatus: out.currencyStatus || 'unknown' }) : null,
   }, ctx.fence);
+  // r3：真实成功/部分成功 → 记录来源验证（不含密钥；只存脱敏来源）
+  recordProviderSuccess(ctx, out);
   // identity 升级（fence 门控在 upsertIdentity 内部；FENCED 上抛由执行器透传）
   recordIdentity(ctx, ident, 'success', done.evidenceIds || [], done.snapshotIds || []);
   return { deduped: false, attempt: done, currency: out.currency || null, summary: out.summary, invalid: false, evidenceId: providerRun.evidenceId };
@@ -444,6 +463,11 @@ function commitProviderEmpty(ctx, providerRun) {
     snapshotIds: providerRun.snapshotIds || [], evidenceIds: [],
     summary: providerRun.summary || null,
   }, ctx.fence);
+  // 零观察≠来源不可用：来源可访问本身就是一次真实成功（readiness 反映可达性；
+  // 「检查完成但无结果」由采集状态表达，二者不矛盾）
+  let capCode = providerRun && (providerRun.capability || (providerRun.out && providerRun.out.capability));
+  if (!capCode) { try { capCode = SurfaceStore.getAttempt(ctx.tenantId, ctx.attemptId).capability; } catch (e) { capCode = null; } }
+  if (capCode) recordProviderSuccess(ctx, { capability: capCode, sourceUrl: (providerRun && providerRun.sourceUrl) || null });
   if (providerRun.ident) {
     try { recordIdentity(ctx, providerRun.ident, 'empty_success', [], providerRun.snapshotIds || []); }
     catch (e) { if (!(e && e.fenced)) throw e; }
@@ -1963,8 +1987,23 @@ const officialSiteProductsAdapter = {
         partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
       },
       snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
-      currency: (res.currencies && res.currencies.length === 1) ? res.currencies[0] : null,
-      currencySnapshotId: null, currencyStatus: (res.currencies && res.currencies.length === 1) ? 'confirmed' : 'unknown',
+      // r3 真实验收暴露的缺陷：单币种时旧实现直接给 currency + currencyStatus='confirmed'，
+      // 却没有 currencySnapshotId（也没有任何快照引用）→ 校验器按「无快照币种非法」整单拒绝，
+      // 真实站点（如 grovemade.com）明明抓到了 15 个页面却落成 internal_error。
+      // 正确口径：币种声明必须有可追溯快照；无快照时 currency=null、status=unknown，
+      // 逐商品的 currency 仍保留在 observation 上（价格比较按逐品币种进行）。
+      currency: (() => {
+        const cur = (res.currencies && res.currencies.length === 1) ? res.currencies[0] : null;
+        return (cur && Array.isArray(res.snapshotIds) && res.snapshotIds.length) ? cur : null;
+      })(),
+      currencySnapshotId: (() => {
+        const cur = (res.currencies && res.currencies.length === 1) ? res.currencies[0] : null;
+        return (cur && Array.isArray(res.snapshotIds) && res.snapshotIds.length) ? res.snapshotIds[0] : null;
+      })(),
+      currencyStatus: (() => {
+        const cur = (res.currencies && res.currencies.length === 1) ? res.currencies[0] : null;
+        return (cur && Array.isArray(res.snapshotIds) && res.snapshotIds.length) ? 'confirmed' : 'unknown';
+      })(),
       identityStatus: 'unresolved',
       evidenceSource: 'public_web', evidenceProvider: 'public_site_products_fetch',
       claimField: 'site.products', claimScope: 'public_site_products_observation',

@@ -403,6 +403,20 @@ async function executeJob(job) {
   return { attempt: done, providerResults, externalCalls: executed.length, chainExhausted: true, strategy: chain.strategy };
 }
 
+// SC-07 r3 P0-2：公开商品采集结束后推进该品牌的监控意向（晋升/安排下一次探测/失败分类）。
+// 成功路径与 executor 异常路径都必须调用——否则异常任务结束后意向既无进行中 job、
+// 又无未来 next_probe_at，会永久停在「正在建立」。
+function notifyWatchIntent(job) {
+  try {
+    if (!job || job.capability !== 'public_site_products') return null;
+    const att = SurfaceStore.getAttempt(job.tenantId, job.attemptId);
+    return require('./watch-intent.js').onProbeFinished({
+      tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+      attempt: att,
+    });
+  } catch (e) { return null; } // 意向推进失败不影响采集结果（由调度器自愈兜底）
+}
+
 // worker 单 tick：reclaim + reconcile + 认领一个 job 执行到底（含心跳）。
 // 返回 { claimed: bool, jobId?, status?, reclaimed?, reconciled? }
 async function tick(options) {
@@ -415,18 +429,9 @@ async function tick(options) {
   try {
     const out = await executeJob(job);
     finish(job.jobId, job.claimToken, 'done');
-    // SC-07 r2 §二：公开商品采集完成 → 推进该品牌的监控意向建立流程
-    //（晋升 / 安排下一次探测 / 按失败分类落终态）。读 attempt 库内真值，
-    // 不依赖 executeJob 返回形态。取消/已晋升的意向由 onProbeFinished 忽略。
-    try {
-      if (job.capability === 'public_site_products') {
-        const att = SurfaceStore.getAttempt(job.tenantId, job.attemptId);
-        require('./watch-intent.js').onProbeFinished({
-          tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
-          attempt: att,
-        });
-      }
-    } catch (e) { /* 意向推进失败不影响采集结果 */ }
+    // SC-07 r2 §二 / r3 P0-2：公开商品采集完成 → 推进监控意向（读 attempt 库内真值，
+    // 不依赖 executeJob 返回形态；取消/已晋升意向由 onProbeFinished 忽略）
+    notifyWatchIntent(job);
     return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: !!(out && out.deduped) };
   } catch (e) {
     const msg = String((e && e.message) || e);
@@ -444,6 +449,9 @@ async function tick(options) {
         }, { jobId: job.jobId, token: job.claimToken }); // fencing：仍持令牌才允许写
       }
     } catch (e2) { /* attempt 已终态/fenced 时显式拒绝，忽略 */ }
+    // r3 P0-2：异常路径同样推进监控意向——失败按 internal_error 计入 auto_retries，
+    // 有界退避重试，达到上限进入 source_failed；绝不留下无 job、无 next_probe_at 的 establishing。
+    notifyWatchIntent(job);
     finish(job.jobId, job.claimToken, 'error', msg);
     return { claimed: true, jobId: job.jobId, status: 'error', reclaimed, reconciled, error: msg.slice(0, 200) };
   } finally { clearInterval(hb); }
