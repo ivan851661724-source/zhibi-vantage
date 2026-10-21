@@ -252,9 +252,17 @@ test('C2 首探 → 持久化等待 → 二探 → 确定性 Diff → 正式监�
 });
 
 // ============================================================
-// C3 意向失败终态（§六.3：失败后不能永久「正在建立」）
+// C3 意向失败终态（SC-08 r2 §一：商品来源失败先尝试官网来源，两源都不行才真实失败）
 // ============================================================
-test('C3.1 403/401 → source_failed/blocked，无后续自动采集', async () => {
+async function advanceProbes(projectId, comp, rounds) {
+  for (let i = 0; i < (rounds || 8); i++) {
+    WIntent.runDueProbes(Date.now() + (i + 1) * 60 * 60 * 1000);
+    await sleep(120);
+    if (WIntent.findIntent(TID, projectId, comp.id).state === 'source_failed') return;
+  }
+}
+
+test('C3.1 商品页 403 → 先尝试官网来源；官网也拒访 → source_failed/blocked，无后续自动采集', async () => {
   const projectId = 'projC3a';
   const comp = nonShopifyComp(projectId, 1);
   writeState(TID, projectId, [comp]);
@@ -262,19 +270,34 @@ test('C3.1 403/401 → source_failed/blocked，无后续自动采集', async () 
   WIntent.scheduleFirstProbe({ tenantId: TID, projectId, competitorId: comp.id });
   CollectJobs.setExecutorForTest(makeExecutor([
     { status: 'failed', sourceStatus: 'blocked', errorUserText: '来源站点拒绝访问（403/401）' },
+    { status: 'failed', sourceStatus: 'blocked', errorUserText: '来源站点拒绝访问（403/401）' },
   ]));
   try {
     const r = WIntent.runDueProbes();
     assert.strictEqual(r.enqueued, 1);
-    await waitFor(() => WIntent.findIntent(TID, projectId, comp.id).state === 'source_failed', 5000, 'blocked 终态');
-    const it = WIntent.findIntent(TID, projectId, comp.id);
+    await waitFor(() => {
+      const cur = WIntent.findIntent(TID, projectId, comp.id);
+      return cur.lastProbeAttemptId === r.details[0].attemptId && cur.nextProbeCapability === 'official_site_profile';
+    }, 5000, '首探完成并切到官网来源');
+    // 商品页被拒 ≠ 官网不可用：先切官网来源，并且真实失败要等官网也拒访
+    let it = WIntent.findIntent(TID, projectId, comp.id);
+    assert.strictEqual(it.state, 'establishing', '商品页失败不得直接判死');
+    assert.strictEqual(it.nextProbeCapability, 'official_site_profile', '切换到官网来源继续建立');
+    assert.ok(it.nextProbeAt, '仍有下一步任务');
+
+    await advanceProbes(projectId, comp, 4);
+    it = WIntent.findIntent(TID, projectId, comp.id);
+    assert.strictEqual(it.state, 'source_failed', '两源都拒访后进入真实失败');
     assert.strictEqual(it.reasonCode, 'blocked');
     assert.strictEqual(it.nextProbeAt, null, 'blocked 无自动重试');
     assert.ok(/拒绝/.test(WIntent.view(it).reasonText || ''));
-    assert.ok(/等待你重试/.test(WIntent.view(it).nextStepText || ''), '明确下一步：等待用户重试');
-    // 无到期探测（不会再自动采）
-    const due = WIntent.runDueProbes(Date.now() + 60 * 60 * 1000);
-    assert.strictEqual(due.enqueued, 0, 'blocked 不自动重试');
+    // SC-08 r2 §一.8：失败必须给「可执行的下一步」，不是空泛的「稍后再试」
+    assert.ok(/重新点击「加入监控」/.test(WIntent.view(it).nextStepText || ''), '明确下一步：可执行的重试动作: ' + WIntent.view(it).nextStepText);
+    const jobsBefore = CollectJobs.getDb().prepare('SELECT COUNT(*) AS n FROM collection_jobs WHERE tenant_id=? AND project_id=?').get(TID, projectId).n;
+    WIntent.runDueProbes(Date.now() + 24 * 60 * 60 * 1000);
+    await sleep(120);
+    const jobsAfter = CollectJobs.getDb().prepare('SELECT COUNT(*) AS n FROM collection_jobs WHERE tenant_id=? AND project_id=?').get(TID, projectId).n;
+    assert.strictEqual(jobsAfter, jobsBefore, 'blocked 不自动重试');
     // 用户重新加入 → 重新建立
     WIntent.requestIntent({ tenantId: TID, projectId, competitorId: comp.id, reasonCode: 'no_direct_source' });
     WIntent.scheduleFirstProbe({ tenantId: TID, projectId, competitorId: comp.id });
@@ -300,6 +323,7 @@ test('C3.2 429 → source_failed/rate_limited 且带有界重试时间；到期�
     const it = WIntent.findIntent(TID, projectId, comp.id);
     assert.strictEqual(it.reasonCode, 'rate_limited');
     assert.ok(it.nextProbeAt, '429 带有界重试时间（持久化）');
+    assert.strictEqual(it.nextProbeCapability, 'public_site_products', '限流重试留在同一来源（不把限流当"没有价格"）');
     const v = WIntent.view(it);
     assert.ok(/自动重试/.test(v.nextStepText || ''), '明确下一步：已安排重试: ' + v.nextStepText);
     // 到期后自动恢复为 establishing 并重新探测
@@ -307,11 +331,13 @@ test('C3.2 429 → source_failed/rate_limited 且带有界重试时间；到期�
     assert.strictEqual(r2.enqueued, 1, '限流重试到期自动执行');
     assert.strictEqual(WIntent.findIntent(TID, projectId, comp.id).state, 'establishing');
     // 清场
-    WIntent.cancelIntent(TID, WIntent.findIntent(TID, projectId, comp.id).intentId);
-  } finally { CollectJobs.setExecutorForTest(null); }
+  } finally {
+    try { WIntent.cancelIntent(TID, WIntent.findIntent(TID, projectId, comp.id).intentId); } catch (e) { /* 无意向 */ }
+    CollectJobs.setExecutorForTest(null);
+  }
 });
 
-test('C3.3 成功但无可比商品 → source_failed/no_comparable_products', async () => {
+test('C3.3 商品页无可比价格 + 官网无可核实字段 → 有界重试后 source_failed（不是永久建立中）', async () => {
   const projectId = 'projC3c';
   const comp = nonShopifyComp(projectId, 3);
   writeState(TID, projectId, [comp]);
@@ -322,14 +348,22 @@ test('C3.3 成功但无可比商品 → source_failed/no_comparable_products', a
   ]));
   try {
     WIntent.runDueProbes();
-    await waitFor(() => WIntent.findIntent(TID, projectId, comp.id).state === 'source_failed', 5000, 'no_comparable 终态');
+    await waitFor(() => {
+      const it = WIntent.findIntent(TID, projectId, comp.id);
+      return it.nextProbeCapability === 'official_site_profile';
+    }, 5000, '无可比价格后切官网来源');
+    // 之后官网采集同样拿不到可用结构化原文（测试执行器不落真实快照）→ 有界重试后真实失败
+    await advanceProbes(projectId, comp, 10);
     const it = WIntent.findIntent(TID, projectId, comp.id);
-    assert.strictEqual(it.reasonCode, 'no_comparable_products');
+    assert.strictEqual(it.state, 'source_failed', '不得永久停在 establishing: ' + it.state);
+    assert.ok(['insufficient_structured_fields', 'no_comparable_products'].includes(it.reasonCode), '真实失败原因: ' + it.reasonCode);
     assert.strictEqual(it.nextProbeAt, null);
+    assert.ok(WIntent.view(it).nextStepText, '失败必须给可执行下一步');
+    WIntent.cancelIntent(TID, it.intentId);
   } finally { CollectJobs.setExecutorForTest(null); }
 });
 
-test('C3.4 解析失败 → source_failed/parse_failed', async () => {
+test('C3.4 商品页解析失败 → 先尝试官网；官网解析也失败 → source_failed/parse_failed', async () => {
   const projectId = 'projC3d';
   const comp = nonShopifyComp(projectId, 4);
   writeState(TID, projectId, [comp]);
@@ -337,13 +371,16 @@ test('C3.4 解析失败 → source_failed/parse_failed', async () => {
   WIntent.scheduleFirstProbe({ tenantId: TID, projectId, competitorId: comp.id });
   CollectJobs.setExecutorForTest(makeExecutor([
     { status: 'failed', sourceStatus: 'parse_failed', errorUserText: '页面无法解析' },
+    { status: 'failed', sourceStatus: 'parse_failed', errorUserText: '页面无法解析' },
   ]));
   try {
     WIntent.runDueProbes();
-    await waitFor(() => WIntent.findIntent(TID, projectId, comp.id).state === 'source_failed', 5000, 'parse_failed 终态');
+    await waitFor(() => WIntent.findIntent(TID, projectId, comp.id).nextProbeCapability === 'official_site_profile', 5000, '切官网');
+    await advanceProbes(projectId, comp, 4);
     const it = WIntent.findIntent(TID, projectId, comp.id);
     assert.strictEqual(it.reasonCode, 'parse_failed');
     assert.strictEqual(it.nextProbeAt, null, '解析失败不自动重试');
+    WIntent.cancelIntent(TID, it.intentId);
   } finally { CollectJobs.setExecutorForTest(null); }
 });
 

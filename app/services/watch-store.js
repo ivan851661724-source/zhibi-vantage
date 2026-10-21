@@ -105,6 +105,11 @@ function getDb() {
     UNIQUE (watch_target_id, window_key)
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_mw_tenant ON monitoring_windows(tenant_id)`);
+  // SC-08 r2 §三：窗口必须如实记录「事件写库失败」与「待核实」——不能仍显示完全成功
+  const wcols = db.prepare('PRAGMA table_info(monitoring_windows)').all().map(c => c.name);
+  if (!wcols.includes('events_pending')) db.exec('ALTER TABLE monitoring_windows ADD COLUMN events_pending INTEGER NOT NULL DEFAULT 0');
+  if (!wcols.includes('events_write_failed')) db.exec('ALTER TABLE monitoring_windows ADD COLUMN events_write_failed INTEGER NOT NULL DEFAULT 0');
+  if (!wcols.includes('events_duplicate')) db.exec('ALTER TABLE monitoring_windows ADD COLUMN events_duplicate INTEGER NOT NULL DEFAULT 0');
   // 单品价格快照（整改 §6：正式价格事件按稳定商品身份比较，目录中位数不入此表）
   db.exec(`CREATE TABLE IF NOT EXISTS watch_price_snapshots (
     snapshot_id TEXT PRIMARY KEY,
@@ -299,12 +304,16 @@ function listActiveTargets() {
 }
 
 // PATCH：白名单字段（monitoring_status 仅在 baseline 词表内取值；timezone 校验 IANA）
+// 🔴 SC-08 r2 §二：supportedSignals 不在白名单内——系统能力只能由内部受控的
+// upgradeWatchTargetCapabilities（真实采集资格验证通过后）增加，普通 PATCH 不得声明。
 const PATCHABLE = new Set(['market', 'timezone', 'enabledSignals', 'monitoringStatus']);
 function updateWatchTarget(tenantId, watchTargetId, patch) {
   const db = getDb();
   const cur = db.prepare('SELECT * FROM watch_targets WHERE tenant_id=? AND watch_target_id=?')
     .get(String(tenantId || ''), String(watchTargetId || ''));
   if (!cur) return null;
+  // 显式拒绝：能力声明不得由前端 PATCH 写入（否则用户可自封「支持价格监控」）
+  if (patch && patch.supportedSignals !== undefined) return { error: 'CAPABILITY_NOT_PATCHABLE' };
   const sets = [];
   const vals = [];
   if (patch && PATCHABLE.has('market') && patch.market !== undefined) { sets.push('market=?'); vals.push(String(patch.market || '').slice(0, 40)); }
@@ -322,6 +331,64 @@ function updateWatchTarget(tenantId, watchTargetId, patch) {
   vals.push(String(tenantId), String(watchTargetId));
   db.prepare(`UPDATE watch_targets SET ${sets.join(', ')} WHERE tenant_id=? AND watch_target_id=?`).run(...vals);
   return getWatchTarget(tenantId, watchTargetId);
+}
+
+/**
+ * 内部受控的能力升级（SC-08 r2 §二）。
+ *
+ * 只允许「真实采集资格验证通过」后增加 supportedSignals：
+ *   · verifiedBasis 必须由 watch-intent.buildVerifiedBasis 从库里真实 attempt 派生
+ *     （含 issuedBy 署名 + 同品牌 competitorId + ≥2 个真实 attemptId + 评估时间）；
+ *   · 本函数不接受前端自报字段，HTTP PATCH 也无法写 supportedSignals。
+ *
+ * 语义：supportedSignals 只增不减（能力升级不回退历史能力）；enabledSignals 必须是
+ * supportedSignals 的子集。site_change → price 升级后为：
+ *   supportedSignals: ['site_change','price']，enabledSignals: ['price']
+ * 只更新这两列：既有官网 baseline、监控窗口、情报事件与时间线全部保留。
+ * 重复升级幂等（无变化时 upgraded=false，不写库）。
+ *
+ * @returns {{target:object, upgraded:boolean, unchanged?:boolean}|{error:string}}
+ */
+function upgradeWatchTargetCapabilities(input) {
+  const o = input || {};
+  const db = getDb();
+  const tid = String(o.tenantId || '');
+  const cur = db.prepare('SELECT * FROM watch_targets WHERE tenant_id=? AND watch_target_id=?')
+    .get(tid, String(o.watchTargetId || ''));
+  if (!cur) return null;
+  const t = rowToTarget(cur);
+  const add = filterKnownSignals(o.addSupportedSignals);
+  if (!add.length) return { error: 'NO_SIGNALS' };
+  const b = o.verifiedBasis || null;
+  const basisOk = !!b
+    && b.issuedBy === 'watch-intent/buildVerifiedBasis'
+    && b.ok === true
+    && String(b.competitorId || '') === String(t.competitorId || '')
+    && Array.isArray(b.attemptIds) && b.attemptIds.filter(Boolean).length >= 2
+    && !!b.evaluatedAt
+    && add.includes(String(b.signal || ''));
+  if (!basisOk) return { error: 'UNVERIFIED_CAPABILITY' };
+
+  const nextSupported = t.supportedSignals.slice();
+  for (const s of add) if (!nextSupported.includes(s)) nextSupported.push(s);
+
+  let nextEnabled = t.enabledSignals.slice();
+  if (o.enabledSignals !== undefined) {
+    const want = filterKnownSignals(o.enabledSignals);
+    // enabledSignals 必须是（升级后的）supportedSignals 子集，否则拒绝而不是悄悄裁剪
+    if (!want.length || want.some(s => !nextSupported.includes(s))) return { error: 'ENABLED_NOT_SUPPORTED' };
+    nextEnabled = want;
+  }
+
+  const sameSupported = JSON.stringify(nextSupported) === JSON.stringify(t.supportedSignals);
+  const sameEnabled = JSON.stringify(nextEnabled) === JSON.stringify(t.enabledSignals);
+  if (sameSupported && sameEnabled) {
+    return { target: t, upgraded: false, unchanged: true };
+  }
+  db.prepare(`UPDATE watch_targets SET supported_signals=?, enabled_signals=?, updated_at=?
+    WHERE tenant_id=? AND watch_target_id=?`)
+    .run(JSON.stringify(nextSupported), JSON.stringify(nextEnabled), nowIso(), tid, String(o.watchTargetId));
+  return { target: getWatchTarget(tid, String(o.watchTargetId)), upgraded: true, unchanged: false };
 }
 
 // 整改 §5：移出监控 = 软停用（monitoring_status='inactive' + deactivated_at 审计），
@@ -396,12 +463,14 @@ function claimWindow(target, windowKey, slot, scheduledTs, nowMs) {
 
 function completeWindow(windowId, result, nowMs) {
   const db = getDb();
-  // result: { signalResults:[{signal,attempted,succeeded,failed,reason}], attempted, succeeded, failed, partialScan, failureReasons, eventsVerified }
+  // result: { signalResults:[{signal,attempted,succeeded,failed,reason}], attempted, succeeded, failed, partialScan, failureReasons, eventsVerified, eventsPending, eventsWriteFailed, eventsDuplicate }
   db.prepare(`UPDATE monitoring_windows SET status='complete', ended_at=?, signal_results=?, attempted=?, succeeded=?,
-    failed=?, partial_scan=?, failure_reasons=?, events_verified=? WHERE window_id=? AND status='running'`)
+    failed=?, partial_scan=?, failure_reasons=?, events_verified=?, events_pending=?, events_write_failed=?, events_duplicate=?
+    WHERE window_id=? AND status='running'`)
     .run(new Date(nowMs || Date.now()).toISOString(), JSON.stringify(result.signalResults || []),
       result.attempted || 0, result.succeeded || 0, result.failed || 0, result.partialScan ? 1 : 0,
-      JSON.stringify(result.failureReasons || {}), result.eventsVerified || 0, windowId);
+      JSON.stringify(result.failureReasons || {}), result.eventsVerified || 0,
+      result.eventsPending || 0, result.eventsWriteFailed || 0, result.eventsDuplicate || 0, windowId);
 }
 
 function failWindow(windowId, nowMs) {
@@ -429,10 +498,14 @@ function rowToWindow(r) {
     status: r.status, policyVersion: r.policy_version, expectedSignals: expected, signalResults: signals,
     attempted: r.attempted, succeeded: r.succeeded, failed: r.failed,
     partialScan: !!r.partial_scan, failureReasons: reasons, eventsVerified: r.events_verified,
+    eventsPending: r.events_pending || 0, eventsWriteFailed: r.events_write_failed || 0, eventsDuplicate: r.events_duplicate || 0,
     scheduleLagMs: r.schedule_lag_ms,
     // coverage 结论（只读派生，不落列）：任何失败/partial/未完成 → gap（00 §20/§21：不得把失败当无变化）
+    // r2 §三.6：事件**写库失败**属覆盖缺口（这次变化没被记录，下个窗口要重试），
+    // 不允许窗口仍显示完全成功。待核实(pending)不是缺口——事件已落库，只是缺证据，
+    // 由 eventsPending 独立如实计数，不冒充已核实。
     coverage: r.status !== 'complete' ? 'incomplete'
-      : (r.failed > 0 || r.partial_scan ? 'gap' : 'full'),
+      : (r.failed > 0 || r.partial_scan || (r.events_write_failed || 0) > 0 ? 'gap' : 'full'),
   };
 }
 
@@ -531,6 +604,7 @@ module.exports = {
   REGION_TZ, validTimezone, zonedSlotUtc, localParts, tzOffsetMs,
   getDb, closeDb,
   createWatchTarget, getWatchTarget, listWatchTargets, listActiveTargets, listSchedulableTargets, updateWatchTarget, deleteWatchTarget,
+  upgradeWatchTargetCapabilities,
   markSuccess, markDegraded, refreshFreshness,
   listProductPrices, upsertProductPrice,
   getSiteBaseline, saveSiteBaseline, clearSiteBaseline,

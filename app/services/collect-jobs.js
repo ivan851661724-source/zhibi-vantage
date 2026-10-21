@@ -403,17 +403,25 @@ async function executeJob(job) {
   return { attempt: done, providerResults, externalCalls: executed.length, chainExhausted: true, strategy: chain.strategy };
 }
 
-// SC-07 r3 P0-2：公开商品采集结束后推进该品牌的监控意向（晋升/安排下一次探测/失败分类）。
+// SC-07 r3 P0-2 / SC-08 r2 §一：来源探测（商品页 或 官网资料）结束后推进该品牌的监控意向。
+// 两个能力都必须接线：意向的分阶段流程会先调商品探测，无可比价格后调官网探测；
+// 只接商品探测会让官网阶段永远等不到推进（这正是 r1 的真实缺陷）。
 // 成功路径与 executor 异常路径都必须调用——否则异常任务结束后意向既无进行中 job、
 // 又无未来 next_probe_at，会永久停在「正在建立」。
+const INTENT_PROBE_CAPABILITIES = new Set(['public_site_products', 'official_site_profile']);
 function notifyWatchIntent(job) {
   try {
-    if (!job || job.capability !== 'public_site_products') return null;
+    if (!job || !INTENT_PROBE_CAPABILITIES.has(job.capability)) return null;
     const att = SurfaceStore.getAttempt(job.tenantId, job.attemptId);
-    return require('./watch-intent.js').onProbeFinished({
+    const WIntent = require('./watch-intent.js');
+    const out = WIntent.onProbeFinished({
       tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
       attempt: att,
     });
+    // SC-08 r2 §二：这次真实探测也可能让「已有 site_change 正式监控」的价格资格刚刚满足
+    //（受控升级：资格从库里真实 attempt 派生，验证不通过不动）。
+    try { WIntent.tryUpgradeTargetToPrice({ tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId }); } catch (e2) { /* 升级失败不影响采集 */ }
+    return out;
   } catch (e) { return null; } // 意向推进失败不影响采集结果（由调度器自愈兜底）
 }
 

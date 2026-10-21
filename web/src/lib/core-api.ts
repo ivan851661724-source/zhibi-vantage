@@ -29,6 +29,59 @@ export interface Coverage {
   summary: CoverageSummary;
 }
 
+// ---------- SC-08 r2 §六：唯一覆盖投影 brandCoverage（后端 Registry 派生） ----------
+export type BrandCoverState6 = 'available' | 'collecting' | 'empty' | 'failed' | 'not_configured' | 'not_started';
+export interface BrandCoverageDimension {
+  code: string;
+  label: string;
+  displayName?: string;
+  state: BrandCoverState6;
+  stateText: string;
+  reason: string | null;
+  note?: string | null;
+  lastObservedAt: string | null;
+  firstObservedAt?: string | null;
+  observationCount: number;
+  evidenceCount: number;
+  sourceCount: number;
+  latestFailureText: string | null;
+}
+export interface BrandCoverageSummary {
+  available: number;
+  total: number;
+  collecting: number;
+  failed: number;
+  notConfigured: number;
+  notStarted?: number;
+  empty?: number;
+}
+export interface BrandCoverage {
+  summary: BrandCoverageSummary;
+  firstObservedAt?: string | null;
+  dimensions: BrandCoverageDimension[];
+  dataDimensions: { code: string; label: string }[];
+}
+
+// 正式监控状态（卡片/详情共用口径；establishing ≠ 监控中）
+export interface BrandMonitoringState {
+  state: 'active' | 'degraded' | 'paused' | 'establishing' | 'source_failed' | 'none';
+  stateText: string;
+  signals: string[];
+  signalsText: string | null;
+  sinceAt: string | null;
+  lastSuccessAt?: string | null;
+  freshness?: string | null;
+  nextStepText?: string | null;
+}
+
+export interface BrandVerifiedChange {
+  at: string;
+  dimension: string;
+  eventType: string;
+  title: string;
+  eventId: string;
+}
+
 export interface BrandListItem {
   brandId: string;
   name: string;
@@ -37,17 +90,25 @@ export interface BrandListItem {
   category: string | null;
   relation: string | null;
   competitorId: string | null;
-  coverageSummary: CoverageSummary;
-  coverageDimensions: CoverageDimension[];
+  // SC-08 r2 §六：唯一覆盖投影（列表与详情同源同口径）
+  brandCoverage: BrandCoverage;
   // SC-06：竞品数据库首页新增——官网确认状态与时间积累起点
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; lastCollectedAt?: string | null } | null;
   // SC-06 r2：官网公开商品（非目录接口）——未验证时 status='not_collected' 且带说明
   publicProducts?: PublicProductsStatus | null;
   collection?: BrandCollectionState | null;
+  monitoring?: BrandMonitoringState | null;
+  lastVerifiedChange?: BrandVerifiedChange | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
-  lastChange: { at: string; kind: string; kindText: string; title: string | null } | null;
-  gaps: { code: string; displayName: string; state: CoverState; stateText: string }[];
+}
+
+// 竞品数据库首页四项统计（后端同源派生，禁止前端各算一套）
+export interface BrandsProjectStats {
+  brands: number;
+  accumulating: number;
+  collecting: number;
+  needsAttention: number;
 }
 
 // SC-07 §3：逐品牌真实采集状态（由后端 attempt/job/readiness 派生）
@@ -317,9 +378,13 @@ export interface BrandDetail {
     brandId: string; name: string; officialDomain: string | null;
     market: string | null; category: string | null; relation: string | null;
     competitorId: string | null; firstObservedAt: string | null;
+    dataAccumulationStart?: string | null;
   };
   links: { linkId: string; projectId: string; competitorRef: string | null }[];
-  coverage: Coverage;
+  // SC-08 r2 §六：唯一的覆盖投影（不再返回第二套 coverage）
+  brandCoverage: BrandCoverage;
+  monitoring?: BrandMonitoringState | null;
+  lastVerifiedChange?: BrandVerifiedChange | null;
   // SC-06 二：官网确认状态（confirmed/unavailable/not_collected，非「官网不支持」语义）
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
   // SC-06 r2：官网公开商品采集状态（与官方资料分离；未验证不写「已采集」）
@@ -341,7 +406,7 @@ export interface BrandDetail {
 }
 
 export function fetchBrands(projectId: string, signal?: AbortSignal) {
-  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; collectionCoverage?: CollectionCoverage | null }>(
+  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; stats?: BrandsProjectStats; collectionCoverage?: CollectionCoverage | null }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
 export function fetchBrand(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
@@ -360,7 +425,7 @@ export function fetchBrandTimeline(brandId: string, opts: { projectId?: string; 
 }
 export function fetchBrandCoverage(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
   const q = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : '';
-  return apiGet<{ brandId: string; projectId?: string; coverage: Coverage }>(`/api/brands/${encodeURIComponent(brandId)}/coverage${q}`, opts.signal);
+  return apiGet<{ brandId: string; projectId?: string; brandCoverage: BrandCoverage }>(`/api/brands/${encodeURIComponent(brandId)}/coverage${q}`, opts.signal);
 }
 // ---------- SC-08 §二：每日变化收件箱 ----------
 export type InboxDimension = 'price' | 'product' | 'stock' | 'website' | 'review' | 'social' | 'ads' | 'search';

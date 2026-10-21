@@ -1,32 +1,38 @@
 'use strict';
 // ============================================================
-// services/watch-intent.js —— 「加入监控」的监控意向（SC-07 §2 / r2 整改 §二）
+// services/watch-intent.js —— 「加入监控」的监控意向（SC-07 §2 / SC-08 r2 §一）
 // ------------------------------------------------------------
 // PRD 01 §16：用户明确点击「加入监控」才进入**正式持续监控**；自动首轮采集
 // 绝不能偷偷创建 WatchTarget。
 //
-// r2 整改核心：意向必须有**持久化的来源建立流程**，不允许永久停在 establishing：
+// r2 整改核心：意向必须有**持久化的分阶段来源建立流程**，不允许永久停在 establishing，
+// 也不允许「统计官网 attempt 却始终调度商品探测」这种调度与资格判定不同源的假闭环。
 //   state:
-//     establishing  已保存意向，正在建立可重复抓取的商品来源（不显示「监控中」）
-//     source_failed 来源建立失败（拒访/限流/解析失败/无可比商品），保留原因
+//     establishing  已保存意向，正在建立可重复抓取的来源（不显示「监控中」）
+//     source_failed 来源建立失败（拒访/限流/解析失败/无可核实字段），保留原因
 //     promoted      已升级为正式 WatchTarget（intent 关闭，指向 targetId）
 //     cancelled     用户退出，不再自动采集、不再自动晋升
 //
-// 建立流程（全部落库，服务重启后可恢复）：
-//   ① 用户点击 → requestIntent + scheduleFirstProbe（安排第一次 public_site_products 探测）
-//   ② 第一次取得可比较商品 → evaluateIntentState 持久化 next_probe_at（下一次独立探测）
-//   ③ 到期后 runDueProbes 自动执行第二次独立采集（新 attempt、真实观察时间）；
-//      重启后 next_probe_at 在库里，调度器照常执行
-//   ④ 两次采集必须不同 attempt、真实观察时间、可比较商品标识——晋升判定
-//      promotionEligibility 直接按库里成功 attempt 重算，禁止凑数
-//   ⑤ 满足条件才 tryPromote 创建正式 WatchTarget
-//   ⑥ 不满足时始终有明确下一步（nextStepText）：已安排探测 / 限流后自动重试 /
-//      等待用户重试——不存在无后续任务的永久 establishing
-// 终态分类（§二）：
-//   403/401 → source_failed/blocked；429 → source_failed/rate_limited（带有界重试时间）；
-//   解析失败 → source_failed/parse_failed；成功但无可比商品 → source_failed/no_comparable_products
-// 正式监控（晋升后）只支持 price：supportedSignals=['price']、enabledSignals=['price']，
-// 不宣称上新/库存（公开商品页无发布时间与库存字段可核验）。
+// 分阶段流程（全部落库：next_probe_capability + probe_phase，服务重启后从库续跑）：
+//   ① 用户点击 → requestIntent(source=public_site_products, phase=product_prime)
+//      + scheduleFirstProbe（安排第一次商品探测）
+//   ② 商品探测有稳定可比较价格 → 再安排**同一能力**的第二次独立探测（product_confirm）
+//      → 两次同源可比观察 + 确定性 Diff → 建立 price 正式监控
+//   ③ 商品探测没有可比价格（页面可访问但无稳定商品/价格）→ 切到官网来源：
+//      next_probe_capability=official_site_profile, phase=site_prime（独立 attempt）
+//   ④ 官网探测 1 成功且结构化字段稳定 → phase=site_confirm（第二次独立 attempt）
+//   ⑤ 官网两次独立成功/部分成功且指纹稳定 → 建立 site_change 正式监控
+//   ⑥ 官网也无法形成稳定指纹 → 有界重试后 source_failed（真实原因 + 可执行下一步）
+// 硬约束：
+//   · 每次探测都是**独立 attempt**（显式幂等键含 phase + 上一次 attempt + 时间桶）
+//   · 重复点击 / 并发调度 / 重启不产生双任务（running attempt 复用 + 幂等键 + 看门狗）
+//   · 一次商品探测 + 一次官网探测**不得**被拼成「两次同源观察」：
+//     price 资格只数 public_site_products attempt；site_change 资格只数
+//     official_site_profile attempt（promotionEligibility / siteChangeEligibility 各自独立重算）
+//   · 取消后：调度器不扫 cancelled，onProbeFinished 对 cancelled 直接忽略，绝不晋升
+// 终态分类：403/401 → blocked；429 → rate_limited（有界自动重试）；解析失败 → parse_failed；
+//   成功但无可核实字段 → no_comparable_products / insufficient_structured_fields
+// 正式监控（晋升后）只支持 price 或 site_change：不宣称上新/库存（公开页面无可核验字段）。
 //
 // 调度器仍只认 watch_targets.monitoring_status='active'（正式监控唯一资格边界）。
 // ============================================================
@@ -36,8 +42,25 @@ const SurfaceStore = require('./surface-store.js');
 
 const INTENT_STATES = Object.freeze(['establishing', 'source_failed', 'promoted', 'cancelled']);
 
-// 非 Shopify 商品来源可比较字段：商品标识（URL）+ 价格 + 币种
-const SOURCE_CAPABILITY = 'public_site_products';
+// 两个可建立的真实来源能力（都必须是 Registry 里的真实能力，不得虚构）
+const CAP_PRODUCTS = 'public_site_products';
+const CAP_SITE = 'official_site_profile';
+const PROBE_CAPABILITIES = Object.freeze([CAP_PRODUCTS, CAP_SITE]);
+// 兼容旧常量（既有调用方/测试引用）
+const SOURCE_CAPABILITY = CAP_PRODUCTS;
+
+// 阶段词表（持久化到 watch_intents.probe_phase）
+//   product_prime   第一次商品探测（建立价格基线）
+//   product_confirm 第二次商品探测（独立复采 → 可比较 → price）
+//   site_prime      第一次官网探测（建立结构化指纹基线）
+//   site_confirm    第二次官网探测（独立复采 → 指纹稳定 → site_change）
+const PROBE_PHASES = Object.freeze([ 'product_prime', 'product_confirm', 'site_prime', 'site_confirm' ]);
+const PHASE_TEXT = Object.freeze({
+  product_prime: '正在检查官网公开商品页（第 1 次）',
+  product_confirm: '正在复采官网公开商品页（第 2 次，用于建立价格基线）',
+  site_prime: '正在读取官网公开资料（第 1 次）',
+  site_confirm: '正在复采官网公开资料（第 2 次，用于建立官网变化基线）',
+});
 
 // ---- 有界探测参数（env 可覆盖；全部有上界，防无限重试/无限计费） ----
 // 两次独立探测的最小间隔（第一次成功后到下一次探测）：默认 60 分钟
@@ -46,7 +69,7 @@ const PROBE_INTERVAL_MS = Math.max(1000, Number(process.env.ZB_INTENT_PROBE_INTE
 const RATE_RETRY_MS = Math.max(1000, Number(process.env.ZB_INTENT_RATE_RETRY_MS) || 30 * 60 * 1000);
 // 暂时性失败（超时/不可达）的退避：默认 10 分钟
 const RETRY_BACKOFF_MS = Math.max(1000, Number(process.env.ZB_INTENT_RETRY_BACKOFF_MS) || 10 * 60 * 1000);
-// 自动重试上限（限流 + 暂时性失败合并计数；超过后等待用户重试）
+// 自动重试上限（限流 + 暂时性失败 + 不稳定指纹合并计数；超过后等待用户重试）
 const MAX_AUTO_RETRIES = Math.max(1, Number(process.env.ZB_INTENT_MAX_AUTO_RETRIES) || 3);
 // 探测入队后的看门狗宽限：超时未见到 attempt 终态 → 调度器可再入队（幂等兜底）
 const PROBE_PENDING_GRACE_MS = Math.max(60 * 1000, Number(process.env.ZB_INTENT_PROBE_GRACE_MS) || 15 * 60 * 1000);
@@ -72,12 +95,15 @@ function ensureTable() {
     UNIQUE(tenant_id, project_id, competitor_id)
   )`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_wi_scope ON watch_intents(tenant_id, project_id, state)');
-  // r2 §二：持久化建立流程列（加法迁移；老库补列）
+  // 加法迁移（老库补列；只加列，不改既有列）
   const addCol = (ddl) => { try { db.exec(ddl); } catch (e) { /* 列已存在 */ } };
   addCol('ALTER TABLE watch_intents ADD COLUMN next_probe_at TEXT');
   addCol('ALTER TABLE watch_intents ADD COLUMN probe_count INTEGER NOT NULL DEFAULT 0');
   addCol('ALTER TABLE watch_intents ADD COLUMN auto_retries INTEGER NOT NULL DEFAULT 0');
   addCol('ALTER TABLE watch_intents ADD COLUMN last_probe_attempt_id TEXT');
+  // SC-08 r2 §一：分阶段来源建立的持久化调度字段（重启后按库内能力续跑）
+  addCol('ALTER TABLE watch_intents ADD COLUMN next_probe_capability TEXT');
+  addCol('ALTER TABLE watch_intents ADD COLUMN probe_phase TEXT');
   _tableReady = true;
 }
 
@@ -97,11 +123,14 @@ function rowToIntent(r) {
     sourceCapability: r.source_capability || null,
     enabledSignals: r.enabled_signals ? JSON.parse(r.enabled_signals) : [],
     promotedTargetId: r.promoted_target_id || null,
-    // r2 §二：持久化建立流程
+    // 持久化建立流程
     nextProbeAt: r.next_probe_at || null,
     probeCount: r.probe_count || 0,
     autoRetries: r.auto_retries || 0,
     lastProbeAttemptId: r.last_probe_attempt_id || null,
+    // SC-08 r2 §一：下一步要调度的真实能力 + 阶段
+    nextProbeCapability: r.next_probe_capability || CAP_PRODUCTS,
+    probePhase: r.probe_phase || 'product_prime',
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -115,22 +144,34 @@ const STATE_TEXT = Object.freeze({
   cancelled: '已退出监控',
 });
 
-// 明确下一步（r2 §二.6：禁止无后续任务的永久 establishing）
+function fmtAt(iso) { return String(iso).slice(0, 16).replace('T', ' '); }
+
+// 明确下一步（§一.8：禁止无后续任务的永久 establishing；失败必须给可执行下一步）
 function nextStepText(intent) {
   if (!intent) return null;
   if (intent.state === 'establishing') {
     if (intent.nextProbeAt) {
       return new Date(intent.nextProbeAt).getTime() <= Date.now()
-        ? '正在安排下一次来源探测'
-        : '已安排下一次来源探测（' + String(intent.nextProbeAt).slice(0, 16).replace('T', ' ') + '）';
+        ? PHASE_TEXT[intent.probePhase] || '正在安排下一次来源探测'
+        : '已安排下一次来源探测（' + fmtAt(intent.nextProbeAt) + '）：' + (PHASE_TEXT[intent.probePhase] || '来源探测');
     }
     return '正在等待当前采集结果';
   }
   if (intent.state === 'source_failed') {
     if (intent.reasonCode === 'rate_limited' && intent.nextProbeAt) {
-      return '来源限流，将在 ' + String(intent.nextProbeAt).slice(0, 16).replace('T', ' ') + ' 自动重试';
+      return '来源限流，将在 ' + fmtAt(intent.nextProbeAt) + ' 自动重试';
     }
-    return '等待你重试：可重新点击「加入监控」再试一次';
+    // 失败原因 + 可执行下一步（按原因给不同动作，不写「请稍后再试」这种空话）
+    const byReason = {
+      blocked: '官网拒绝了公开页面访问。可确认该品牌官网地址可正常打开后，重新点击「加入监控」。',
+      parse_failed: '页面无法解析出可核实内容。可确认该官网是否为常规公开页面后，重新点击「加入监控」。',
+      insufficient_structured_fields: '官网缺少稳定的结构化字段（标题/规范地址/组织信息/商品集合），无法建立可核实的变化基线。可补充更稳定的官网页（如品牌首页）后重新加入监控。',
+      no_comparable_products: '官网可访问，但没有可核实的稳定字段（价格或结构化内容）。可补充商品页地址后重新加入监控。',
+      no_official_url: '该品牌没有可核验的官网地址。请在品牌档案中补充官网后重新加入监控。',
+      competitor_missing: '该品牌已不在当前项目中；重新在竞品雷达加入后再建立监控。',
+      source_unavailable: '来源多次不可达。可在官网可正常打开时重新点击「加入监控」。',
+    };
+    return byReason[intent.reasonCode] || '等待你重试：可重新点击「加入监控」再试一次';
   }
   return null;
 }
@@ -143,10 +184,15 @@ function view(intent) {
   // 重要：非 promoted 的意向不得对外表达「监控中 / 巡检成功 / 无变化」
   v.monitoring = intent.state === 'promoted';
   v.nextStepText = nextStepText(intent);
+  v.probePhaseText = PHASE_TEXT[intent.probePhase] || null;
+  // 不向前端暴露内部能力码：只暴露阶段与下一步的人话
+  delete v.nextProbeCapability;
+  delete v.probePhase;
   return v;
 }
 
 // 幂等：同 tenant×project×competitor 只有一条；退出后（cancelled）再次加入会重新置 establishing
+// 重新加入 = 从第一阶段重来（商品探测），但不删除既有 attempt 历史与时间线。
 function requestIntent({ tenantId, projectId, competitorId, brandId, reasonCode, reasonText, signals }) {
   ensureTable();
   const tid = String(tenantId || ''); const pid = String(projectId || ''); const cid = String(competitorId || '');
@@ -158,16 +204,20 @@ function requestIntent({ tenantId, projectId, competitorId, brandId, reasonCode,
     if (existed.state === 'promoted') return { intent: rowToIntent(existed), existed: true, promoted: true };
     // 重新加入：清除旧的重试计数与失败原因，从头建立；next_probe_at 由 scheduleFirstProbe 重设
     db.prepare(`UPDATE watch_intents SET state='establishing', reason_code=?, reason_text=?, brand_id=COALESCE(?, brand_id),
-                enabled_signals=COALESCE(?, enabled_signals), auto_retries=0, next_probe_at=NULL, updated_at=? WHERE intent_id=?`)
-      .run(reasonCode || null, reasonText || null, brandId || null, signals ? JSON.stringify(signals) : null, now, existed.intent_id);
+                enabled_signals=COALESCE(?, enabled_signals), auto_retries=0, probe_count=0,
+                next_probe_at=NULL, next_probe_capability=?, probe_phase='product_prime', updated_at=? WHERE intent_id=?`)
+      .run(reasonCode || null, reasonText || null, brandId || null, signals ? JSON.stringify(signals) : null,
+        CAP_PRODUCTS, now, existed.intent_id);
     return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(existed.intent_id)), existed: true, reactivated: existed.state === 'cancelled' };
   }
   const id = rid('wi');
   db.prepare(`INSERT INTO watch_intents
-    (intent_id, tenant_id, project_id, competitor_id, brand_id, state, reason_code, reason_text, source_capability, enabled_signals, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    (intent_id, tenant_id, project_id, competitor_id, brand_id, state, reason_code, reason_text, source_capability,
+     enabled_signals, next_probe_capability, probe_phase, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     id, tid, pid, cid, brandId || null, 'establishing', reasonCode || null, reasonText || null,
-    SOURCE_CAPABILITY, signals ? JSON.stringify(signals) : JSON.stringify(['price']), now, now,
+    CAP_PRODUCTS, signals ? JSON.stringify(signals) : JSON.stringify(['price']),
+    CAP_PRODUCTS, 'product_prime', now, now,
   );
   return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(id)), existed: false };
 }
@@ -197,8 +247,8 @@ function cancelIntent(tenantId, intentId) {
   const cur = getIntent(tenantId, intentId);
   if (!cur) return null;
   if (cur.state === 'promoted') return { error: 'ALREADY_PROMOTED' }; // 已正式监控 → 走 DELETE /watch-targets
-  // r2 §二：取消后不得继续采集或自动晋升——清空下一次探测时间；调度器与
-  // onProbeFinished 都只认 establishing（cancelled 意向的后续采集结果一律忽略）
+  // 取消后不得继续采集或自动晋升——清空下一次探测时间与下一步能力；
+  // 调度器只扫 establishing/source_failed，onProbeFinished 对 cancelled 一律忽略。
   WS.getDb().prepare("UPDATE watch_intents SET state='cancelled', reason_code='user_cancelled', reason_text=NULL, next_probe_at=NULL, updated_at=? WHERE intent_id=?")
     .run(new Date().toISOString(), String(intentId));
   return getIntent(tenantId, intentId);
@@ -215,7 +265,7 @@ function setFailed(tenantId, intentId, reasonCode, reasonText, opts) {
   return getIntent(tenantId, intentId);
 }
 
-// ---------- 持久化探测调度（r2 §二） ----------
+// ---------- 持久化探测调度 ----------
 
 // 用户点击后安排第一次探测（立即；幂等：已有计划不覆盖）
 function scheduleFirstProbe({ tenantId, projectId, competitorId }) {
@@ -224,12 +274,12 @@ function scheduleFirstProbe({ tenantId, projectId, competitorId }) {
   if (!intent) return null;
   if (intent.state !== 'establishing') return intent;
   if (intent.nextProbeAt) return intent; // 已有计划（重复点击不覆盖）
-  WS.getDb().prepare("UPDATE watch_intents SET next_probe_at=?, updated_at=? WHERE intent_id=?")
-    .run(new Date().toISOString(), new Date().toISOString(), intent.intentId);
+  WS.getDb().prepare("UPDATE watch_intents SET next_probe_at=?, next_probe_capability=COALESCE(next_probe_capability,?), probe_phase=COALESCE(probe_phase,'product_prime'), updated_at=? WHERE intent_id=?")
+    .run(new Date().toISOString(), CAP_PRODUCTS, new Date().toISOString(), intent.intentId);
   return getIntent(tenantId, intent.intentId);
 }
 
-// 内部：设置探测计划与计数
+// 内部：设置探测计划与计数（只对显式给出的字段赋值；capability/phase 走 setProbeStep）
 function setProbeSchedule(intentId, { nextProbeAt, probeCount, autoRetries, lastProbeAttemptId, state }) {
   ensureTable();
   WS.getDb().prepare(`UPDATE watch_intents SET
@@ -243,7 +293,34 @@ function setProbeSchedule(intentId, { nextProbeAt, probeCount, autoRetries, last
       lastProbeAttemptId || null, state || null, new Date().toISOString(), String(intentId));
 }
 
-// ---------- 可比较性判定（升级的硬条件 ②③） ----------
+// 内部：推进到下一阶段（能力 + 阶段 + 下次时间 + 计数，一次原子写）
+// 字段语义：只写显式出现的字段。
+//   nextProbeAt: null = 清空（终态，等用户重试）；不传 = 保持原值。
+function setProbeStep(intentId, step) {
+  ensureTable();
+  const s = step || {};
+  const sets = [];
+  const vals = [];
+  if (PROBE_CAPABILITIES.includes(s.capability)) { sets.push('next_probe_capability=?'); vals.push(s.capability); }
+  if (PROBE_PHASES.includes(s.phase)) { sets.push('probe_phase=?'); vals.push(s.phase); }
+  if (Object.prototype.hasOwnProperty.call(s, 'nextProbeAt')) { sets.push('next_probe_at=?'); vals.push(s.nextProbeAt); }
+  if (s.probeCount != null) { sets.push('probe_count=?'); vals.push(s.probeCount); }
+  if (s.autoRetries != null) { sets.push('auto_retries=?'); vals.push(s.autoRetries); }
+  if (s.lastProbeAttemptId) { sets.push('last_probe_attempt_id=?'); vals.push(s.lastProbeAttemptId); }
+  if (s.state) { sets.push('state=?'); vals.push(s.state); }
+  if (!sets.length) return getIntentByRawId(intentId);
+  sets.push('updated_at=?'); vals.push(new Date().toISOString());
+  vals.push(String(intentId));
+  WS.getDb().prepare(`UPDATE watch_intents SET ${sets.join(', ')} WHERE intent_id=?`).run(...vals);
+  return getIntentByRawId(intentId);
+}
+
+function getIntentByRawId(intentId) {
+  const r = WS.getDb().prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(String(intentId));
+  return rowToIntent(r);
+}
+
+// ---------- 可比较性判定（price 升级的硬条件） ----------
 // 成功 attempt 的商品观察 → {subjectId, price, currency}
 function comparableItems(attempt) {
   const obs = attempt && Array.isArray(attempt.observations) ? attempt.observations : [];
@@ -274,15 +351,13 @@ function deterministicDiff(prev, next) {
   return { comparable: true, compared, changes };
 }
 
-// 升级资格：真实成功 ≥2 次 + 可比较字段 + 确定性 Diff
-// r3 真实验收暴露：公开商品页采集常见 partial（部分页面抓取失败，但已观察到的商品
-// 价格是真实且可比较的）。旧实现只认 success，导致「每次都是 partial」的真实品牌
-// 永远无法晋升——这是资格判定的缺口，不是来源失败。改为 success/partial 均可计入，
-// 但必须带可比较商品（同商品标识 + 价格 + 币种），Diff 仍要求同键同币种。
+// 升级资格（price 路径）：**只数 public_site_products** 的真实成功 attempt ≥2，
+// 同商品标识 + 价格 + 币种且可算确定性 Diff。success/partial 均可计入（partial 的已观察
+// 商品价格是真实可比较的），但必须带可比较商品。
 function promotionEligibility(tenantId, projectId, competitorId) {
   const Readiness = require('./source-readiness.js');
-  const rd = Readiness.getReadiness(SOURCE_CAPABILITY);
-  const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, SOURCE_CAPABILITY, 10) || [])
+  const rd = Readiness.getReadiness(CAP_PRODUCTS);
+  const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, CAP_PRODUCTS, 10) || [])
     .filter(a => a && (a.status === 'success' || a.status === 'partial'));
   const withItems = atts.map(a => ({ attempt: a, items: comparableItems(a) })).filter(x => x.items.length > 0);
   const out = {
@@ -292,7 +367,7 @@ function promotionEligibility(tenantId, projectId, competitorId) {
     partialAttempts: atts.filter(a => a.status === 'partial').length,
     eligible: false, reason: null, diff: null,
   };
-  // SC-08 §三 C：同时评估降级信号 site_change（官网可访问但无稳定价格时的正式信号）
+  // 同时评估降级信号 site_change（官网可访问但无稳定价格时的正式信号）——独立口径，不交叉计数
   out.siteChange = siteChangeEligibility(tenantId, projectId, competitorId);
   if (rd.state !== 'operational') { out.reason = 'source_not_verified'; return out; }
   if (withItems.length < 2) {
@@ -311,16 +386,18 @@ function promotionEligibility(tenantId, projectId, competitorId) {
 
 /**
  * site_change 晋升资格（SC-08 §三 C）：
- *   官网（official_site_profile）至少两次独立真实采集成功/部分成功，
+ *   **只数 official_site_profile** 的独立真实采集：至少两次成功/部分成功，
  *   且最新一次的结构化指纹稳定（≥2 类结构化字段：title/canonical/organization/商品集合/结构摘要）。
  *   不要求「已有变化」——首次 baseline 本身就是可监控的稳定来源。
+ *   商品探测的 attempt 不得计入本口径（禁止把一次商品探测 + 一次官网探测拼成两次同源观察）。
  */
 function siteChangeEligibility(tenantId, projectId, competitorId) {
-  const out = { eligible: false, attempts: 0, stable: false, signals: [], reason: null, sourceUrl: null };
+  const out = { eligible: false, attempts: 0, stable: false, signals: [], reason: null, sourceUrl: null, attemptIds: [] };
   try {
-    const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, 'official_site_profile', 10) || [])
+    const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, CAP_SITE, 10) || [])
       .filter(a => a && (a.status === 'success' || a.status === 'partial'));
     out.attempts = atts.length;
+    out.attemptIds = atts.map(a => a.attemptId);
     if (atts.length < 2) { out.reason = 'need_two_site_collections'; return out; }
     const Snapshot = require('../research/source-snapshot.js');
     const FP = require('./site-fingerprint.js');
@@ -353,10 +430,65 @@ function siteChangeEligibility(tenantId, projectId, competitorId) {
 }
 
 /**
+ * 可信升级依据（§二：只有真实采集资格验证通过后才能增加支持信号）。
+ * 由本模块从库里真实 attempt 派生，不接受调用方自报字段。
+ * @returns {{ok:boolean, reason?:string, capability?:string, attemptIds?:string[], evaluatedAt?:string, detail?:object}}
+ */
+function buildVerifiedBasis(tenantId, projectId, competitorId, signal) {
+  const sig = String(signal || '');
+  const stamp = { issuedBy: 'watch-intent/buildVerifiedBasis', competitorId: String(competitorId || ''), projectId: String(projectId || '') };
+  if (sig === 'price') {
+    const el = promotionEligibility(tenantId, projectId, competitorId);
+    if (!el.eligible) return Object.assign({ ok: false, reason: el.reason || 'price_not_verified', detail: el }, stamp);
+    const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, CAP_PRODUCTS, 10) || [])
+      .filter(a => a && (a.status === 'success' || a.status === 'partial'))
+      .map(a => a.attemptId);
+    return Object.assign({
+      ok: true, capability: CAP_PRODUCTS, signal: 'price', attemptIds: atts, evaluatedAt: new Date().toISOString(),
+      detail: { comparableAttempts: el.comparableAttempts, compared: el.diff ? el.diff.compared : 0 },
+    }, stamp);
+  }
+  if (sig === 'site_change') {
+    const sc = siteChangeEligibility(tenantId, projectId, competitorId);
+    if (!sc.eligible) return Object.assign({ ok: false, reason: sc.reason || 'site_change_not_verified', detail: sc }, stamp);
+    return Object.assign({
+      ok: true, capability: CAP_SITE, signal: 'site_change', attemptIds: sc.attemptIds, evaluatedAt: new Date().toISOString(),
+      detail: { attempts: sc.attempts, signals: sc.signals },
+    }, stamp);
+  }
+  return Object.assign({ ok: false, reason: 'UNKNOWN_SIGNAL' }, stamp);
+}
+
+/**
+ * 受控能力升级：site_change → price（SC-08 r2 §二）。
+ * 触发时机 = 该品牌刚完成一次真实商品来源探测（价格资格可能刚刚满足）。
+ * 只对「已正式监控且当前只支持 site_change」的 Target 生效；资格由库里真实 attempt
+ * 派生（buildVerifiedBasis），验证不通过一律不动——绝不因为「看起来有价格」就自封能力。
+ * 幂等：重复调用无变化时不写库。
+ */
+function tryUpgradeTargetToPrice({ tenantId, projectId, competitorId }) {
+  const tid = String(tenantId || ''); const pid = String(projectId || ''); const cid = String(competitorId || '');
+  if (!tid || !pid || !cid) return { upgraded: false, reason: 'MISSING_CONTEXT' };
+  const target = (WS.listWatchTargets(tid, pid) || []).find(t => t.competitorId === cid);
+  if (!target) return { upgraded: false, reason: 'no_target' };
+  const supported = target.supportedSignals || [];
+  if (!supported.includes('site_change')) return { upgraded: false, reason: 'not_site_change_target' };
+  if (supported.includes('price')) return { upgraded: false, reason: 'already_supported', target };
+  const basis = buildVerifiedBasis(tid, pid, cid, 'price');
+  if (!basis.ok) return { upgraded: false, reason: basis.reason || 'price_not_verified', target };
+  const r = WS.upgradeWatchTargetCapabilities({
+    tenantId: tid, watchTargetId: target.watchTargetId,
+    addSupportedSignals: ['price'], enabledSignals: ['price'], verifiedBasis: basis,
+  });
+  if (r && r.error) return { upgraded: false, reason: r.error, target };
+  return { upgraded: !!(r && r.upgraded), unchanged: !!(r && r.unchanged), target: r ? r.target : null, basis };
+}
+
+/**
  * 从库里重算意向状态并决定下一步（幂等；成功路径唯一入口）。
- * - 已可晋升 → tryPromote；
- * - 至少一次可比较成功且未晋升 → 持久化下一次探测时间（probe_count 同步库内真值）；
- * - 无可比较成功 → 交由失败分支处理（本函数不动）。
+ * - 已可晋升（price / site_change）→ tryPromote；
+ * - 当前阶段还差一次同源独立观察 → 持久化下一次探测（能力与阶段都不变）；
+ * - 其他 → 交由失败分支处理（本函数不动）。
  */
 function evaluateIntentState(tenantId, projectId, competitorId, opts) {
   ensureTable();
@@ -370,27 +502,59 @@ function evaluateIntentState(tenantId, projectId, competitorId, opts) {
     return { action: p.promoted ? 'promoted' : 'promote_failed:' + (p.reason || ''), eligibility: el };
   }
   if (el.comparableAttempts >= 1) {
-    // 至少一次可比较成功：持久化下一次独立探测时间（重启后调度器照常执行）
-    setProbeSchedule(intent.intentId, {
-      nextProbeAt: new Date(Date.now() + PROBE_INTERVAL_MS).toISOString(),
-      probeCount: el.comparableAttempts,
-      state: 'establishing',
+    // 至少一次可比较成功：同一能力的下一次独立探测（重启后调度器照常执行）
+    const nextAt = new Date(Date.now() + PROBE_INTERVAL_MS).toISOString();
+    setProbeStep(intent.intentId, {
+      capability: CAP_PRODUCTS, phase: 'product_confirm', nextProbeAt: nextAt,
+      probeCount: el.comparableAttempts, state: 'establishing',
     });
-    return { action: 'scheduled_next_probe', probeCount: el.comparableAttempts, eligibility: el };
+    return { action: 'scheduled_next_probe', probeCount: el.comparableAttempts, nextProbeAt: nextAt, eligibility: el };
   }
   return { action: 'no_comparable_success', eligibility: el };
 }
 
 /**
+ * 用最新一次真实官网采集的快照建立 site_change 基线（晋升时调用）。
+ * 语义：晋升依据就是这两次独立观察，基线应当是「最后一次观察」而不是「第一个监控窗口」——
+ * 否则晋升到首个窗口之间的变化会被吞掉（首窗口只会重建基线）。
+ * 拿不到原文快照时如实不建（首个监控窗口会重建基线，不猜测）。
+ */
+function seedSiteBaselineFromLatestAttempt(tenantId, projectId, competitorId) {
+  try {
+    const atts = (SurfaceStore.listAttempts(tenantId, projectId, competitorId, CAP_SITE, 10) || [])
+      .filter(a => a && (a.status === 'success' || a.status === 'partial'));
+    if (!atts.length) return null;
+    const Snapshot = require('../research/source-snapshot.js');
+    const FP = require('./site-fingerprint.js');
+    for (const sid of (atts[0].snapshotIds || [])) {
+      const meta = Snapshot.getById(tenantId, sid);
+      if (!meta) continue;
+      let raw = null;
+      try { raw = Snapshot.readRawPayload(meta); } catch (e) { raw = null; }
+      if (!raw) continue;
+      const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw);
+      if (!/<html|<body|<title/i.test(text)) continue;
+      const url = meta.source_url || meta.final_url || null;
+      return WS.saveSiteBaseline({
+        tenantId, projectId, competitorId,
+        fingerprint: FP.buildFingerprint(text, url || ''),
+        stability: FP.stabilityOf(FP.buildFingerprint(text, url || '')),
+        url, at: atts[0].endedAt || new Date().toISOString(),
+      });
+    }
+  } catch (e) { /* 基线建立失败不影响晋升（首窗口重建） */ }
+  return null;
+}
+
+/**
  * 尝试把意向升级为正式监控（幂等；不满足条件则保持 establishing/failed）。
- * 只在该品牌刚完成一次公开商品采集后调用。
+ * 价格路径优先；无稳定可比较价格但官网结构化字段稳定 → 降级为 site_change。
  */
 function tryPromote({ tenantId, projectId, competitorId, timezone, market }) {
   ensureTable();
   const intent = findIntent(tenantId, projectId, competitorId);
   if (!intent || intent.state !== 'establishing') return { promoted: false, reason: 'no_open_intent' };
   const el = promotionEligibility(tenantId, projectId, competitorId);
-  // SC-08 §三：价格路径优先；无稳定可比较价格但官网结构化字段稳定 → 降级为 site_change
   const useSiteChange = !el.eligible && el.siteChange && el.siteChange.eligible;
   if (!el.eligible && !useSiteChange) {
     return { promoted: false, reason: el.reason || (el.siteChange && el.siteChange.reason) || null, eligibility: el };
@@ -408,8 +572,11 @@ function tryPromote({ tenantId, projectId, competitorId, timezone, market }) {
     enrichmentStatus: 'complete',
     // 非 Shopify 来源不落额外列：执行器按 comp.isShopify 分支（见 watch-monitor）
   });
+  // site_change：把「最后一次被验证的观察」落成监控基线（否则晋升到首窗口之间的
+  // 变化会被首窗口的基线重建吞掉）；拿不到原文快照时如实不建。
+  if (useSiteChange) seedSiteBaselineFromLatestAttempt(tenantId, projectId, competitorId);
   const reasonText = useSiteChange
-    ? '已建立可重复的官网内容来源，升级为正式监控（当前信号：官网内容变化）'
+    ? '已建立可重复的官网内容来源（两次独立采集，结构化字段稳定），升级为正式监控（当前信号：官网内容变化）'
     : '已完成两次可比较采集，升级为正式监控（当前支持价格信号）';
   WS.getDb().prepare("UPDATE watch_intents SET state='promoted', promoted_target_id=?, reason_code='promoted', reason_text=?, next_probe_at=NULL, updated_at=? WHERE tenant_id=? AND intent_id=?")
     .run(r.target.watchTargetId, reasonText, new Date().toISOString(), String(tenantId), intent.intentId);
@@ -417,10 +584,20 @@ function tryPromote({ tenantId, projectId, competitorId, timezone, market }) {
 }
 
 // ---------- 采集完成后的意向推进（collect-jobs worker 调用） ----------
-// 公开商品采集结束（任何触发方式）→ 若该品牌有未完结意向：
-//   成功且可比 → 晋升或安排下一次探测；成功但零可比 → no_comparable_products；
-//   失败按分类落终态（blocked / rate_limited带界重试 / parse_failed / 其他退避重试）。
+// 只有本意向当前阶段对应的那个能力完成的 attempt 才能推进阶段（防止无关采集改写状态）。
 // cancelled / promoted 的意向一律忽略（取消后不得继续采集或自动晋升）。
+
+const FAIL_TEXT = Object.freeze({
+  blocked: '来源站点拒绝了公开页面访问（403/401），无法建立监控来源。',
+  parse_failed: '来源页面无法解析出可核实内容，无法建立监控来源。',
+  rate_limited: '来源限流，稍后自动重试；无需你操作。',
+  fetch_failed: '来源暂时不可达，将自动重试。',
+});
+
+function schedule(capability, phase, atMs) {
+  return { capability, phase, nextProbeAt: new Date(atMs).toISOString() };
+}
+
 function onProbeFinished({ tenantId, projectId, competitorId, attempt }) {
   ensureTable();
   const tid = String(tenantId || ''); const pid = String(projectId || ''); const cid = String(competitorId || '');
@@ -430,83 +607,163 @@ function onProbeFinished({ tenantId, projectId, competitorId, attempt }) {
   if (intent.state === 'promoted') return { action: 'ignored_promoted' };
   const att = attempt || (intent.lastProbeAttemptId ? SurfaceStore.getAttempt(tid, intent.lastProbeAttemptId) : null);
   if (!att) return { action: 'no_attempt' };
-  const status = att.status;
-  if (status === 'running') return { action: 'still_running' };
+  if (att.status === 'running') return { action: 'still_running' };
 
-  if (status === 'success' || status === 'partial') {
-    const items = comparableItems(att);
-    if (!items.length) {
-      // SC-08 §三 C：来源可访问但没有可比较价格 → **不得**直接 source_failed。
-      // 先走 site_change 降级：官网结构化字段稳定即可晋升；不足两次采集则继续安排探测。
-      const sc = siteChangeEligibility(tid, pid, cid);
-      if (sc.eligible) {
-        setProbeSchedule(intent.intentId, { lastProbeAttemptId: att.attemptId });
-        const p = tryPromote({ tenantId: tid, projectId: pid, competitorId: cid });
-        return { action: p.promoted ? 'promoted' : 'promote_failed:' + (p.reason || ''), eligibility: p.eligibility, signal: 'site_change' };
-      }
-      if (sc.attempts >= 1) {
-        // 已有可用的官网观察但还不足两次：持久化下一次探测（有后续任务，不永久 establishing）
-        const retryAt = new Date(Date.now() + PROBE_INTERVAL_MS).toISOString();
-        setProbeSchedule(intent.intentId, {
-          nextProbeAt: retryAt, probeCount: sc.attempts, lastProbeAttemptId: att.attemptId, state: 'establishing',
-        });
-        return { action: 'awaiting_second_site_collection', nextProbeAt: retryAt, siteChange: sc };
-      }
-      // 官网也没有任何可用结构化字段 → 真实失败（§三 D）
-      setFailed(tid, intent.intentId, 'no_comparable_products', '来源可以访问，但没有可核实的稳定字段（价格或结构化内容），无法建立监控；已尝试：官网页面与公开商品页。');
-      setProbeSchedule(intent.intentId, { nextProbeAt: null });
-      return { action: 'source_failed:no_comparable_products' };
-    }
-    const r = evaluateIntentState(tid, pid, cid, {});
-    // 记录本次探测 attempt
-    setProbeSchedule(intent.intentId, { lastProbeAttemptId: att.attemptId });
-    return r;
+  // 阶段对应能力：只接受「当前计划能力」的终态 attempt；旧阶段迟到的结果不得改写流程
+  //（例外：没有任何计划能力时（老库）按 attempt 自身能力处理）
+  const planned = intent.nextProbeCapability || CAP_PRODUCTS;
+  const attCap = att.capability || planned;
+  if (attCap !== planned) {
+    return { action: 'ignored_stale_capability:' + attCap + '!=' + planned };
   }
 
-  // ---- 失败分类（r2 §二 终态处理） ----
+  if (attCap === CAP_SITE) return handleSiteProbe(tid, pid, cid, intent, att);
+  return handleProductProbe(tid, pid, cid, intent, att);
+}
+
+// 商品探测结果 → price 路径 / 切官网降级路径
+function handleProductProbe(tid, pid, cid, intent, att) {
+  const status = att.status;
+  const lpa = att.attemptId;
+  if (status === 'success' || status === 'partial') {
+    const items = comparableItems(att);
+    if (items.length) {
+      const el = promotionEligibility(tid, pid, cid);
+      if (el.eligible) {
+        setProbeStep(intent.intentId, { lastProbeAttemptId: lpa });
+        const p = tryPromote({ tenantId: tid, projectId: pid, competitorId: cid });
+        return { action: p.promoted ? 'promoted' : 'promote_failed:' + (p.reason || ''), eligibility: p.eligibility, signal: 'price' };
+      }
+      // 只有一次可比较观察 / Diff 不可算：同一能力的第二次独立探测（不混入官网探测）
+      const nextAt = Date.now() + PROBE_INTERVAL_MS;
+      setProbeStep(intent.intentId, Object.assign(schedule(CAP_PRODUCTS, 'product_confirm', nextAt), {
+        lastProbeAttemptId: lpa, probeCount: el.comparableAttempts, state: 'establishing',
+      }));
+      return { action: 'awaiting_second_product_collection', nextProbeAt: new Date(nextAt).toISOString(), eligibility: el };
+    }
+    // 商品路径没有可比价格 → 切官网来源（独立能力的独立 attempt）
+    return switchToSite(tid, pid, cid, intent, att, 'no_comparable_products_on_site_products');
+  }
+  // 失败分类（§三 D：真实失败必须落到「官网也不可达/拒访/解析连续失败」之后）：
+  //   · 429 限流 → 同一能力有界重试（不换来源，换来源等于把限流当"没有价格"）
+  //   · 其它失败 → 若官网来源尚未尝试，先切官网（商品页可能无 JSON-LD/被拒，但官网首页可读）；
+  //     切换消耗一次重试额度，超过上限即真实失败（不等用户无限等）
+  const cls = String(att.sourceStatus || att.errorClass || 'unavailable');
+  const phase = intent.probePhase || 'product_prime';
+  if (cls === 'rate_limited') return failOrRetry(tid, pid, cid, intent, att, CAP_PRODUCTS, phase);
+  const retries = (intent.autoRetries || 0) + 1;
+  if (retries > MAX_AUTO_RETRIES) {
+    setFailed(tid, intent.intentId, 'source_unavailable', '来源多次不可用，已暂停自动重试；可稍后重新加入监控。');
+    setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: att.attemptId });
+    return { action: 'source_failed:' + cls + '_exhausted' };
+  }
+  const sc = siteChangeEligibility(tid, pid, cid);
+  if (sc.attempts === 0) {
+    return switchToSite(tid, pid, cid, intent, att, 'product_probe_' + cls, { autoRetries: retries });
+  }
+  return failOrRetry(tid, pid, cid, intent, att, CAP_PRODUCTS, phase);
+}
+
+// 切到官网来源建立（第一次官网探测立即到期）
+function switchToSite(tid, pid, cid, intent, att, why, opts) {
+  const nextAt = Date.now();
+  const o = opts || {};
+  setProbeStep(intent.intentId, Object.assign(schedule(CAP_SITE, 'site_prime', nextAt), {
+    lastProbeAttemptId: att ? att.attemptId : null,
+    autoRetries: o.autoRetries == null ? null : o.autoRetries,
+    state: 'establishing',
+  }));
+  return { action: 'switched_to_site_source', reason: why, nextProbeAt: new Date(nextAt).toISOString(), nextCapability: CAP_SITE };
+}
+
+// 官网探测结果 → site_change 路径
+function handleSiteProbe(tid, pid, cid, intent, att) {
+  const lpa = att.attemptId;
+  if (att.status === 'success' || att.status === 'partial') {
+    const sc = siteChangeEligibility(tid, pid, cid);
+    if (sc.eligible) {
+      setProbeStep(intent.intentId, { lastProbeAttemptId: lpa });
+      const p = tryPromote({ tenantId: tid, projectId: pid, competitorId: cid });
+      return { action: p.promoted ? 'promoted' : 'promote_failed:' + (p.reason || ''), eligibility: p.eligibility, signal: 'site_change' };
+    }
+    if (sc.attempts < 2 && sc.reason === 'need_two_site_collections') {
+      const nextAt = Date.now() + PROBE_INTERVAL_MS;
+      setProbeStep(intent.intentId, Object.assign(schedule(CAP_SITE, 'site_confirm', nextAt), {
+        lastProbeAttemptId: lpa, probeCount: sc.attempts, state: 'establishing',
+      }));
+      return { action: 'awaiting_second_site_collection', nextProbeAt: new Date(nextAt).toISOString(), siteChange: sc };
+    }
+    // 两次都读到页面但结构化字段不足 → 有界重试，仍不足则真实失败（§三 D）
+    if (sc.reason === 'insufficient_structured_fields' || sc.reason === 'fingerprint_unavailable') {
+      const retries = (intent.autoRetries || 0) + 1;
+      if (retries <= MAX_AUTO_RETRIES) {
+        const nextAt = Date.now() + RETRY_BACKOFF_MS;
+        setProbeStep(intent.intentId, Object.assign(schedule(CAP_SITE, 'site_confirm', nextAt), {
+          lastProbeAttemptId: lpa, autoRetries: retries, probeCount: sc.attempts, state: 'establishing',
+        }));
+        return { action: 'retry_scheduled:insufficient_structured_fields', retryAt: new Date(nextAt).toISOString() };
+      }
+      setFailed(tid, intent.intentId, 'insufficient_structured_fields',
+        '官网页面可以访问，但缺少稳定的结构化字段（标题/规范地址/组织信息/商品集合），无法建立可核实的变化基线。');
+      setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: lpa });
+      return { action: 'source_failed:insufficient_structured_fields' };
+    }
+    // 其他（如 site_change_eval_failed）→ 按暂时性失败处理
+    return failOrRetry(tid, pid, cid, intent, att, CAP_SITE, 'site_confirm');
+  }
+  return failOrRetry(tid, pid, cid, intent, att, CAP_SITE, intent.probePhase || 'site_prime');
+}
+
+// 失败分类（对指定能力重试；超过上限 → source_failed + 可执行下一步）
+function failOrRetry(tid, pid, cid, intent, att, capability, phase) {
+  const lpa = att.attemptId;
   const cls = String(att.sourceStatus || att.errorClass || 'unavailable');
   if (cls === 'blocked') {
-    // 403/401 → 来源拒绝：终态，等用户重试
-    setFailed(tid, intent.intentId, 'blocked', '来源站点拒绝了公开页面访问（403/401），无法建立监控来源；可稍后重试。');
-    setProbeSchedule(intent.intentId, { nextProbeAt: null });
+    setFailed(tid, intent.intentId, 'blocked', FAIL_TEXT.blocked);
+    setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: lpa });
     return { action: 'source_failed:blocked' };
   }
   if (cls === 'rate_limited') {
-    // 429 → 限流：带**有界**自动重试时间；超过上限后等用户重试
     const retries = (intent.autoRetries || 0) + 1;
     if (retries <= MAX_AUTO_RETRIES) {
-      const retryAt = new Date(Date.now() + RATE_RETRY_MS).toISOString();
-      setFailed(tid, intent.intentId, 'rate_limited', '来源限流，稍后自动重试；无需你操作。', { keepRetryAt: retryAt });
-      setProbeSchedule(intent.intentId, { nextProbeAt: retryAt, autoRetries: retries });
-      return { action: 'retry_scheduled:rate_limited', retryAt };
+      const nextAt = Date.now() + RATE_RETRY_MS;
+      // 等待期状态 = source_failed + 保留有界重试时间（到期由 runDueProbes 拉回 establishing）
+      setFailed(tid, intent.intentId, 'rate_limited', FAIL_TEXT.rate_limited, { keepRetryAt: new Date(nextAt).toISOString() });
+      setProbeStep(intent.intentId, Object.assign(schedule(capability, phase, nextAt), {
+        autoRetries: retries, lastProbeAttemptId: lpa,
+      }));
+      return { action: 'retry_scheduled:rate_limited', retryAt: new Date(nextAt).toISOString() };
     }
     setFailed(tid, intent.intentId, 'rate_limited', '来源多次限流，已暂停自动重试；可稍后重新加入监控。');
-    setProbeSchedule(intent.intentId, { nextProbeAt: null });
+    setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: lpa });
     return { action: 'source_failed:rate_limited_exhausted' };
   }
   if (cls === 'parse_failed') {
-    setFailed(tid, intent.intentId, 'parse_failed', '来源页面无法解析出商品信息，无法建立监控来源；可稍后重试。');
-    setProbeSchedule(intent.intentId, { nextProbeAt: null });
+    setFailed(tid, intent.intentId, 'parse_failed', FAIL_TEXT.parse_failed);
+    setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: lpa });
     return { action: 'source_failed:parse_failed' };
   }
   // 暂时性失败（超时/不可达/内部错误）→ 退避重试（有界）
   const retries = (intent.autoRetries || 0) + 1;
   if (retries <= MAX_AUTO_RETRIES) {
-    const retryAt = new Date(Date.now() + RETRY_BACKOFF_MS).toISOString();
-    setProbeSchedule(intent.intentId, { nextProbeAt: retryAt, autoRetries: retries, state: 'establishing' });
-    return { action: 'retry_scheduled:' + cls, retryAt };
+    const nextAt = Date.now() + RETRY_BACKOFF_MS;
+    setProbeStep(intent.intentId, Object.assign(schedule(capability, phase, nextAt), {
+      autoRetries: retries, lastProbeAttemptId: lpa, state: 'establishing',
+    }));
+    return { action: 'retry_scheduled:' + cls, retryAt: new Date(nextAt).toISOString() };
   }
   setFailed(tid, intent.intentId, 'source_unavailable', '来源多次暂时不可达，已暂停自动重试；可稍后重新加入监控。');
-  setProbeSchedule(intent.intentId, { nextProbeAt: null });
+  setProbeStep(intent.intentId, { nextProbeAt: null, lastProbeAttemptId: lpa });
   return { action: 'source_failed:' + cls + '_exhausted' };
 }
 
-// ---------- 不变量自愈（r3 P0-2） ----------
+// ---------- 不变量自愈 ----------
 // 每个 establishing 意向必须至少满足其一：存在进行中的 job，或存在未来的 next_probe_at。
 // 任何失败路径（包括 executor 异常、worker 崩溃、意向推进失败）都不得留下
 // 「无任务、无下次时间」的 establishing——本函数在每次调度 tick 兜底修复：
 //   · 已有 pending/running job 或 running attempt → 只看门狗时间（缺失则补上）
 //   · 否则安排退避探测（计入 auto_retries），超过上限直接 source_failed（等用户重试）
+// 注意：job/attempt 必须按**意向当前阶段的能力**查，不能固定 public_site_products。
 function reconcileStuckIntents(nowMs) {
   ensureTable();
   const now = nowMs || Date.now();
@@ -519,16 +776,17 @@ function reconcileStuckIntents(nowMs) {
   for (const row of rows) {
     const intent = rowToIntent(row);
     const tid = intent.tenantId, pid = intent.projectId, cid = intent.competitorId;
+    const cap = intent.nextProbeCapability || CAP_PRODUCTS;
     let activeJob = 0;
     try {
       activeJob = require('./collect-jobs.js').getDb().prepare(
         `SELECT COUNT(*) AS n FROM collection_jobs
          WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=? AND status IN ('pending','running')`
-      ).get(tid, pid, cid, SOURCE_CAPABILITY).n;
+      ).get(tid, pid, cid, cap).n;
     } catch (e) { activeJob = 0; }
     let runningAttempt = 0;
     try {
-      const last = SurfaceStore.latestAttempt(tid, pid, cid, SOURCE_CAPABILITY);
+      const last = SurfaceStore.latestAttempt(tid, pid, cid, cap);
       runningAttempt = (last && last.status === 'running') ? 1 : 0;
     } catch (e) { runningAttempt = 0; }
     if (activeJob > 0 || runningAttempt > 0) {
@@ -543,17 +801,17 @@ function reconcileStuckIntents(nowMs) {
       out.rescheduled++;
     } else {
       setFailed(tid, intent.intentId, 'source_unavailable', '多次未能完成来源探测，已暂停自动重试；可稍后重新加入监控。');
-      setProbeSchedule(intent.intentId, { nextProbeAt: null });
+      setProbeStep(intent.intentId, { nextProbeAt: null });
       out.failed++;
     }
   }
   return out;
 }
 
-// ---------- 到期探测执行（持久化建立流程的调度入口） ----------
-// 扫描 next_probe_at 到期的未完结意向，重新入队 public_site_products 采集。
-// 幂等由 collect-request 链路保证（running 复用 / 冷却 / 日额度）；服务重启后
-// next_probe_at 仍在库内，到期照常执行——两次探测之间重启可恢复（§六.4）。
+// ---------- 到期探测执行（持久化分阶段建立流程的唯一调度入口） ----------
+// 按意向里持久化的 next_probe_capability 调度——商品阶段调商品探测，官网阶段调官网探测。
+// 幂等由三层保证：collect-request 的 running 复用 + 显式幂等键（phase + 上次 attempt + 时间桶）
+// + 入队后的看门狗 next_probe_at；服务重启后 next_probe_at/能力/阶段都在库内，照常续跑。
 // @returns {{due:number, enqueued:number, deferred:number, failed:number, promoted:number, details:Array}}
 function runDueProbes(nowMs) {
   ensureTable();
@@ -569,6 +827,8 @@ function runDueProbes(nowMs) {
   for (const row of rows) {
     const intent = rowToIntent(row);
     const tid = intent.tenantId, pid = intent.projectId, cid = intent.competitorId;
+    const capability = PROBE_CAPABILITIES.includes(intent.nextProbeCapability) ? intent.nextProbeCapability : CAP_PRODUCTS;
+    const phase = PROBE_PHASES.includes(intent.probePhase) ? intent.probePhase : 'product_prime';
     // 限流恢复：重试前把状态拉回 establishing（真实重试进行中）
     if (intent.state === 'source_failed' && intent.reasonCode === 'rate_limited') {
       setProbeSchedule(intent.intentId, { state: 'establishing' });
@@ -578,7 +838,7 @@ function runDueProbes(nowMs) {
     const comp = CollectJobs.loadCompetitor({ tenantId: tid, projectId: pid, competitorId: cid });
     if (!comp) {
       setFailed(tid, intent.intentId, 'competitor_missing', '该品牌已不在项目中，无法继续建立监控来源。');
-      setProbeSchedule(intent.intentId, { nextProbeAt: null });
+      setProbeStep(intent.intentId, { nextProbeAt: null });
       out.failed++; out.details.push({ intentId: intent.intentId, outcome: 'competitor_missing' });
       continue;
     }
@@ -586,13 +846,12 @@ function runDueProbes(nowMs) {
     try {
       r = CollectReq.requestCollection({
         tenantId: tid, projectId: pid, competitorId: cid,
-        capability: SOURCE_CAPABILITY, comp, trigger: 'schedule',
-        // 显式幂等键：意向探测的间隔由持久化 next_probe_at 调度保证（≥ PROBE_INTERVAL_MS），
-        // 不吃 capability 冷却（冷却 30min 会挡住「两次可比较采集」的第二次独立探测）；
-        // 幂等一（running attempt 复用）仍然生效——并发/重复触发不会双跑双计费。
-        // 键 = 意向 + 上一次探测 attempt + 15 分钟时间桶：同一探测窗口内重复触发去重，
-        // 每次新探测（上次 attempt 已变）生成新 attempt。
-        idempotencyKey: 'intent_probe:' + intent.intentId + ':' + (intent.lastProbeAttemptId || 'first') + ':' + Math.floor(now / 900000),
+        capability, comp, trigger: 'schedule',
+        // 显式幂等键：探测间隔由持久化 next_probe_at 保证（≥ PROBE_INTERVAL_MS），
+        // 不吃 capability 冷却（冷却会挡住「两次独立探测」的第二次）；键含
+        // 意向 + 阶段 + 上一次 attempt + 15 分钟时间桶 → 同一探测窗口内重复触发去重，
+        // 每次新探测（上次 attempt 已变）生成新 attempt；running attempt 复用仍然生效。
+        idempotencyKey: 'intent_probe:' + intent.intentId + ':' + phase + ':' + (intent.lastProbeAttemptId || 'first') + ':' + Math.floor(now / 900000),
       });
     } catch (e) {
       r = { status: 'failed', code: 'EXCEPTION' };
@@ -604,7 +863,7 @@ function runDueProbes(nowMs) {
         lastProbeAttemptId: (r.attempt && r.attempt.attemptId) || null,
       });
       out.enqueued++;
-      out.details.push({ intentId: intent.intentId, outcome: 'enqueued', attemptId: (r.attempt && r.attempt.attemptId) || null });
+      out.details.push({ intentId: intent.intentId, capability, phase, outcome: 'enqueued', attemptId: (r.attempt && r.attempt.attemptId) || null });
       continue;
     }
     if (r.status === 'deduped') {
@@ -617,7 +876,7 @@ function runDueProbes(nowMs) {
       // 有进行中的采集：等待其完成（onProbeFinished 会推进）；看门狗兜底
       setProbeSchedule(intent.intentId, { nextProbeAt: new Date(now + PROBE_PENDING_GRACE_MS).toISOString() });
       out.deferred++;
-      out.details.push({ intentId: intent.intentId, outcome: 'deferred:' + (r.reason || 'deduped') });
+      out.details.push({ intentId: intent.intentId, capability, phase, outcome: 'deferred:' + (r.reason || 'deduped') });
       continue;
     }
     if (r.status === 'quota') {
@@ -627,14 +886,21 @@ function runDueProbes(nowMs) {
       out.details.push({ intentId: intent.intentId, outcome: 'quota_deferred' });
       continue;
     }
-    // not_supported / not_configured / failed → 来源失败终态（等用户重试）
-    setFailed(tid, intent.intentId, 'source_unavailable', '公开商品来源暂时无法采集；可稍后重新加入监控。');
-    setProbeSchedule(intent.intentId, { nextProbeAt: null });
+    // not_supported / not_configured / failed → 该能力不可用：商品阶段先尝试官网来源，
+    // 官网阶段则按真实失败落终态（带可执行下一步）
+    if (capability === CAP_PRODUCTS) {
+      const sc = siteChangeEligibility(tid, pid, cid);
+      if (sc.attempts === 0) {
+        setProbeStep(intent.intentId, Object.assign(schedule(CAP_SITE, 'site_prime', now), { state: 'establishing' }));
+        out.details.push({ intentId: intent.intentId, outcome: 'switched_to_site_source:' + r.status });
+        continue;
+      }
+    }
+    setFailed(tid, intent.intentId, 'source_unavailable', '公开来源暂时无法采集；可稍后重新加入监控。');
+    setProbeStep(intent.intentId, { nextProbeAt: null });
     out.failed++;
-    out.details.push({ intentId: intent.intentId, outcome: 'failed:' + r.status });
+    out.details.push({ intentId: intent.intentId, capability, outcome: 'failed:' + r.status });
   }
-  // r3 P0-2：处理完到期项后自愈「无任务、无下次时间」的 establishing
-  //（enqueued/deferred 的看门狗时间在未来，不会被误判；取消/晋升不在扫描范围）
   out.healed = reconcileStuckIntents(now);
   return out;
 }
@@ -656,10 +922,11 @@ function startScheduler(logger) {
 function stopScheduler() { if (_probeTimer) { clearInterval(_probeTimer); _probeTimer = null; } }
 
 module.exports = {
-  INTENT_STATES, SOURCE_CAPABILITY, STATE_TEXT,
+  INTENT_STATES, SOURCE_CAPABILITY, CAP_PRODUCTS, CAP_SITE, PROBE_CAPABILITIES, PROBE_PHASES, PHASE_TEXT, STATE_TEXT,
   PROBE_INTERVAL_MS, RATE_RETRY_MS, RETRY_BACKOFF_MS, MAX_AUTO_RETRIES, PROBE_PENDING_GRACE_MS,
   requestIntent, getIntent, findIntent, listIntents, cancelIntent, setFailed,
   scheduleFirstProbe, runDueProbes, onProbeFinished, evaluateIntentState, reconcileStuckIntents,
-  view, comparableItems, deterministicDiff, promotionEligibility, siteChangeEligibility, tryPromote,
+  view, comparableItems, deterministicDiff, promotionEligibility, siteChangeEligibility,
+  buildVerifiedBasis, tryUpgradeTargetToPrice, seedSiteBaselineFromLatestAttempt, tryPromote,
   startScheduler, stopScheduler,
 };

@@ -9,7 +9,9 @@
 // S1  指纹清洗：script/style/cookie/nonce/时间/随机ID/utm 不污染指纹
 // S2  确定性 Diff：结构字段变化被捕获；仅噪点变化不产生变化
 // S3  首次 baseline 只存不发事件；第二次变化 → 事件（含证据 → verified）+ baseline 前移
-// S4  非 Shopify 无可比价格但官网稳定 → 晋升 site_change（不落 source_failed）
+// S4  已移除：原实现依赖「手工创建 official_site_profile attempt + 直接调用 tryPromote」，
+//     未覆盖真实用户操作（runDueProbes 始终调度 public_site_products）。真实分阶段链路与
+//     受控能力升级见 sc08-r2.test.js F1/F5。
 // ============================================================
 const test = require('node:test');
 const assert = require('node:assert');
@@ -72,6 +74,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
     dimension: 'price', eventType: 'price_changed',
     title: '价格由 20 调整为 15', summary: '价格 20 → 15',
     subjectId: 'sku-1', observedAt: now,
+    origin: 'monitoring',
     effectiveAt: now, // 与 observedAt 相同 = 伪造 → 必须置 null
     change: { field: 'price', oldValue: 20, newValue: 15, direction: 'decrease', delta: -5, pct: -25, currency: 'USD', basis: 'deterministic_diff' },
     evidenceRefs: [{ snapshotId: 'snap_x', sourceUrl: 'https://example.com/p/1', observedAt: now }],
@@ -97,6 +100,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   const noEv = Inbox.recordEvent({
     tenantId: TID, projectId: PID, competitorId: CID, dimension: 'website', eventType: 'website_changed',
     title: '官网内容变化：页面标题变更', observedAt: new Date(Date.now() + 1000).toISOString(),
+    origin: 'monitoring',
     change: { field: 'title', oldValue: 'A', newValue: 'B', basis: 'deterministic_diff' },
     evidenceRefs: [], verificationStatus: 'verified',
   });
@@ -119,7 +123,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   for (const bad of ['spend', 'roi', 'gmv', 'conversion_rate']) {
     const r = Inbox.recordEvent({
       tenantId: TID, projectId: PID, competitorId: CID, dimension: 'ads', eventType: 'ad_changed',
-      title: 'x', observedAt: now, change: { [bad]: 1 },
+      title: 'x', observedAt: now, origin: 'monitoring', change: { [bad]: 1 },
     });
     assert.strictEqual(r.recorded, false);
     // 注意：ads 维度本身未接入写入点，理由可能是维度未接入——两者都属拒收
@@ -128,7 +132,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   // 已接入维度 + 禁字段 → 明确按禁字段拒收
   const forbid = Inbox.recordEvent({
     tenantId: TID, projectId: PID, competitorId: CID, dimension: 'price', eventType: 'price_changed',
-    title: 'x', observedAt: now, change: { field: 'price', oldValue: 20, newValue: 15, roi: 3.2 },
+    title: 'x', observedAt: now, origin: 'monitoring', change: { field: 'price', oldValue: 20, newValue: 15, roi: 3.2 },
   });
   assert.strictEqual(forbid.recorded, false);
   assert.strictEqual(forbid.reason, 'FORBIDDEN_CHANGE_FIELD:roi');
@@ -136,7 +140,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   // 未接入维度（review）不得写入占位事件
   const notYet = Inbox.recordEvent({
     tenantId: TID, projectId: PID, competitorId: CID, dimension: 'review', eventType: 'review_changed',
-    title: 'x', observedAt: now, change: { field: 'rating', oldValue: 4.5, newValue: 4.4 },
+    title: 'x', observedAt: now, origin: 'monitoring', change: { field: 'rating', oldValue: 4.5, newValue: 4.4 },
   });
   assert.strictEqual(notYet.recorded, false);
   assert.ok(/DIMENSION_NOT_INTEGRATED/.test(notYet.reason), '未接入维度拒收: ' + notYet.reason);
@@ -144,7 +148,7 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   // 区间价格结构保真
   const range = Inbox.recordEvent({
     tenantId: TID, projectId: PID, competitorId: CID, dimension: 'price', eventType: 'price_changed',
-    title: '区间价格变化', observedAt: new Date(Date.now() + 2000).toISOString(),
+    title: '区间价格变化', observedAt: new Date(Date.now() + 2000).toISOString(), origin: 'monitoring',
     change: { field: 'price_range', oldValue: { min: 10, max: 20 }, newValue: { min: 10, max: 18 }, basis: 'deterministic_diff' },
   });
   assert.strictEqual(range.recorded, true);
@@ -163,7 +167,7 @@ test('I2 分页：默认 30、cursor 稳定、日期倒序分组、重复写入�
     const at = new Date(base + i * 3600 * 1000).toISOString();
     const r = Inbox.recordEvent({
       tenantId: tid, projectId: pid, competitorId: CID, dimension: 'price', eventType: 'price_changed',
-      title: '事件 ' + i, subjectId: 's' + i, observedAt: at,
+      title: '事件 ' + i, subjectId: 's' + i, observedAt: at, origin: 'monitoring',
       change: { field: 'price', oldValue: 10 + i, newValue: 11 + i, basis: 'deterministic_diff' },
     });
     assert.strictEqual(r.recorded, true, '第 ' + i + ' 条写入: ' + JSON.stringify(r));
@@ -171,7 +175,7 @@ test('I2 分页：默认 30、cursor 稳定、日期倒序分组、重复写入�
   // 同 scope/同 subject/同 eventType/同 observedAt 再写 → 去重
   const dup = Inbox.recordEvent({
     tenantId: tid, projectId: pid, competitorId: CID, dimension: 'price', eventType: 'price_changed',
-    title: '重复', subjectId: 's0', observedAt: new Date(base).toISOString(),
+    title: '重复', subjectId: 's0', observedAt: new Date(base).toISOString(), origin: 'monitoring',
     change: { field: 'price', oldValue: 10, newValue: 11, basis: 'deterministic_diff' },
   });
   assert.strictEqual(dup.recorded, false);
@@ -203,7 +207,7 @@ test('I2 分页：默认 30、cursor 稳定、日期倒序分组、重复写入�
 test('I3 收件箱两租户隔离：互不可见，统计各自计算', () => {
   Inbox.ensureTable();
   const now = new Date().toISOString();
-  Inbox.recordEvent({ tenantId: TID_B, projectId: PID, competitorId: CID, dimension: 'price', eventType: 'price_changed', title: 'B 租户事件', observedAt: now, change: { field: 'price', oldValue: 1, newValue: 2, basis: 'deterministic_diff' } });
+  Inbox.recordEvent({ tenantId: TID_B, projectId: PID, competitorId: CID, dimension: 'price', eventType: 'price_changed', title: 'B 租户事件', observedAt: now, origin: 'monitoring', change: { field: 'price', oldValue: 1, newValue: 2, basis: 'deterministic_diff' } });
   const a = Inbox.listInbox({ tenantId: TID, projectId: PID });
   const b = Inbox.listInbox({ tenantId: TID_B, projectId: PID });
   assert.ok(!a.groups.flatMap(g => g.events).some(e => e.title === 'B 租户事件'), 'A 看不到 B 的事件');
@@ -341,71 +345,4 @@ test('S3b site_change 真实失败：官网不可达 → not_supported/fetch_fai
   assert.strictEqual(res.succeeded, 0);
   assert.strictEqual(res.failureReasons.blocked, 1, '如实记录失败分类: ' + JSON.stringify(res.failureReasons));
   assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '失败不产事件');
-});
-
-// ---------- S4：无可比价格但官网稳定 → 晋升 site_change ----------
-test('S4 晋升降级：两次官网采集 + 稳定字段 + 无可比价格 → Target 信号 site_change（不落 source_failed）', () => {
-  const tid = 'tenant:sc08promote';
-  const pid = 'projSC08Promote';
-  const cid = 'c-promote-1';
-  seedProject(tid, pid, [comp(cid, 'https://acme.example.com/', false)]);
-
-  // 造两次官网采集（真实快照：Snapshot.record 落盘）
-  const mkSiteAttempt = (html, at) => {
-    const snap = Snapshot.record({
-      capability: 'evidence_url', provider: 'generic_web_fetch',
-      source_url: 'https://acme.example.com/', final_url: 'https://acme.example.com/',
-      http_status: 200, source_status: 'success', error_code: null,
-      observed_at: at, fetched_at: at, bodyBytes: Buffer.from(html, 'utf8'),
-      trigger: 'schedule', tenantId: tid,
-    });
-    assert.strictEqual(snap.recorded, true, '快照落盘');
-    const mk = SurfaceStore.createAttempt({
-      tenantId: tid, projectId: pid, competitorId: cid,
-      capability: 'official_site_profile', dimension: 'website_profile',
-      trigger: 'schedule', idempotencyKey: 'sc08-site-' + at,
-    });
-    SurfaceStore.completeAttempt(tid, mk.attempt.attemptId, {
-      status: 'success', sourceStatus: 'success',
-      observations: [{ id: 'https://acme.example.com/', kind: 'site_profile', title: 'Acme' }],
-      snapshotIds: [snap.meta.snapshot_id], evidenceIds: [], endedAt: at,
-    }, null);
-    return mk.attempt.attemptId;
-  };
-  const a1 = mkSiteAttempt(HTML_A, '2026-10-20T10:00:00.000Z');
-  const a2 = mkSiteAttempt(HTML_A, '2026-10-20T18:00:00.000Z');
-
-  // 意向：建立中，lastProbeAttemptId 指向第二次
-  WIntent.requestIntent({ tenantId: tid, projectId: pid, competitorId: cid, reasonCode: 'no_direct_source' });
-  WIntent.scheduleFirstProbe({ tenantId: tid, projectId: pid, competitorId: cid });
-
-  const sc = WIntent.siteChangeEligibility(tid, pid, cid);
-  assert.strictEqual(sc.attempts, 2, '两次官网采集: ' + JSON.stringify(sc));
-  assert.strictEqual(sc.stable, true, '结构化字段稳定: ' + JSON.stringify(sc));
-  assert.strictEqual(sc.eligible, true, 'site_change 可晋升: ' + JSON.stringify(sc));
-
-  // onProbeFinished：无可比价格 → 走降级晋升
-  const att = SurfaceStore.getAttempt(tid, a2);
-  const r = WIntent.onProbeFinished({ tenantId: tid, projectId: pid, competitorId: cid, attempt: att });
-  assert.strictEqual(r.action, 'promoted', '晋升而非 source_failed: ' + JSON.stringify(r).slice(0, 300));
-
-  const intent = WIntent.findIntent(tid, pid, cid);
-  assert.strictEqual(intent.state, 'promoted');
-  const tg = WS.listWatchTargets(tid, pid).find(t => t.watchTargetId === intent.promotedTargetId);
-  assert.deepStrictEqual(tg.enabledSignals, ['site_change'], 'enabledSignals 只有 site_change');
-  assert.deepStrictEqual(tg.supportedSignals, ['site_change'], 'supportedSignals 只有 site_change');
-  assert.ok(!/上新|库存/.test(String(intent.reasonText || '')), '不宣称上新/库存: ' + intent.reasonText);
-});
-
-test('S4b 升级方向：site_change Target 在发现稳定价格后可升级为 price，baseline 与时间线不丢', () => {
-  const tid = 'tenant:sc08upgrade';
-  const pid = 'projSC08Upgrade';
-  const cid = 'c-upgrade-1';
-  seedProject(tid, pid, [comp(cid, 'https://acme.example.com/', false)]);
-  const t1 = makeSiteTarget(tid, pid, cid);
-  WS.saveSiteBaseline({ tenantId: tid, projectId: pid, competitorId: cid, fingerprint: FP.buildFingerprint(HTML_A, 'https://acme.example.com/'), stability: { stable: true }, url: 'https://acme.example.com/' });
-  const upd = WS.updateWatchTarget(tid, t1.watchTargetId, { enabledSignals: ['price'], supportedSignals: ['price', 'site_change'] });
-  assert.deepStrictEqual(upd.enabledSignals, ['price'], '可升级为 price');
-  assert.ok((upd.supportedSignals || []).includes('site_change'), 'supportedSignals 保留历史能力');
-  assert.ok(WS.getSiteBaseline(tid, pid, cid), 'baseline 未丢失（时间线依据保留）');
 });

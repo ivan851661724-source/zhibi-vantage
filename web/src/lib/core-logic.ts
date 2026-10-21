@@ -4,30 +4,29 @@
 import type { BrandListItem, IntelItem, ReportListItem } from './core-api';
 
 // ---------- 品牌级覆盖状态（竞品库卡片徽章） ----------
+// SC-08 r2 §六：品牌级状态直接读后端唯一投影 brandCoverage.summary（不再由前端二次推导，
+// 避免「同一事实两套口径」）。这里只做显示名的映射。
 export type BrandCoverState = 'collecting' | 'hasData' | 'partial' | 'failed' | 'notCollected' | 'notIntegrated';
 
 export const BRAND_COVER_TEXT: Record<BrandCoverState, string> = {
-  collecting: '采集中',
-  hasData: '已采集',
-  partial: '部分采集',
-  failed: '最近采集失败',
-  notCollected: '尚未采集',
-  notIntegrated: '未接入',
+  collecting: '正在采集',
+  hasData: '已有数据',
+  partial: '部分维度有数据',
+  failed: '需要处理',
+  notCollected: '尚未开始采集',
+  notIntegrated: '来源未接入',
 };
 
-/** 从维度级状态推导品牌级状态（一次遍历，确定性；任一采集中优先展示进行中） */
-export function brandCoverState(b: Pick<BrandListItem, 'coverageDimensions'>): BrandCoverState {
-  const dims = b.coverageDimensions || [];
-  const integrated = dims.filter((d) => d.state !== 'unsupported');
-  if (!integrated.length) return 'notIntegrated'; // 全部维度未接入
-  const s = new Set(integrated.map((d) => d.state));
-  if (s.has('loading')) return 'collecting';
-  const hasData = s.has('ok') || s.has('stale') || s.has('partial');
-  if (hasData) {
-    return s.has('unknown') || s.has('empty') || s.has('failed') ? 'partial' : 'hasData';
-  }
-  if (s.has('failed')) return 'failed'; // 已接入但最近采集失败、无可展示数据
-  return 'notCollected'; // 已接入但尚未采集（≠该品牌没有数据）
+/** 从后端 brandCoverage.summary 归纳品牌级状态（确定性；进行中优先） */
+export function brandCoverState(b: Pick<BrandListItem, 'brandCoverage'>): BrandCoverState {
+  const sum = (b && b.brandCoverage && b.brandCoverage.summary) || null;
+  if (!sum || !sum.total) return 'notCollected';
+  if (sum.collecting > 0) return 'collecting';
+  if (sum.failed > 0) return 'failed';
+  const configured = sum.total - (sum.notConfigured || 0);
+  if (configured <= 0) return 'notIntegrated';
+  if (sum.available > 0) return sum.available < configured ? 'partial' : 'hasData';
+  return 'notCollected';
 }
 
 // ---------- 情报库顶部摘要统计 ----------
@@ -101,5 +100,29 @@ export function brandsEmptyKind(hasActiveFilter: boolean): BrandsEmptyKind {
 
 /** 无筛选且列表非空时，判断是否属于「已添加但全部尚未采集」 */
 export function allBrandsNotCollected(items: BrandListItem[]): boolean {
-  return items.length > 0 && !items.some((b) => (b.coverageSummary.dimensionsWithData || 0) > 0);
+  // 只有「全部品牌都还没开始采集」才用首轮采集引导空态。
+  // 采集失败 / 正在采集 / 有数据 都必须显示卡片——否则「需要处理」的品牌会被空态吞掉。
+  return items.length > 0 && items.every((b) => brandCoverState(b) === 'notCollected');
+}
+
+// ---------- 用户可读枚举（禁止把内部英文码直接显示给用户） ----------
+export const RELATION_TEXT: Record<string, string> = {
+  direct: '直接竞品',
+  indirect: '间接竞品',
+  emerging: '新兴竞品',
+  competitor: '竞品',
+};
+export function relationText(r: string | null | undefined): string {
+  const k = String(r || '').trim().toLowerCase();
+  if (!k) return '竞品';
+  return RELATION_TEXT[k] || String(r);
+}
+
+export const MARKET_TEXT: Record<string, string> = {
+  us: '美国', uk: '英国', eu: '欧洲', cn: '中国', jp: '日本', sea: '东南亚', ca: '加拿大', au: '澳大利亚',
+};
+export function marketText(m: string | null | undefined): string {
+  const k = String(m || '').trim().toLowerCase();
+  if (!k) return '';
+  return MARKET_TEXT[k] || String(m);
 }

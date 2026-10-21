@@ -69,13 +69,19 @@ function dueWindows(target, nowMs) {
 // ---------- 非 Shopify：公开商品页直采（仅供已升级的正式监控使用） ----------
 // 走 official_site_products adapter：robots/SSRF/快照/证据链与手动刷新完全一致；
 // attempt 以 schedule 记账（03 §20 枚举内），窗口幂等仍由 watch_windows 保证。
-async function collectPublicSiteProducts(comp, tid, pid) {
+async function collectPublicSiteProducts(comp, tid, pid, opts) {
   const Adapters = require('./source-adapter.js');
   const ad = Adapters.getAdapter('official_site_products');
   if (!ad) return { ok: false, error: 'adapter_missing' };
+  const o = opts || {};
   let r = null;
-  try { r = await ad.collect({ tenantId: tid, projectId: pid, competitor: comp, trigger: 'schedule' }); }
+  // 显式幂等键（按监控窗口）：窗口本身已保证至多一次有效执行，
+  // 不能再让 capability 冷却把同一窗口的复采去重成「上一次的旧观察」——
+  // 否则价格变化会被静默吞掉，窗口还会显示成功（E2E 实测缺陷）。
+  try { r = await ad.collect({ tenantId: tid, projectId: pid, competitor: comp, trigger: 'schedule', idempotencyKey: o.idempotencyKey || undefined }); }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+  // 被去重 = 没有本次真实观察：如实失败（覆盖缺口），绝不拿旧 attempt 的观察冒充本轮结果
+  if (r && r.deduped) return { ok: false, error: 'deduped', reason: 'observation_deduped' };
   const att = r && r.attempt;
   if (!att) return { ok: false, error: (r && (r.error || r.errorClass)) || 'fetch_failed' };
   if (att.status !== 'success' && att.status !== 'partial') {
@@ -88,18 +94,29 @@ async function collectPublicSiteProducts(comp, tid, pid) {
   const obs = Array.isArray(att.observations) ? att.observations : [];
   const items = obs.filter(o => o && o.id && typeof o.price === 'number')
     .map(o => ({ id: o.id, repPrice: o.price, currency: o.currency || null, title: o.title || null, soldOut: false }));
-  return { ok: true, items, currency: (obs.map(o => o && o.currency).filter(Boolean)[0] || null), partialScan: att.status === 'partial' };
+  // 证据：来源快照（本轮真实抓取的页面快照）——价格变化事件据此才能标「已核实」
+  return {
+    ok: true, items,
+    currency: (obs.map(o => o && o.currency).filter(Boolean)[0] || null),
+    partialScan: att.status === 'partial',
+    snapshotIds: Array.isArray(att.snapshotIds) ? att.snapshotIds : [],
+    sourceUrl: att.sourceUrl || comp.url || null,
+  };
 }
 
-// ---------- 价格变化 → 每日收件箱事件（SC-08 §二） ----------
-// 只在「同商品、同市场、同币种、同规格」且已有前值时产生（首次 = baseline，不产事件）。
-// 证据：来源快照（verified）；无快照则如实 pending。
-function recordPriceInboxEvent({ tid, pid, comp, ev, windowId, observedAt, sourceUrl, snapshotIds }) {
+// ---------- 价格变化 → 收件箱（SC-08 r2 §三：先写库，再决定提醒/计数/前移快照） ----------
+// 返回 kind：verified | pending | duplicate | failed
+//   · 只有 verified 才允许提醒并计入已核实
+//   · pending 只计入待核实（提醒按待核实发）
+//   · duplicate 不提醒、不计数（调用方仍可前移价格快照）
+//   · failed 不提醒、不计数，且调用方**不得**落新快照 → 下次窗口重试这次变化
+function applyPriceChange({ tid, pid, comp, ev, windowId, observedAt, sourceUrl, snapshotIds, alertsPushFn, inboxFn }) {
+  let rec = null;
   try {
     const refs = [];
     for (const sid of (snapshotIds || []).slice(0, 3)) refs.push({ snapshotId: sid, sourceUrl: sourceUrl || null, observedAt });
     const delta = (typeof ev.old === 'number' && typeof ev.new === 'number') ? ev.new - ev.old : null;
-    return require('./intel-inbox.js').recordEvent({
+    rec = (inboxFn || require('./intel-inbox.js')).recordEvent({
       tenantId: tid, projectId: pid, competitorId: comp.id,
       brandName: comp.name || null,
       dimension: 'price', eventType: 'price_changed',
@@ -121,8 +138,28 @@ function recordPriceInboxEvent({ tid, pid, comp, ev, windowId, observedAt, sourc
       verificationStatus: refs.length ? 'verified' : 'pending',
       windowKey: windowId,
     });
-  } catch (e) { return { recorded: false, reason: 'EXCEPTION' }; }
+  } catch (e) {
+    rec = { recorded: false, reason: 'EXCEPTION' };
+  }
+  const kind = (rec && rec.recorded === true)
+    ? (rec.verificationStatus === 'verified' ? 'verified' : 'pending')
+    : (rec && rec.reason === 'DUPLICATE' ? 'duplicate' : 'failed');
+  if (kind === 'verified' || kind === 'pending') {
+    try {
+      alertsPushFn(tid, {
+        type: 'price-change', projectId: pid,
+        competitorId: comp.id, competitorName: comp.name, subjectId: ev.subjectId,
+        title: ev.title,
+        text: (ev.title ? ev.title + '：' : '') + PH.describeChange(ev, () => ''),
+        old: ev.old, new: ev.new,
+        deltaPct: ev.deltaPct != null ? ev.deltaPct : null,
+        currency: ev.currency, sourceUrl: sourceUrl || null, basis: kind === 'verified' ? 'verified' : 'pending',
+      });
+    } catch (e) { /* 推送失败不影响窗口落账 */ }
+  }
+  return { kind, rec };
 }
+
 
 // ---------- 非 Shopify：官网内容结构化指纹采集（SC-08 §三 C） ----------
 // 走 official_site_profile adapter：SSRF/FetchGate/robots/重定向/大小/超时/快照/证据链
@@ -187,10 +224,27 @@ async function executeWindow(target, windowId, deps, nowMs) {
   const stockLoadFn = deps.stockLoadFn || StockStore.load;
   const stockSaveFn = deps.stockSaveFn || StockStore.save;
   const alertsPushFn = deps.alertsPushFn || Alerts.push;
+  // 收件箱写入口（默认真实模块；测试可注入以验证「写库失败/重复」分支的行为）
+  const inboxFn = deps.inboxFn || require('./intel-inbox.js');
   const signals = target.enabledSignals;
   const results = [];
   const failureReasons = {};
   let partialScan = false, eventsVerified = 0, anySuccess = false;
+  // SC-08 r2 §三：事件写库结果的真实计数（不得把 pending/重复/写失败都算成「已核实」）
+  let eventsPending = 0, eventsWriteFailed = 0, eventsDuplicate = 0;
+
+  // 事件写入结果的唯一分类口径（§三 规则 1–6）：
+  //   recorded && verified → 计入已核实（才允许提醒、才前移基线）
+  //   recorded && pending  → 只计入待核实（提醒可按待核实发，但绝不进已核实）
+  //   DUPLICATE            → 不重复提醒、不重复计数；允许前移基线（内容确实已是新状态）
+  //   WRITE_FAILED / 拒收  → 不提醒、不计数、不前移基线（下次巡检必须能重试这次变化）
+  const classifyInboxResult = (rec) => {
+    if (rec && rec.recorded === true) {
+      return rec.verificationStatus === 'verified' ? 'verified' : 'pending';
+    }
+    if (rec && rec.reason === 'DUPLICATE') return 'duplicate';
+    return 'failed';
+  };
 
   let comp = null;
   try {
@@ -237,10 +291,11 @@ async function executeWindow(target, windowId, deps, nowMs) {
             const FP = require('./site-fingerprint.js');
             const diff = FP.diffFingerprints(baseline.fingerprint, sres.fingerprint);
             if (diff.comparable && diff.changes.length) {
-              eventsVerified++;
+              // 🔴 SC-08 r2 §三：顺序必须是 确定性 Diff → 写 intel_events → 再处理
+              // 基线 / 窗口统计 / 提醒。先发提醒再写库会让「写失败」悄悄变成「已通知」。
               const first = diff.changes[0];
               const refs = (sres.evidenceRefs || []).slice(0, 6);
-              const rec = require('./intel-inbox.js').recordEvent({
+              const rec = inboxFn.recordEvent({
                 tenantId: tid, projectId: pid, competitorId: comp.id,
                 brandName: comp.name || null,
                 dimension: 'website', eventType: 'website_changed',
@@ -260,29 +315,67 @@ async function executeWindow(target, windowId, deps, nowMs) {
                 verificationStatus: refs.length ? 'verified' : 'pending',
                 windowKey: windowId,
               });
-              try {
-                alertsPushFn(tid, {
-                  type: 'site-change', projectId: pid,
-                  competitorId: comp.id, competitorName: comp.name,
-                  title: '官网内容变化', text: (comp.name || '竞品') + '：' + FP.describeChanges(diff.changes),
-                  sourceUrl: sres.sourceUrl || comp.url || null, basis: refs.length ? 'verified' : 'pending',
+              const kind = classifyInboxResult(rec);
+              if (kind === 'verified') {
+                eventsVerified += 1;
+                try {
+                  alertsPushFn(tid, {
+                    type: 'site-change', projectId: pid,
+                    competitorId: comp.id, competitorName: comp.name,
+                    title: '官网内容变化', text: (comp.name || '竞品') + '：' + FP.describeChanges(diff.changes),
+                    sourceUrl: sres.sourceUrl || comp.url || null, basis: 'verified',
+                  });
+                } catch (e) { /* 推送失败不影响窗口落账 */ }
+                // baseline 前移：同一变化不会在后续窗口被重复报出
+                WS.saveSiteBaseline({
+                  tenantId: tid, projectId: pid, competitorId: comp.id,
+                  fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
                 });
-              } catch (e) { /* 推送失败不影响窗口落账 */ }
-              // baseline 前移：同一变化不会在后续窗口被重复报出
-              WS.saveSiteBaseline({
-                tenantId: tid, projectId: pid, competitorId: comp.id,
-                fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
-              });
-              if (!rec || !rec.recorded) { /* 去重/规则拒绝：不静默改口径，窗口照常成功 */ }
+                attempt('site_change', true);
+              } else if (kind === 'pending') {
+                // 无证据事件：只计入待核实，不计入已核实；仍前移基线（避免同一变化反复报）
+                eventsPending += 1;
+                try {
+                  alertsPushFn(tid, {
+                    type: 'site-change', projectId: pid,
+                    competitorId: comp.id, competitorName: comp.name,
+                    title: '官网内容变化（待核实）', text: (comp.name || '竞品') + '：' + FP.describeChanges(diff.changes),
+                    sourceUrl: sres.sourceUrl || comp.url || null, basis: 'pending',
+                  });
+                } catch (e) { /* 推送失败不影响窗口落账 */ }
+                WS.saveSiteBaseline({
+                  tenantId: tid, projectId: pid, competitorId: comp.id,
+                  fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
+                });
+                attempt('site_change', true);
+              } else if (kind === 'duplicate') {
+                // 重复事件：不提醒、不计数；可以前移基线（这次观察已被记录过）
+                eventsDuplicate += 1;
+                WS.saveSiteBaseline({
+                  tenantId: tid, projectId: pid, competitorId: comp.id,
+                  fingerprint: sres.fingerprint, stability: sres.stability, url: sres.sourceUrl, at: nowIsoS,
+                });
+                attempt('site_change', true);
+              } else {
+                // 写库失败：不提醒、不计数、不前移基线 —— 下次巡检必须重试这次变化。
+                // 采集本身成功，但窗口必须如实登记这个缺口（不能仍显示完全成功）。
+                eventsWriteFailed += 1;
+                failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
+                partialScan = true;
+                attempt('site_change', true);
+                try { Logger.error('intel event 写入失败（官网变化）', { tenantId: tid, projectId: pid, competitorId: comp.id, reason: (rec && rec.reason) || null }); } catch (e2) {}
+              }
+            } else {
+              attempt('site_change', true);
             }
-            attempt('site_change', true);
           }
         } catch (e) { attempt('site_change', false, 'parse_failed'); }
       }
     }
     if (signals.includes('price')) {
       let pres = null;
-      try { pres = await (deps.publicSiteFn || collectPublicSiteProducts)(comp, tid, pid); }
+      const priceKey = 'price_snap:' + tid + ':' + pid + ':' + comp.id + ':' + windowId;
+      try { pres = await (deps.publicSiteFn || collectPublicSiteProducts)(comp, tid, pid, { idempotencyKey: priceKey }); }
       catch (e) { pres = { ok: false, error: String((e && e.message) || e) }; }
       if (!pres || !pres.ok) {
         const reason = pres && pres.status === 429 ? 'rate_limited'
@@ -305,23 +398,21 @@ async function executeWindow(target, windowId, deps, nowMs) {
             };
             const r2 = WPrice.applyProductSnapshot(prev, entry);
             if (r2.event && r2.event.kind === 'changed') {
-              eventsVerified++;
-              try {
-                alertsPushFn(tid, {
-                  type: 'price-change', projectId: pid,
-                  competitorId: comp.id, competitorName: comp.name, subjectId: r2.event.subjectId,
-                  title: r2.event.title,
-                  text: (r2.event.title ? r2.event.title + '：' : '') + PH.describeChange(r2.event, () => ''),
-                  old: r2.event.old, new: r2.event.new,
-                  deltaPct: r2.event.deltaPct != null ? r2.event.deltaPct : null,
-                  currency: r2.event.currency, sourceUrl: it.id || comp.url || null, basis: 'verified',
-                });
-              } catch (e) { /* 推送失败不影响窗口落账 */ }
-              recordPriceInboxEvent({
+              const ap = applyPriceChange({
                 tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
                 sourceUrl: it.id || pres.sourceUrl || comp.url || null,
-                snapshotIds: (pres && pres.snapshotIds) || [],
+                snapshotIds: (pres && pres.snapshotIds) || [], alertsPushFn, inboxFn,
               });
+              if (ap.kind === 'verified') eventsVerified += 1;
+              else if (ap.kind === 'pending') eventsPending += 1;
+              else if (ap.kind === 'duplicate') eventsDuplicate += 1;
+              else {
+                // 写库失败：不提醒、不计数、不落新快照 → 下个窗口重试这次变化
+                eventsWriteFailed += 1;
+                failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
+                partialScan = true;
+                continue;
+              }
             }
             try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
@@ -364,23 +455,21 @@ async function executeWindow(target, windowId, deps, nowMs) {
             };
             const r2 = WPrice.applyProductSnapshot(prev, entry);
             if (r2.event && r2.event.kind === 'changed') {
-              eventsVerified++;
-              try {
-                alertsPushFn(tid, {
-                  type: 'price-change', projectId: pid,
-                  competitorId: comp.id, competitorName: comp.name, subjectId: r2.event.subjectId,
-                  title: r2.event.title,
-                  text: (r2.event.title ? r2.event.title + '：' : '') + PH.describeChange(r2.event, () => ''),
-                  old: r2.event.old, new: r2.event.new,
-                  deltaPct: r2.event.deltaPct != null ? r2.event.deltaPct : null,
-                  currency: r2.event.currency, sourceUrl: res.url || comp.url || null, basis: 'verified',
-                });
-              } catch (e) { /* 推送失败不影响窗口落账 */ }
-              recordPriceInboxEvent({
+              const ap = applyPriceChange({
                 tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
                 sourceUrl: res.url || comp.url || null,
                 snapshotIds: res.snapshotId ? [res.snapshotId] : (res.snapshotIds || []),
+                alertsPushFn, inboxFn,
               });
+              if (ap.kind === 'verified') eventsVerified += 1;
+              else if (ap.kind === 'pending') eventsPending += 1;
+              else if (ap.kind === 'duplicate') eventsDuplicate += 1;
+              else {
+                eventsWriteFailed += 1;
+                failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
+                partialScan = true;
+                continue;
+              }
             }
             try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
@@ -450,7 +539,10 @@ async function executeWindow(target, windowId, deps, nowMs) {
   const attempted = results.reduce((n, r) => n + r.attempted, 0);
   const succeeded = results.reduce((n, r) => n + r.succeeded, 0);
   const failed = results.reduce((n, r) => n + r.failed, 0);
-  return { signalResults: results, attempted, succeeded, failed, partialScan, failureReasons, eventsVerified, anySuccess };
+  return {
+    signalResults: results, attempted, succeeded, failed, partialScan, failureReasons, eventsVerified,
+    eventsPending, eventsWriteFailed, eventsDuplicate, anySuccess,
+  };
 }
 
 // ---------- 一轮到点巡检 ----------
@@ -480,7 +572,7 @@ async function runDueWindows(opts) {
       // 目标级状态推进：任一信号成功 → fresh + 基线完成；全部失败 → degraded
       if (result.anySuccess) WS.markSuccess(target.tenantId, target.watchTargetId, new Date(nowMs).toISOString());
       else WS.markDegraded(target.tenantId, target.watchTargetId);
-      const cov = (result.failed > 0 || result.partialScan) ? 'gap' : 'full';
+      const cov = (result.failed > 0 || result.partialScan || result.eventsWriteFailed > 0) ? 'gap' : 'full';
       out.windows.push({ windowId: claim.windowId, slot: due.slot, outcome: cov === 'full' ? 'full' : 'gap', failed: result.failed, partialScan: result.partialScan });
     }
   }

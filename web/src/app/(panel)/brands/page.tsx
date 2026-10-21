@@ -1,17 +1,27 @@
 'use client';
-// 竞品数据库（SC-06 一）：项目内竞争品牌的统一数据库首页——官网确认状态 /
-// 数据覆盖 / 最近可核验变化 / 时间积累起点，逐项可核。
-// SC-06 信息架构：原「竞品库」列表即竞品数据库首页（不新建重复一级页面）；
-// /brands 深链接与旧 URL 完全兼容。
-// 术语纪律：「尚未采集」不写成「没有数据」；「未接入」不写成「未发现」。
+// ============================================================
+// 竞品数据库（SC-08 r2 §四）
+// 定位：项目内所有竞争品牌的**长期数据档案入口**——不是调试信息列表。
+//
+// 页面结构（自上而下，只有这四块）：
+//   ① 标题 + 一句普通用户能读懂的说明
+//   ② 紧凑项目统计：品牌总数 / 已开始积累 / 正在采集 / 需要处理
+//   ③ 同一工具栏：搜索 + 状态 + 关系筛选（移动端纵向堆叠）
+//   ④ 品牌卡片网格：1920 → 3 列；1440 → 2–3 列；390 → 1 列
+//
+// 每张卡片只有六项 + 一个主按钮：
+//   品牌名 / 官网 / 关系 · 官网确认状态 · 正式监控状态 · 已有真实数据的维度 ·
+//   最近一次可核验变化 · 数据积累起点 · 「查看品牌档案」
+// 纪律：内部状态、英文枚举、attempt、provider、技术错误码一律不出现在卡片上；
+//       「尚未开始采集」不等于「没有数据」，「来源未接入」不等于「没有变化」。
+// ============================================================
 import Link from 'next/link';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { fetchBrands, type BrandListItem, type CollectionCoverage } from '@/lib/core-api';
+import { fetchBrands, type BrandListItem, type BrandsProjectStats } from '@/lib/core-api';
 import { apiPost } from '@/lib/api';
-import { BRAND_COVER_TEXT, brandCoverState, brandsEmptyKind, allBrandsNotCollected, type BrandCoverState } from '@/lib/core-logic';
-import { CollectionCoverageStrip } from '@/components/collection-coverage';
+import { BRAND_COVER_TEXT, brandCoverState, allBrandsNotCollected, relationText, type BrandCoverState } from '@/lib/core-logic';
 import { EmptyState } from '@/components/core-ui';
 
 export default function BrandsPage() {
@@ -24,29 +34,48 @@ export default function BrandsPage() {
 
 const COVER_FILTERS: { value: '' | BrandCoverState; label: string }[] = [
   { value: '', label: '全部状态' },
-  { value: 'hasData', label: '已采集' },
-  { value: 'partial', label: '部分采集' },
-  { value: 'collecting', label: '采集中' },
-  { value: 'failed', label: '最近采集失败' },
-  { value: 'notCollected', label: '尚未采集' },
-  { value: 'notIntegrated', label: '未接入' },
+  { value: 'hasData', label: '已有数据' },
+  { value: 'partial', label: '部分维度有数据' },
+  { value: 'collecting', label: '正在采集' },
+  { value: 'failed', label: '需要处理' },
+  { value: 'notCollected', label: '尚未开始采集' },
+  { value: 'notIntegrated', label: '来源未接入' },
 ];
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleDateString(); } catch (e) { return '—'; }
+}
+// 精确到分钟即可：秒级时间戳是机器口径，不该占据卡片视线
+function fmtDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  } catch (e) { return '—'; }
+}
+const DIM_LABEL: Record<string, string> = {
+  price: '价格', website: '官网内容', product: '商品', stock: '库存',
+  review: '评论', social: '社媒', ads: '广告', search: '搜索热度',
+};
 
 function BrandsInner() {
   const { state } = useZhibiState();
   const sp = useSearchParams();
   const projectId = String(sp.get('projectId') || (state as { projectId?: string } | null)?.projectId || '');
   const [items, setItems] = useState<BrandListItem[]>([]);
+  const [stats, setStats] = useState<BrandsProjectStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [kw, setKw] = useState('');
-  // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细），真实渲染后端 collectionCoverage
-  const [coverage, setCoverage] = useState<CollectionCoverage | null>(null);
+  const [cover, setCover] = useState<'' | BrandCoverState>('');
+  const [rel, setRel] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
   const [bootMsg, setBootMsg] = useState<string | null>(null);
+  const [inFlight, setInFlight] = useState(false);
 
-  // SC-07 §1：一次补齐首轮采集（不要求用户逐个点 15 次）；
-  // 有界、可重复，幂等/冷却/额度由采集链路保证，重复点击不会重复产生任务。
+  // 一次补齐首轮采集（有界、幂等；重复点击不会重复产生任务）
   const startBootstrap = async () => {
     setBootstrapping(true);
     setBootMsg(null);
@@ -58,18 +87,15 @@ function BrandsInner() {
       setBootMsg(`已入队 ${c.enqueued || 0} 项 / 去重 ${c.deduped || 0} 项 / 跳过 ${c.skipped || 0} 项（共 ${(r && r.brands) || 0} 个品牌）`);
       const fresh = await fetchBrands(projectId);
       setItems(fresh.brands || []);
-      setCoverage(fresh.collectionCoverage || null);
+      setStats(fresh.stats || null);
     } catch (e) {
       setBootMsg(e instanceof Error ? e.message : '入队失败');
     } finally {
       setBootstrapping(false);
     }
   };
-  const [cover, setCover] = useState<'' | BrandCoverState>('');
-  const [rel, setRel] = useState('');
 
-  // r3 修复：跨项目切换时重置搜索与筛选。搜索词/覆盖状态/竞争关系是原项目的
-  // 浏览上下文，残留到目标项目会造成「假空结果」。
+  // 跨项目切换：搜索/状态/关系是原项目的浏览上下文，残留会造成「假空结果」
   const prevPidRef = useRef(projectId);
   useEffect(() => {
     if (prevPidRef.current === projectId) return;
@@ -77,6 +103,7 @@ function BrandsInner() {
     setKw('');
     setCover('');
     setRel('');
+    setBootMsg(null);
   }, [projectId]);
 
   useEffect(() => {
@@ -85,27 +112,35 @@ function BrandsInner() {
     const ctrl = new AbortController();
     setLoading(true);
     fetchBrands(projectId, ctrl.signal)
-      .then(r => { if (alive) { setItems(r.brands || []); setCoverage(r.collectionCoverage || null); setErr(null); } })
+      .then(r => {
+        if (!alive) return;
+        setItems(r.brands || []);
+        setStats(r.stats || null);
+        setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
+        setErr(null);
+      })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId]);
 
-  // SC-07 r2 §四 / r3 P1：有排队/采集中任务时定时刷新，直到进入终态
-  // r3 修正：轮询必须同时更新品牌列表与采集覆盖——旧实现只刷覆盖，
-  // 品牌卡会一直停在「排队中」，用户看不到状态推进。
+  // 有排队/采集中任务时定时刷新（含品牌卡与统计，用户能看到状态推进）
   useEffect(() => {
-    if (!projectId || !coverage?.anyInFlight) return;
+    if (!projectId || !inFlight) return;
     let alive = true;
     const t = setInterval(() => {
       fetchBrands(projectId)
-        .then(r => { if (!alive) return; setItems(r.brands || []); setCoverage(r.collectionCoverage || null); })
+        .then(r => {
+          if (!alive) return;
+          setItems(r.brands || []);
+          setStats(r.stats || null);
+          setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
+        })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
     }, 5000);
     return () => { alive = false; clearInterval(t); };
-  }, [projectId, coverage?.anyInFlight]);
+  }, [projectId, inFlight]);
 
-  // 竞争关系候选（来自数据本身，不预设枚举）
   const relOptions = useMemo(() => {
     const m = new Map<string, number>();
     for (const b of items) {
@@ -136,82 +171,93 @@ function BrandsInner() {
       <div className="page-head">
         <div>
           <h2>竞品数据库</h2>
-          <p className="desc">项目内全部竞争品牌的统一数据库：官网确认状态、数据覆盖、最近可核验变化与时间积累起点，逐项可核。</p>
+          <p className="desc">这里长期保存项目内每个竞争品牌的公开数据档案：官网与商品、用户声音、内容与广告，以及每天发生的变化。</p>
         </div>
         <Link className="btn-ghost" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>
       </div>
 
+      {/* ② 紧凑项目统计（后端同源派生；点击「需要处理」可直接筛选） */}
+      <div id="coverage" className="core-stat-row" data-testid="brands-stats">
+        <div className="core-stat"><span className="core-stat-num">{stats ? stats.brands : items.length}</span><span className="core-stat-label">品牌总数</span></div>
+        <div className="core-stat"><span className="core-stat-num">{stats ? stats.accumulating : 0}</span><span className="core-stat-label">已开始积累</span></div>
+        <div className="core-stat"><span className="core-stat-num">{stats ? stats.collecting : 0}</span><span className="core-stat-label">正在采集</span></div>
+        <div className={'core-stat' + (stats && stats.needsAttention > 0 ? ' is-warn' : '')}>
+          <span className="core-stat-num">{stats ? stats.needsAttention : 0}</span><span className="core-stat-label">需要处理</span>
+        </div>
+      </div>
+
+      {/* ③ 统一工具栏 */}
       <div className="core-brand-filters">
         <input type="search" placeholder="搜索品牌名或官网" value={kw} onChange={(e) => setKw(e.target.value)} />
-        <select value={cover} onChange={(e) => setCover(e.target.value as '' | BrandCoverState)}>
+        <select value={cover} onChange={(e) => setCover(e.target.value as '' | BrandCoverState)} aria-label="状态筛选">
           {COVER_FILTERS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
-        <select value={rel} onChange={(e) => setRel(e.target.value)}>
+        <select value={rel} onChange={(e) => setRel(e.target.value)} aria-label="关系筛选">
           <option value="">全部关系</option>
-          {relOptions.map(([k, n]) => <option key={k} value={k}>{k}（{n}）</option>)}
+          {relOptions.map(([k, n]) => <option key={k} value={k}>{relationText(k)}（{n}）</option>)}
         </select>
         <span className="core-brand-count">{filtered.length} / {items.length} 个品牌</span>
       </div>
 
       {bootMsg ? <p className="hint">{bootMsg}</p> : null}
 
-      {/* SC-07 r2 §四：项目级采集状态（七态统一口径，与情报库一致） */}
-      {/* SC-08 §二：情报库的「查看数据覆盖与采集状态」次级链接落到这里（#coverage） */}
-      <div id="coverage" className="core-cov-anchor">
-        <CollectionCoverageStrip coverage={coverage} projectId={projectId} />
-      </div>
-
       {!items.length ? (
         <EmptyState
-          title="尚未添加竞争品牌"
-          sub="该项目还没有竞品。先在竞品雷达发现并添加品牌，这里会建立统一品牌档案；未采集的品牌会如实标注「尚未采集」。"
+          title="还没有竞争品牌"
+          sub="先在竞品雷达发现并添加品牌，这里会为每个品牌建立长期数据档案。"
           action={<Link className="btn primary" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>}
         />
       ) : allBrandsNotCollected(items) && !hasFilter ? (
         <EmptyState
-          title="已登记品牌，首轮采集尚未开始"
-          sub={`已登记 ${items.length} 个竞争品牌。系统会按公开来源逐项入队采集（官网资料 / Shopify 公开目录 / 公开评论）；此状态不代表这些品牌没有数据。`}
-          action={<button type="button" className="btn primary" disabled={bootstrapping} onClick={startBootstrap}>{bootstrapping ? '正在入队…' : '补齐首轮采集'}</button>}
+          title="品牌已登记，首轮采集尚未开始"
+          sub={`已登记 ${items.length} 个竞争品牌。系统会按公开来源逐项采集（官网资料 / 公开商品页 / 公开评论），完成后这里会显示各自的档案。`}
+          action={<button type="button" className="btn primary" disabled={bootstrapping} onClick={startBootstrap}>{bootstrapping ? '正在入队…' : '开始首轮采集'}</button>}
         />
       ) : !filtered.length ? (
         <EmptyState
           title="当前筛选没有结果"
-          sub="换个关键词，或清除覆盖状态 / 竞争关系筛选后再试。"
+          sub="换个关键词，或清除状态 / 关系筛选。"
           action={<button type="button" className="btn-ghost" onClick={() => { setKw(''); setCover(''); setRel(''); }}>清除筛选</button>}
         />
       ) : (
-        <ul className="core-brand-list">
+        <ul className="core-brand-grid">
           {filtered.map(b => {
             const cs = brandCoverState(b);
+            const sum = b.brandCoverage.summary;
+            const dims = b.brandCoverage.dataDimensions || [];
+            const mon = b.monitoring;
+            const href = `/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`;
             return (
               <li key={b.brandId} className="core-brand-card">
-                <div className="core-brand-head">
-                  <Link href={`/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`}>{b.name}</Link>
-                  <span className="core-brand-domain">{b.officialDomain || '官网未核实'}</span>
-                  {b.market ? <span>{b.market}</span> : null}
-                  {b.category ? <span>{b.category}</span> : null}
-                  <span className="core-brand-rel">{b.relation || '竞品'}</span>
+                <div className="core-brand-card-head">
+                  <Link className="core-brand-name" href={href} title={b.name}>{b.name}</Link>
+                  <span className="core-brand-rel">{relationText(b.relation)}</span>
+                </div>
+                <p className="core-brand-domain" title={b.officialDomain || ''}>{b.officialDomain || '官网待确认'}</p>
+
+                <dl className="core-brand-facts">
+                  <div><dt>官网</dt><dd>{b.officialSite ? b.officialSite.statusText : '未采集'}</dd></div>
+                  <div><dt>监控</dt><dd className={mon && mon.state === 'active' ? 'is-on' : undefined}>
+                    {mon ? mon.stateText : '未加入监控'}{mon && mon.signalsText ? <span className="core-brand-sig">{mon.signalsText}</span> : null}
+                  </dd></div>
+                  <div><dt>数据维度</dt><dd>
+                    {dims.length
+                      ? <span className="core-brand-dims">{dims.map(d => d.label).join('、')}</span>
+                      : <span className="core-brand-muted">{sum.available} / {sum.total} 个维度有数据</span>}
+                  </dd></div>
+                  <div><dt>最近变化</dt><dd>
+                    {b.lastVerifiedChange
+                      ? <span className="core-brand-change-line" title={b.lastVerifiedChange.title}>
+                        {DIM_LABEL[b.lastVerifiedChange.dimension] || '变化'} · {fmtDateTime(b.lastVerifiedChange.at)}
+                      </span>
+                      : <span className="core-brand-muted">暂未观察到可核实变化</span>}
+                  </dd></div>
+                  <div><dt>积累起点</dt><dd>{b.firstObservedAt ? fmtDate(b.firstObservedAt) : <span className="core-brand-muted">尚未开始积累</span>}</dd></div>
+                </dl>
+
+                <div className="core-brand-card-foot">
                   <span className={`core-cover-badge core-cover-${cs}`}>{BRAND_COVER_TEXT[cs]}</span>
-                  {b.collection ? (
-                    <span className={`core-coll-badge core-coll-${b.collection.state}`} title={b.collection.reason || undefined}>
-                      {b.collection.stateText}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="core-brand-cov">
-                  <span className={'core-site-badge core-site-' + (b.officialSite ? b.officialSite.status : 'not_collected')}>{b.officialSite ? b.officialSite.statusText : '官网未采集'}</span>
-                  <span>有数据 {b.coverageSummary.dimensionsWithData}/{b.coverageSummary.totalDimensions} 维度</span>
-                  <span>资料缺口 {b.gaps.length} 项</span>
-                  <span>最近成功观察：{b.lastObservedAt ? new Date(b.lastObservedAt).toLocaleString() : '尚未采集'}</span>
-                  <span>时间积累起点：{b.firstObservedAt ? new Date(b.firstObservedAt).toLocaleDateString() : '尚无记录'}</span>
-                </div>
-                {b.lastChange ? (
-                  <p className="core-brand-change">最近动态：{b.lastChange.title || b.lastChange.kindText}（{new Date(b.lastChange.at).toLocaleString()}）</p>
-                ) : (
-                  <p className="core-brand-change core-brand-nodynamic">暂未观察到可核实的竞争动态（不代表该品牌没有变化）。</p>
-                )}
-                <div className="core-brand-foot">
-                  <Link className="btn-mini core-brand-open" href={`/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`}>进入品牌档案</Link>
+                  <Link className="btn-mini core-brand-open" href={href}>查看品牌档案</Link>
                 </div>
               </li>
             );

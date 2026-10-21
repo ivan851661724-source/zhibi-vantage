@@ -11,14 +11,14 @@
 //   独立「时序变化（系统推导）」区块 / 首次基线观察 / 报告生成记录 / 回补历史 / 失败维度卡。
 // 采集状态只保留一个次级链接 → 竞品数据库的项目级覆盖区域。
 // ============================================================
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 import type { SurfaceEvidenceRef } from '@/components/data-surface/types';
 import { EmptyState } from '@/components/core-ui';
-import { fetchIntelInbox, type InboxEvent, type InboxGroup, type InboxSummary } from '@/lib/core-api';
+import { fetchBrands, fetchIntelInbox, type InboxEvent, type InboxGroup, type InboxSummary } from '@/lib/core-api';
 
 // 变化类型（维度）——只列**真实接入**的维度；未接入维度不在前端造选项
 const DIMENSIONS: { value: string; label: string }[] = [
@@ -180,14 +180,22 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
   }
 
   const hasFilter = !!(brandId || dimension || status || from || to);
-  const brandOptions = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const g of groups) for (const e of g.events) {
-      const id = e.brandId || e.competitorId;
-      if (id) m.set(id, e.brandName || id);
-    }
-    return [...m.entries()];
-  }, [groups]);
+  // 品牌筛选选项 = 项目内全部品牌（不只是当前页出现过的），随项目切换重置
+  const [brandOptions, setBrandOptions] = useState<[string, string][]>([]);
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    fetchBrands(projectId)
+      .then(r => {
+        if (!alive) return;
+        setBrandOptions((r.brands || []).map(b => [b.brandId, b.name] as [string, string]));
+      })
+      .catch(() => { /* 品牌清单失败不阻塞收件箱 */ });
+    return () => { alive = false; };
+  }, [projectId]);
+  // 移动端：筛选器默认折叠（390 宽下不挤占首屏）
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilterCount = [brandId, dimension, status, from, to].filter(Boolean).length;
 
   return (
     <section className="core-inbox-page">
@@ -205,7 +213,16 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
         <span className="core-sum-item">涉及品牌 <b>{summary.brandsChanged}</b></span>
       </div>
 
-      <div className="core-inbox-filters">
+      <button
+        type="button"
+        className="core-inbox-filter-toggle"
+        aria-expanded={filtersOpen}
+        onClick={() => setFiltersOpen(v => !v)}
+      >
+        {filtersOpen ? '收起筛选' : '筛选'}{activeFilterCount ? `（${activeFilterCount}）` : ''}
+      </button>
+
+      <div className={'core-inbox-filters' + (filtersOpen ? ' is-open' : '')}>
         <select value={brandId} onChange={e => setBrandId(e.target.value)} aria-label="品牌筛选">
           <option value="">全部品牌</option>
           {brandOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
@@ -230,8 +247,8 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
           <EmptyState title="当前筛选条件下没有变化记录" sub="放宽筛选条件，或清空筛选查看全部变化。" />
         ) : (
           <EmptyState
-            title="今天暂未发现已核实的竞争变化"
-            sub="系统仍在按计划检查已监控品牌。"
+            title="当前没有新的已观察变化"
+            sub="这里只收录已建立监控基线之后、由真实观察产生的变化。系统会继续按计划检查；想了解采集范围与来源，请看「数据覆盖与采集状态」。"
           />
         )
       ) : (

@@ -4,8 +4,9 @@
 // ------------------------------------------------------------
 // 职责：只承载「基线建立之后，由两次可比较观察产生的确定性变化」。
 //
-// 硬规则（任务书 §二 字段规则）：
-//   ① origin 只有 'monitoring' 进收件箱；'backfill' / 'history' 只进品牌时间线；
+// 硬规则（任务书 §二 字段规则 + r2 §三）：
+//   ① origin 必须显式给出且合法：只有 'monitoring' 进收件箱；缺失/非法/backfill/history
+//      一律不得默认变成 monitoring（fail-closed，见 recordEvent）；回补/历史只进品牌时间线；
 //   ② 首次采集建立 baseline，不生成 inbox event（由产生点保证：无前值时只写 baseline）；
 //   ③ 无 Evidence 的事件只能是 pending——recordEvent 强制降级，不接受已核实样式；
 //   ④ effectiveAt 无可靠来源必须 null；与 observedAt 完全相同的 effectiveAt 视为伪造 → 置 null；
@@ -124,7 +125,12 @@ function recordEvent(input) {
   if (!EVENT_TYPES.has(eventType)) return { recorded: false, reason: 'UNKNOWN_EVENT_TYPE' };
   if (!(TYPE_BY_DIMENSION[dimension] || []).includes(eventType)) return { recorded: false, reason: 'TYPE_DIMENSION_MISMATCH' };
   if (!DIMENSIONS_WITH_WRITERS.has(dimension)) return { recorded: false, reason: 'DIMENSION_NOT_INTEGRATED:' + dimension };
-  const origin = ORIGINS.has(o.origin) ? o.origin : 'monitoring';
+  // 🔴 SC-08 r2 §三.7：origin 必须显式声明且合法（fail-closed）。
+  // 缺失/非法一律拒收——绝不允许「没写 origin」默认变成 monitoring 混进每日收件箱。
+  const originRaw = o.origin == null ? '' : String(o.origin).trim().toLowerCase();
+  if (!originRaw) return { recorded: false, reason: 'ORIGIN_REQUIRED' };
+  if (!ORIGINS.has(originRaw)) return { recorded: false, reason: 'INVALID_ORIGIN:' + originRaw };
+  const origin = originRaw;
   const sourceKind = SOURCE_KINDS.has(o.sourceKind) ? o.sourceKind : 'live_observation';
   const observedAt = String(o.observedAt || '');
   if (!/^\d{4}-\d{2}-\d{2}T/.test(observedAt)) return { recorded: false, reason: 'INVALID_OBSERVED_AT' };
@@ -334,7 +340,17 @@ function countForScope(tenantId, projectId) {
   return Number(r ? r.n : 0);
 }
 
+// 某品牌最近一条「已核实」的每日变化（竞品数据库卡片的「最近一次可核验变化」唯一口径）
+function latestVerifiedEvent(tenantId, projectId, competitorId) {
+  ensureTable();
+  const r = WatchStore.getDb().prepare(`SELECT * FROM intel_events
+    WHERE tenant_id=? AND project_id=? AND competitor_id=? AND origin='monitoring' AND verification_status='verified'
+    ORDER BY observed_at DESC, event_id DESC LIMIT 1`)
+    .get(String(tenantId || ''), String(projectId || ''), String(competitorId || ''));
+  return r ? rowToEvent(r) : null;
+}
+
 module.exports = {
   ORIGINS, VERIFICATION, SOURCE_KINDS, DIMENSIONS, EVENT_TYPES, DIMENSIONS_WITH_WRITERS, FORBIDDEN_CHANGE_KEYS,
-  ensureTable, recordEvent, listInbox, countForScope, normalizeChange, encodeCursor, decodeCursor,
+  ensureTable, recordEvent, listInbox, countForScope, latestVerifiedEvent, normalizeChange, encodeCursor, decodeCursor,
 };

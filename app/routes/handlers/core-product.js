@@ -56,7 +56,11 @@ async function brandsList(ctx, req, res, url) {
   const items = BrandSvc.listBrandViews(tid, rp.projectId);
   ctx.sendJSON(res, 200, {
     projectId: rp.projectId, brands: items, count: items.length,
-    // SC-07 r2 §四：项目级采集覆盖（七态计数 + 失败明细），竞品数据库与情报库统一口径
+    // SC-08 r2 §四：首页四项统计（品牌总数 / 已开始积累 / 正在采集 / 需要处理），
+    // 与卡片同源派生（后端算，禁止前端各算一套）
+    stats: BrandSvc.buildBrandsProjectStats(items),
+    // 项目级采集覆盖（七态计数 + 失败明细）：只作为「需要处理」的下钻明细，
+    // 不再在首页顶部重复铺一条覆盖条
     collectionCoverage: (() => {
       try { return BrandSvc.buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
     })(),
@@ -96,8 +100,9 @@ async function brandCoverage(ctx, req, res, url, p) {
     const st = BrandSvc.loadProjectState(tid, rp.projectId);
     comp = BrandSvc.findCompetitor(st, link.competitorRef);
   }
-  const cov = BrandSvc.buildCoverage(tid, rp.projectId, comp || {});
-  ctx.sendJSON(res, 200, { brandId: brand.brandId, projectId: rp.projectId, coverage: cov });
+  const cov = BrandSvc.buildBrandCoverage(tid, rp.projectId, comp || {});
+  // SC-08 r2 §六：唯一的 brandCoverage 投影（维度总数来自 Registry，六态严格区分）
+  ctx.sendJSON(res, 200, { brandId: brand.brandId, projectId: rp.projectId, brandCoverage: cov });
   return true;
 }
 

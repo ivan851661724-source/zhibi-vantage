@@ -74,9 +74,11 @@ function pageBody(ids) {
     assert.strictEqual(v.name, 'AlphaBrand');
     assert.strictEqual(v.officialDomain, 'alpha.example.com');
     assert.strictEqual(v.lastObservedAt, null, '未采集 = 无观察时间');
-    const wp = v.coverageDimensions.find(d => d.code === 'website_products');
-    assert.strictEqual(wp.state, 'unknown', '官网维度初始为尚未采集');
-    assert.strictEqual(wp.stateText, '尚未采集');
+    // SC-08 r2 §六：唯一覆盖投影 brandCoverage（六态：not_started = 已接入但从未采集）
+    const wp = v.brandCoverage.dimensions.find(d => d.code === 'website_products');
+    assert.strictEqual(wp.state, 'not_started', '官网维度初始为尚未开始采集');
+    assert.strictEqual(wp.stateText, '尚未开始采集');
+    assert.strictEqual(v.brandCoverage.summary.total, Registry.listDimensions().length, '维度总数来自 Registry');
     // 「尚未采集」不得表述为「未发现数据」
     const txt = JSON.stringify(v);
     assert.ok(!/未发现数据/.test(txt), '不得出现「未发现数据」表述');
@@ -86,11 +88,12 @@ function pageBody(ids) {
     // r2 规格变更：实现态与运行态分离——用户投影只显示四种口径之一；
     // configKeys 从用户投影移除（仅管理员健康接口可见）
     const v = BrandSvc.listBrandViews(TID_A, PID_A)[0];
-    const pending = v.coverageSummary.pendingConfig;
+    const notConfigured = v.brandCoverage.dimensions.filter(x => x.state === 'not_configured').map(x => x.code);
     for (const code of ['social_content', 'ad_campaigns', 'reviews_reputation', 'search_interest']) {
-      assert.ok(pending.includes(code), code + ' 必须列为 pending_config');
-      const d = v.coverageDimensions.find(x => x.code === code);
-      assert.strictEqual(d.state, 'pending_config');
+      assert.ok(notConfigured.includes(code), code + ' 必须列为未配置（缺凭据）');
+      const d = v.brandCoverage.dimensions.find(x => x.code === code);
+      assert.strictEqual(d.state, 'not_configured');
+      assert.strictEqual(d.reason, 'credential_required');
       assert.strictEqual(d.stateText, '数据服务暂不可用');
       assert.ok(/数据服务暂不可用/.test(d.note || ''), 'note 用户侧口径');
       assert.strictEqual('configKeys' in d, false, code + ' configKeys 不得进用户投影');
@@ -99,8 +102,8 @@ function pageBody(ids) {
     const all = JSON.stringify(v);
     assert.strictEqual(/YOUTUBE_API_KEY|DATAFORSEO_LOGIN|DATAFORSEO_PASSWORD|TIKTOK_CLIENT_KEY|TIKTOK_CLIENT_SECRET/.test(all), false, '品牌视图无凭据变量名');
     // 建设中维度不产生任何数值/图表数据
-    for (const d of v.coverageDimensions) {
-      if (d.state === 'pending_config') assert.strictEqual(d.lastObservedAt, null, '建设中维度不得有观察时间');
+    for (const d of v.brandCoverage.dimensions) {
+      if (d.state === 'not_configured') assert.strictEqual(d.lastObservedAt, null, '建设中维度不得有观察时间');
     }
   });
 
@@ -143,8 +146,10 @@ function pageBody(ids) {
     assert.ok(detail.timeline.length >= 1, '时间线贯通');
     assert.ok(detail.intelligence.some(i => i.evidence.length > 0), '情报项带 Evidence');
     // 覆盖状态从 unknown → ok
-    const wp = detail.coverage.dimensions.find(d => d.code === 'website_products');
-    assert.strictEqual(wp.state, 'ok', '采集后为已采集且有数据');
+    const wp = detail.brandCoverage.dimensions.find(d => d.code === 'website_products');
+    assert.strictEqual(wp.state, 'available', '采集后为已接入并有数据');
+    assert.ok(wp.observationCount > 0, '观察计数来自真实观察');
+    assert.ok(wp.evidenceCount > 0, '证据计数来自真实引用');
   });
 
   await t('C4 情报库：可按品牌/类型/时间筛选；无 Evidence 不标已核实', async () => {
