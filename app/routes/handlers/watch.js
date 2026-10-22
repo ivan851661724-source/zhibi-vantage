@@ -102,15 +102,20 @@ async function createTarget(ctx, req, res, url, p) {
       signals: ['price', 'launch'],
     });
     if (r0.error) { ctx.sendJSON(res, 400, { error: r0.error, message: '无法保存监控意向。' }); return true; }
-    // r2 §二：保存意向后**安排第一次 public_site_products 探测**（持久化 next_probe_at，
-    // 由 watch-intent 调度器执行；重启后仍能恢复）。
-    try { WIntent.scheduleFirstProbe({ tenantId: tid, projectId, competitorId }); } catch (e) { /* 调度安排失败不阻塞意向保存 */ }
-    // 基线建立走统一采集链路（幂等/冷却/额度/attempt/worker fencing 全复用）
+    // SC-08 r3 §一：既有 establishing 意向 = 建立进行中。重复点击只返回原意向，
+    // 不得再次安排探测、不得再跑全量 planForCompetitor（否则重复点击会新增
+    // 在途任务、甚至把 site_prime/site_confirm 阶段的进度拉回商品探测）。
     let baseline = null;
-    try {
-      const Plan = require('../../services/collection-plan.js');
-      baseline = Plan.planForCompetitor({ tenantId: tid, projectId, competitorId: comp.id, comp, trigger: 'manual' });
-    } catch (e) { baseline = null; }
+    if (!r0.establishing) {
+      // r2 §二：保存/重新激活意向后**安排第一次 public_site_products 探测**（持久化 next_probe_at，
+      // 由 watch-intent 调度器执行；重启后仍能恢复）。scheduleFirstProbe 自身幂等。
+      try { WIntent.scheduleFirstProbe({ tenantId: tid, projectId, competitorId }); } catch (e) { /* 调度安排失败不阻塞意向保存 */ }
+      // 基线建立走统一采集链路（幂等/冷却/额度/attempt/worker fencing 全复用）
+      try {
+        const Plan = require('../../services/collection-plan.js');
+        baseline = Plan.planForCompetitor({ tenantId: tid, projectId, competitorId: comp.id, comp, trigger: 'manual' });
+      } catch (e) { baseline = null; }
+    }
     let intent = WIntent.getIntent(tid, r0.intent.intentId);
     // 连官网都不可采（无 URL）→ 如实标来源失败，不制造「建立中」假象
     if (comp.url == null || !/^https?:\/\//i.test(String(comp.url || ''))) {
@@ -122,7 +127,9 @@ async function createTarget(ctx, req, res, url, p) {
       baseline: baseline ? baseline.decisions : [],
       message: intent && intent.state === 'source_failed'
         ? (intent.reasonText || '监控来源建立失败。')
-        : '已保存监控意向，正在建立可重复抓取的公开商品来源；建立并进行两次可比较采集后才会进入正式监控。',
+        : (r0.establishing
+          ? '来源建立进行中，已保留当前进度；无需重复操作。'
+          : '已保存监控意向，正在建立可重复抓取的公开商品来源；建立并进行两次可比较采集后才会进入正式监控。'),
     });
     return true;
   }
@@ -173,10 +180,22 @@ async function patchTarget(ctx, req, res, url, p) {
   if (body.enabledSignals !== undefined) patch.enabledSignals = body.enabledSignals;
   if (body.timezone !== undefined) patch.timezone = body.timezone;
   if (body.market !== undefined) patch.market = body.market;
+  // SC-08 r3 §二：能力声明显式拒绝（不静默忽略——静默会让用户误以为改成功了）
+  if (body.supportedSignals !== undefined) {
+    const e = send400('CAPABILITY_NOT_PATCHABLE', '支持的信号由系统按真实采集能力决定，不能手动修改。');
+    ctx.sendJSON(res, e.code, e.body); return true;
+  }
   const r = WS.updateWatchTarget(tid, id, patch);
   if (!r) { ctx.sendJSON(res, 404, { error: 'WATCH_TARGET_NOT_FOUND', message: '监控对象不存在。' }); return true; }
   if (r && r.error) {
-    const e = send400(r.error, r.error === 'INVALID_TIMEZONE' ? '时区必须是合法 IANA 名称。' : '状态值不合法。');
+    // SC-08 r3 §二：每个错误码给明确的用户提示（不再笼统「状态值不合法」）
+    const PATCH_ERR_MSG = {
+      INVALID_TIMEZONE: '时区必须是合法 IANA 名称。',
+      SIGNAL_NOT_SUPPORTED: '请求启用的信号不被该监控对象支持；可启用的信号以监控对象实际具备的来源能力为准。',
+      ENABLED_SIGNALS_EMPTY: '至少要启用一个该监控对象支持的信号，不能为空。',
+      INVALID_STATUS: '状态值不合法。',
+    };
+    const e = send400(r.error, PATCH_ERR_MSG[r.error] || '请求参数不合法。');
     ctx.sendJSON(res, e.code, e.body); return true;
   }
   ctx.sendJSON(res, 200, { target: targetView(r, WS.latestWindowFor(tid, id)) });

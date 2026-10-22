@@ -41,6 +41,10 @@ export interface BrandCoverageDimension {
   note?: string | null;
   lastObservedAt: string | null;
   firstObservedAt?: string | null;
+  lastAttemptAt?: string | null;
+  lastSuccessfulAt?: string | null;
+  latestAttemptStatus?: 'success' | 'partial' | 'failed' | 'running' | null;
+  usingPreviousData?: boolean;
   observationCount: number;
   evidenceCount: number;
   sourceCount: number;
@@ -116,7 +120,10 @@ export interface BrandCollectionState {
   state: 'queued' | 'collecting' | 'has_data' | 'empty' | 'failed' | 'source_pending' | 'not_started';
   stateText: string;
   observedDimensions?: number;
+  // SC-08 r3 §三：最近一次任意采集 vs 最近一次成功采集（UI 的「成功观察」只准用后者）
   lastAttemptAt?: string | null;
+  lastSuccessfulAt?: string | null;
+  latestAttemptStatus?: 'success' | 'partial' | 'failed' | 'running' | null;
   reason?: string | null;
 }
 

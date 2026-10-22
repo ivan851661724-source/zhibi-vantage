@@ -321,7 +321,20 @@ function updateWatchTarget(tenantId, watchTargetId, patch) {
     if (!validTimezone(patch.timezone)) return { error: 'INVALID_TIMEZONE' };
     sets.push('timezone=?'); vals.push(patch.timezone.trim());
   }
-  if (patch && patch.enabledSignals !== undefined) { sets.push('enabled_signals=?'); vals.push(JSON.stringify(sanitizeSignals(patch.enabledSignals))); }
+  if (patch && patch.enabledSignals !== undefined) {
+    // SC-08 r3 §二：enabledSignals 必须是当前 supportedSignals 的子集。
+    //   · 词表过滤但**不回退**：空数组就是空——不得经 sanitizeSignals 回退成 Shopify 三件套；
+    //   · 非空但含不受支持的信号 → SIGNAL_NOT_SUPPORTED（handler 400），不部分生效；
+    //   · pause/resume 等其它 PATCH 不受影响；受控升级 upgradeWatchTargetCapabilities
+    //     不走本路径（直接写库且自带 verifiedBasis 校验），逻辑保持不变。
+    let supportedNow = [];
+    try { supportedNow = filterKnownSignals(JSON.parse(cur.supported_signals || '[]')); } catch (e) { supportedNow = []; }
+    const requested = filterKnownSignals(patch.enabledSignals);
+    if (!requested.length) return { error: 'ENABLED_SIGNALS_EMPTY' };
+    const notSupported = requested.filter(s => !supportedNow.includes(s));
+    if (notSupported.length) return { error: 'SIGNAL_NOT_SUPPORTED', notSupported };
+    sets.push('enabled_signals=?'); vals.push(JSON.stringify(requested));
+  }
   if (patch && patch.monitoringStatus !== undefined) {
     if (!MONITORING_STATUSES.has(patch.monitoringStatus)) return { error: 'INVALID_STATUS' };
     sets.push('monitoring_status=?'); vals.push(patch.monitoringStatus);

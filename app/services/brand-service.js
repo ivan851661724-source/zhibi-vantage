@@ -324,20 +324,36 @@ function buildBrandCoverage(tenantId, projectId, competitor) {
         ? '该数据源尚未接入，Vantage 不提供此维度的任何数据或估算。'
         : '数据服务暂不可用，请稍后再试。当前不生成数据、估算或结论。')
       : (state === 'not_started' ? '尚未开始采集；可在「来源与采集记录」发起首轮采集。' : null);
+    // SC-08 r3 §三：时间拆分 + 「旧数据仍可用，但最新采集失败」的诚实表达。
+    //   lastAttemptAt       = 最近一次**任意**采集（含失败/running）
+    //   lastSuccessfulAt    = 最近一次 success/partial 且有可用观察的采集
+    //   latestAttemptStatus = 最近一次采集的状态（success|partial|failed|running|null）
+    //   usingPreviousData   = 有历史数据 且 最近一次采集失败（state 保持 available，不删旧数据）
+    const latestAny = dimAtts[0] || null;
+    const lastSuccessfulAtt = usable[0] || null; // usable 已按 started_at DESC
+    const lastAttemptAt = latestAny ? (latestAny.endedAt || latestAny.startedAt || null) : null;
+    const lastSuccessfulAt = lastSuccessfulAtt ? (lastSuccessfulAtt.endedAt || lastSuccessfulAtt.startedAt || null) : null;
+    const latestAttemptStatus = latestAny ? latestAny.status : null;
+    const usingPreviousData = state === 'available' && latestAttemptStatus === 'failed';
     dimensions.push({
       code: d.code,
       label: d.displayName,
       displayName: d.displayName, // 兼容既有组件字段名
       state,
-      stateText,
+      stateText: usingPreviousData ? '已有历史数据，最近一次更新失败' : stateText,
       reason,
-      note,
+      note: usingPreviousData ? '已有历史数据，最近一次更新失败。' : note,
       lastObservedAt,
       firstObservedAt: firstObservedAtOfDim,
+      lastAttemptAt,
+      lastSuccessfulAt,
+      latestAttemptStatus,
+      usingPreviousData,
       observationCount,
       evidenceCount,
       sourceCount: hosts.size,
-      latestFailureText: state === 'failed' && failedAtt ? (failedAtt.errorUserText || null) : null,
+      // 失败原因：维度真失败 或 旧数据可用但最新失败，都要如实可见
+      latestFailureText: failedAtt && (state === 'failed' || usingPreviousData) ? (failedAtt.errorUserText || null) : null,
       capabilities: caps.map(c => ({ code: c.code, label: c.displayName, displayName: c.displayName, maturity: c.maturity })),
     });
   }
@@ -702,9 +718,15 @@ function buildCollectionState(tenantId, projectId, comp) {
   const failed = atts.filter(a => a.status === 'failed');
   const obsCount = ok.reduce((n, a) => n + ((Array.isArray(a.observations) ? a.observations.length : 0)), 0);
   const last = atts[0] || null;
-  const dims = new Set(ok.filter(a => (Array.isArray(a.observations) ? a.observations.length : 0) > 0).map(a => a.dimension));
+  // SC-08 r3 §三：拆分「最近一次任意采集」与「最近一次成功采集」——
+  // atts 按 started_at DESC，ok 里第一个就是最近一次 success/partial
+  const okWithData = ok.filter(a => (Array.isArray(a.observations) ? a.observations.length : 0) > 0);
+  const lastSuccessful = okWithData[0] || null;
+  const dims = new Set(okWithData.map(a => a.dimension));
   out.observedDimensions = dims.size;
   out.lastAttemptAt = last ? (last.endedAt || last.startedAt || null) : null;
+  out.lastSuccessfulAt = lastSuccessful ? (lastSuccessful.endedAt || lastSuccessful.startedAt || null) : null;
+  out.latestAttemptStatus = last ? last.status : null;
   if (running || pendingJobs > 0) {
     out.state = running ? 'collecting' : 'queued';
     out.stateText = COLLECTION_STATE_TEXT[out.state];
@@ -844,8 +866,10 @@ function buildBrandsProjectStats(views) {
   const needsAttention = list.filter(b => {
     const bc = b.brandCoverage || { summary: {} };
     const cs = b.collection || {};
+    // SC-08 r3 §三：「旧数据仍可用但最新采集失败」（usingPreviousData）也要计入需要处理
     return cs.state === 'failed' || cs.state === 'source_pending' || (b.monitoring && b.monitoring.state === 'source_failed')
-      || (bc.summary && bc.summary.failed > 0);
+      || (bc.summary && bc.summary.failed > 0)
+      || (Array.isArray(bc.dimensions) && bc.dimensions.some(d => d.usingPreviousData));
   }).length;
   return { brands: list.length, accumulating, collecting, needsAttention };
 }

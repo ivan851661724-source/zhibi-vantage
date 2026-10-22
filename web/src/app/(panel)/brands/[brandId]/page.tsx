@@ -155,6 +155,8 @@ function BrandDetailInner() {
   const accumulatedStart = b.dataAccumulationStart || earliest || null;
   // 「已接入维度数量」按 Registry 总数减去未配置数得出（不硬编码 5）
   const configuredDims = sum.total - (sum.notConfigured || 0);
+  // SC-08 r3 §三：有历史数据但最近一次更新失败的维度数（旧数据保留，不冒充正常）
+  const staleDims = (bc.dimensions || []).filter(x => x.usingPreviousData).length;
   const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
   const rangePicker = (
     <TimeRangePicker
@@ -198,7 +200,9 @@ function BrandDetailInner() {
             {mon ? mon.stateText : '未加入监控'}{mon && mon.signalsText ? `（${mon.signalsText}）` : ''}
           </dd></div>
           <div><dt>数据积累起点</dt><dd>{accumulatedStart ? fmt(accumulatedStart) : '尚未开始积累'}</dd></div>
-          <div><dt>最近一次成功观察</dt><dd>{d.collection && d.collection.lastAttemptAt ? fmt(d.collection.lastAttemptAt, true) : '—'}</dd></div>
+          {/* SC-08 r3 §三：「成功观察」只认最近一次成功采集（lastSuccessfulAt），
+              失败的采集不能冒充成功观察时间 */}
+          <div><dt>最近一次成功观察</dt><dd>{d.collection && d.collection.lastSuccessfulAt ? fmt(d.collection.lastSuccessfulAt, true) : '—'}</dd></div>
           <div><dt>已接入维度</dt><dd>{configuredDims} / {sum.total}{sum.available ? `（${sum.available} 个已有数据）` : ''}</dd></div>
         </dl>
       </section>
@@ -238,6 +242,8 @@ function BrandDetailInner() {
                 {sum.total} 个维度中 {sum.available} 个已有数据
                 {sum.collecting ? `、${sum.collecting} 个正在采集` : ''}
                 {sum.failed ? `、${sum.failed} 个需要处理` : ''}
+                {/* SC-08 r3 §三：旧数据仍可用但最近更新失败的维度，不冒充完全正常 */}
+                {staleDims ? `、${staleDims} 个已有历史数据但最近更新失败` : ''}
                 {sum.notConfigured ? `、${sum.notConfigured} 个未接入` : ''}。
               </p>
               <button type="button" className="btn-ghost btn-mini" onClick={() => switchTab('sources')}>查看来源与采集记录</button>
@@ -367,17 +373,28 @@ function BrandDetailInner() {
               <tr><th>维度</th><th>状态</th><th>最近观察</th><th>观察</th><th>证据</th><th>来源</th><th>说明</th></tr>
             </thead>
             <tbody>
-              {bc.dimensions.map(x => (
-                <tr key={x.code} className={'core-cov-row core-cov-' + x.state}>
-                  <td>{x.label}</td>
-                  <td><span className={'core-cov-badge core-cov-badge-' + x.state}>{x.stateText}</span></td>
-                  <td>{x.lastObservedAt ? fmt(x.lastObservedAt) : '—'}</td>
-                  <td>{x.state === 'available' ? x.observationCount : '—'}</td>
-                  <td>{x.state === 'available' ? x.evidenceCount : '—'}</td>
-                  <td>{x.state === 'available' && x.sourceCount ? x.sourceCount : '—'}</td>
-                  <td className="core-cov-note">{x.latestFailureText || (x.reason === 'credential_required' ? '' : (x.note || ''))}</td>
-                </tr>
-              ))}
+              {/* SC-08 r3 §三：同一失败原因只显示一次（多维度同因时只在第一行出现） */}
+              {(() => {
+                const seenFail = new Set<string>();
+                return bc.dimensions.map(x => {
+                  const failOnce = !!x.latestFailureText && !seenFail.has(x.latestFailureText);
+                  if (failOnce && x.latestFailureText) seenFail.add(x.latestFailureText);
+                  return (
+                    <tr key={x.code} className={'core-cov-row core-cov-' + x.state}>
+                      <td>{x.label}</td>
+                      <td><span className={'core-cov-badge core-cov-badge-' + x.state}>{x.stateText}</span></td>
+                      <td>{x.lastObservedAt ? fmt(x.lastObservedAt) : '—'}</td>
+                      <td>{x.state === 'available' ? x.observationCount : '—'}</td>
+                      <td>{x.state === 'available' ? x.evidenceCount : '—'}</td>
+                      <td>{x.state === 'available' && x.sourceCount ? x.sourceCount : '—'}</td>
+                      <td className="core-cov-note">
+                        {/*「已有历史数据」由状态徽标表达；说明列只放失败原因，不重复 */}
+                        {failOnce ? (x.latestFailureText || '') : (x.usingPreviousData ? '' : (x.reason === 'credential_required' ? '' : (x.note || '')))}
+                      </td>
+                    </tr>
+                  );
+                });
+              })()}
             </tbody>
           </table>
           {/* 同一类「数据服务暂不可用」只在表下说明一次，不在每行重复 */}

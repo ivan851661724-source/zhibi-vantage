@@ -202,23 +202,41 @@ function requestIntent({ tenantId, projectId, competitorId, brandId, reasonCode,
   const existed = db.prepare('SELECT * FROM watch_intents WHERE tenant_id=? AND project_id=? AND competitor_id=?').get(tid, pid, cid);
   if (existed) {
     if (existed.state === 'promoted') return { intent: rowToIntent(existed), existed: true, promoted: true };
-    // 重新加入：清除旧的重试计数与失败原因，从头建立；next_probe_at 由 scheduleFirstProbe 重设
+    if (existed.state === 'establishing') {
+      // SC-08 r3 §一：重复点击不得重置来源建立进度。capability/phase/nextProbeAt/
+      // lastProbeAttemptId/重试计数全部保持原样，不重新建立任务；调用方（handler）
+      // 据此跳过 scheduleFirstProbe / planForCompetitor，保证只有一条意向一个在途任务。
+      return { intent: rowToIntent(existed), existed: true, establishing: true };
+    }
+    // source_failed / cancelled：用户**明确重新点击**才从头建立（product_prime）；
+    // 清除旧的重试计数与失败原因，next_probe_at 由 scheduleFirstProbe 重设
     db.prepare(`UPDATE watch_intents SET state='establishing', reason_code=?, reason_text=?, brand_id=COALESCE(?, brand_id),
                 enabled_signals=COALESCE(?, enabled_signals), auto_retries=0, probe_count=0,
-                next_probe_at=NULL, next_probe_capability=?, probe_phase='product_prime', updated_at=? WHERE intent_id=?`)
+                next_probe_at=NULL, next_probe_capability=?, probe_phase='product_prime',
+                last_probe_attempt_id=NULL, updated_at=? WHERE intent_id=?`)
       .run(reasonCode || null, reasonText || null, brandId || null, signals ? JSON.stringify(signals) : null,
         CAP_PRODUCTS, now, existed.intent_id);
-    return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(existed.intent_id)), existed: true, reactivated: existed.state === 'cancelled' };
+    return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(existed.intent_id)), existed: true, reactivated: existed.state === 'cancelled', restarted: existed.state === 'source_failed' };
   }
   const id = rid('wi');
-  db.prepare(`INSERT INTO watch_intents
-    (intent_id, tenant_id, project_id, competitor_id, brand_id, state, reason_code, reason_text, source_capability,
-     enabled_signals, next_probe_capability, probe_phase, created_at, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    id, tid, pid, cid, brandId || null, 'establishing', reasonCode || null, reasonText || null,
-    CAP_PRODUCTS, signals ? JSON.stringify(signals) : JSON.stringify(['price']),
-    CAP_PRODUCTS, 'product_prime', now, now,
-  );
+  try {
+    db.prepare(`INSERT INTO watch_intents
+      (intent_id, tenant_id, project_id, competitor_id, brand_id, state, reason_code, reason_text, source_capability,
+       enabled_signals, next_probe_capability, probe_phase, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, tid, pid, cid, brandId || null, 'establishing', reasonCode || null, reasonText || null,
+      CAP_PRODUCTS, signals ? JSON.stringify(signals) : JSON.stringify(['price']),
+      CAP_PRODUCTS, 'product_prime', now, now,
+    );
+  } catch (e) {
+    // SC-08 r3 §一：并发重复请求只能保留一条意向（UNIQUE 冲突 → 返回赢家的那一条，
+    // 按与其状态一致的语义分支返回；绝不插入第二条）
+    const winner = db.prepare('SELECT * FROM watch_intents WHERE tenant_id=? AND project_id=? AND competitor_id=?').get(tid, pid, cid);
+    if (!winner) throw e;
+    if (winner.state === 'promoted') return { intent: rowToIntent(winner), existed: true, promoted: true };
+    if (winner.state === 'establishing') return { intent: rowToIntent(winner), existed: true, establishing: true };
+    return { intent: rowToIntent(winner), existed: true };
+  }
   return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(id)), existed: false };
 }
 
