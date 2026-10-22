@@ -31,9 +31,17 @@ export interface Coverage {
 
 
 // ---------- SC-09：项目级自动首采 ----------
+// r2 §四：执行状态（任务是否都结束）与覆盖状态（数据是否齐全）**分开表达**
 export type FirstCollectionStatus = 'running' | 'complete' | 'partial';
+export type FirstCollectionExecutionStatus = 'running' | 'complete';
+export type FirstCollectionCoverageStatus = 'complete' | 'partial';
 export interface FirstCollectionSummary {
   batchId: string;
+  /** 任务是否全部进入终态 */
+  executionStatus: FirstCollectionExecutionStatus;
+  /** 数据是否齐全：存在失败或当前仍未配置的来源 → partial */
+  coverageStatus: FirstCollectionCoverageStatus;
+  /** 兼容字段（由上面两者派生） */
   status: FirstCollectionStatus;
   startedAt: string;
   completedAt: string | null;
@@ -42,6 +50,11 @@ export interface FirstCollectionSummary {
   brandsCollecting: number;
   brandsPartial: number;
   brandsNeedsAttention: number;
+  failedCount: number;
+  notConfiguredCount: number;
+  outOfCoverageCount: number;
+  removedBrandsCount: number;
+  recoverableCount: number;
   items: Record<string, number>;
   totalItems: number;
   canRetry: boolean;

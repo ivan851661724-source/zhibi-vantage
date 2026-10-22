@@ -870,6 +870,8 @@ function runDueProbes(nowMs) {
         // 意向 + 阶段 + 上一次 attempt + 15 分钟时间桶 → 同一探测窗口内重复触发去重，
         // 每次新探测（上次 attempt 已变）生成新 attempt；running attempt 复用仍然生效。
         idempotencyKey: 'intent_probe:' + intent.intentId + ':' + phase + ':' + (intent.lastProbeAttemptId || 'first') + ':' + Math.floor(now / 900000),
+        // SC-09 r2：监控意向建立期的探测 = 基线探测，不是监控窗口，不写每日情报收件箱
+        collectionPurpose: 'first_collection',
       });
     } catch (e) {
       r = { status: 'failed', code: 'EXCEPTION' };

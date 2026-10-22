@@ -147,7 +147,20 @@ function BrandsInner() {
   }, [projectId]);
 
   // 有排队/采集中任务、或首采未到终态时定时刷新（用户不需要手动刷新页面）
-  const fcRunning = !!(fc && fc.status === 'running');
+  const fcRunning = !!(fc && (fc.executionStatus === 'running' || fc.status === 'running'));
+  // r2 §四：执行完成 ≠ 数据齐全。存在失败或仍未配置的来源时，不得只显示绿色「已完成」。
+  const fcExecRunning = fcRunning;
+  const fcCoveragePartial = !!(fc && fc.coverageStatus === 'partial');
+  const fcHeadline = !fc ? ''
+    : fcExecRunning ? '正在采集'
+      : fcCoveragePartial ? '首轮检查已完成'
+        : '已完成';
+  const fcNote = !fc ? ''
+    : fcExecRunning ? '结果会自动更新，无需刷新页面'
+      : fc.failedCount > 0 ? `首轮检查已完成，${fc.failedCount} 个来源需要处理`
+        : fc.notConfiguredCount > 0 ? `首轮检查已完成，${fc.notConfiguredCount} 个数据服务尚未配置`
+          : fc.outOfCoverageCount > 0 ? `首轮检查已完成，${fc.outOfCoverageCount} 个来源不覆盖该市场`
+            : '数据已齐全';
   useEffect(() => {
     if (!projectId || (!inFlight && !fcRunning)) return;
     let alive = true;
@@ -217,16 +230,17 @@ function BrandsInner() {
         <Link className="btn-ghost" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>
       </div>
 
-      {/* SC-09 ② 首轮采集进度（后端自动建立；轮询到终态，无需逐个点击品牌/手动刷新） */}
+      {/* SC-09 ② 首轮采集进度（后端自动建立；轮询到终态，无需逐个点击品牌/手动刷新）
+          r2 §四：执行状态与覆盖状态分开——「首轮检查已完成」不等于「数据已齐全」 */}
       {fc ? (
-        <div className="core-fc" data-testid="first-collection">
+        <div className="core-fc" data-testid="first-collection" data-execution={fc.executionStatus} data-coverage={fc.coverageStatus}>
           <div className="core-fc-head">
             <b>首轮采集</b>
-            <span className={'core-fc-state core-fc-' + fc.status}>
-              {fc.status === 'running' ? '正在采集' : fc.status === 'partial' ? '部分完成' : '已完成'}
+            <span className={'core-fc-state ' + (fcExecRunning ? 'core-fc-running' : fcCoveragePartial ? 'core-fc-partial' : 'core-fc-complete')}>
+              {fcHeadline}
             </span>
             <span className="core-fc-progress">{fc.brandsDone} / {fc.brandsTotal} 个品牌已完成</span>
-            {fc.status === 'running' ? <span className="core-fc-hint">结果会自动更新，无需刷新页面</span> : null}
+            <span className={fcCoveragePartial ? 'core-fc-hint is-warn' : 'core-fc-hint'}>{fcNote}</span>
           </div>
           <div className="core-fc-bar" role="progressbar" aria-valuemin={0} aria-valuemax={fc.brandsTotal || 1} aria-valuenow={fc.brandsDone}>
             <i style={{ width: (fc.brandsTotal ? Math.round((fc.brandsDone / fc.brandsTotal) * 100) : 0) + '%' }} />
@@ -235,6 +249,9 @@ function BrandsInner() {
             <span>正在采集 <b>{fc.brandsCollecting}</b></span>
             <span>部分完成 <b>{fc.brandsPartial}</b></span>
             <span className={fc.brandsNeedsAttention > 0 ? 'is-warn' : ''}>需要处理 <b>{fc.brandsNeedsAttention}</b></span>
+            {fc.failedCount > 0 ? <span className="is-warn">采集失败 <b>{fc.failedCount}</b></span> : null}
+            {fc.notConfiguredCount > 0 ? <span>尚未配置 <b>{fc.notConfiguredCount}</b></span> : null}
+            {fc.outOfCoverageCount > 0 ? <span>不覆盖该市场 <b>{fc.outOfCoverageCount}</b></span> : null}
             {fc.canRetry ? (
               <button type="button" className="btn-ghost btn-mini" disabled={retrying} onClick={retryFailedItems}>
                 {retrying ? '正在重试…' : '重新检查失败项'}

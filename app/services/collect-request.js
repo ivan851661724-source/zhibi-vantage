@@ -92,6 +92,10 @@ function requestCollection(input) {
   const job = CollectJobs.enqueue({
     tenantId, projectId, competitorId, capability: cap.code,
     attemptId, trigger: o.trigger === 'schedule' ? 'schedule' : 'manual',
+    // SC-09 r2 §一：采集用途随任务持久化（first_collection / manual_refresh / monitoring）。
+    // 未显式给出时由 collect-jobs 取最保守默认值——绝不把 schedule 推断成 monitoring。
+    collectionPurpose: o.collectionPurpose || null,
+    windowKey: o.windowKey || null,
   });
   if (job.deduped) {
     return { status: 'deduped', deduped: true, attempt: mk.attempt, jobId: job.jobId, reason: 'in_progress_or_recent' };

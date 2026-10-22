@@ -223,8 +223,10 @@ test('S3 服务重启后未完成任务继续执行（子进程 resumePending �
   `;
   const out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }).trim().split('\n').pop();
   const parsed = JSON.parse(out);
-  assert.strictEqual(parsed.batches, 1, '重启只对账既有批次');
-  assert.ok(parsed.jobs >= 2, '重启后任务已被重新入队: ' + out);
+  // r2 §二.1：启动对账覆盖**全部**批次（凭据可能在停机期间补齐），因此批次数 ≥ 1；
+  // 关键是：本项目不产生双任务，其它已完成的批次也不会被重跑。
+  assert.ok(parsed.batches >= 1, '重启对账过既有批次');
+  assert.strictEqual(parsed.jobs, before, '重启后任务数回到崩溃前数量（不产生双任务）: ' + out);
 
   await drain();
   const items = FC.listItems(tid, pid);
@@ -323,37 +325,123 @@ test('S7 公开评论：搜索只用于发现，正文必须经 FetchGate/robots
 });
 
 // ============================================================
-// S8 + S9：首次基线、第二次变化
+// S8 + S9（r2 重写）：首采只建基线 / 手动刷新不改写首采且不进收件箱 /
+// 只有真实监控窗口的第二次可比观察才写收件箱
 // ============================================================
-test('S8/S9 首次采集只建基线（0 事件）；第二次可比观察才写入价格变化事件', async () => {
-  const tid = 'tenant:sc09s89';
-  const pid = 'projSc09S89';
-  const cid = 'c-s89-a';
+const BrandStore = require('../services/brand-store.js');
+const WatchMonitor = require('../services/watch-monitor.js');
+
+function fcItemRow(tid, pid, cid, cap) {
+  return CollectJobs.getDb().prepare('SELECT * FROM first_collection_items WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=?')
+    .get(tid, pid, cid, cap) || null;
+}
+function fcBatchRow(tid, pid) {
+  return CollectJobs.getDb().prepare('SELECT * FROM first_collection_batches WHERE tenant_id=? AND project_id=?').get(tid, pid) || null;
+}
+function linkBrand(tid, pid, cid, name, host) {
+  const r = BrandStore.upsertBrand({ tenantId: tid, canonicalName: name, officialDomain: host, competitorRef: cid, market: 'us' });
+  BrandStore.linkProject({ tenantId: tid, brandId: r.brand.brandId, projectId: pid, competitorRef: cid, market: 'us' });
+  return r.brand.brandId;
+}
+
+test('S8 首采只建基线：完成后收件箱为空；item 只认自己那次 job/attempt', async () => {
+  const tid = 'tenant:sc09r2s8';
+  const pid = 'projSc09R2S8';
+  const cid = 'c-s8r2-a';
   seedProject(tid, pid, [comp(cid, 1, false)]);
   CollectJobs.setExecutorForTest(makeExecutor({ products: [{ id: 'p-1', title: 'Tent', price: 30 }] }));
   FC.ensureBatch({ tenantId: tid, projectId: pid });
   await drain();
-  // S8：首次采集后收件箱为空（只建基线，不制造变化）
-  assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '首次采集不生成变化事件');
+  assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '首采不产生任何收件箱事件');
+  const it = fcItemRow(tid, pid, cid, 'public_site_products');
+  assert.strictEqual(it.state, 'success');
+  assert.ok(it.job_id && it.attempt_id, 'item 记录了自己的 job/attempt 身份');
+  // 用「别人的 attempt」补发通知：必须 ignored，不得改写 item
+  const before = JSON.stringify(it);
+  const foreign = FC.onJobFinished({
+    tenantId: tid, projectId: pid, competitorId: cid, capability: 'public_site_products',
+    jobId: it.job_id, attemptId: 'att_somebody_else',
+  });
+  assert.strictEqual(foreign.ignored, true, 'attempt 不匹配 → ignored');
+  assert.strictEqual(JSON.stringify(fcItemRow(tid, pid, cid, 'public_site_products')), before, 'item 未被改写');
+  CollectJobs.setExecutorForTest(null);
+});
 
-  // S9：第二次独立采集，价格 30 → 41
+test('S9A 首采完成后的手动刷新：不改写首采 item/batch，不写每日情报收件箱（只进品牌时间线）', async () => {
+  const tid = 'tenant:sc09r2s9a';
+  const pid = 'projSc09R2S9A';
+  const cid = 'c-s9a-a';
+  seedProject(tid, pid, [comp(cid, 1, false)]);
+  linkBrand(tid, pid, cid, 'Brand1', `${HOST_BASE}-1.example.com`);
+  CollectJobs.setExecutorForTest(makeExecutor({ products: [{ id: 'p-1', title: 'Tent', price: 30 }] }));
+  FC.ensureBatch({ tenantId: tid, projectId: pid });
+  await drain();
+
+  const itemBefore = JSON.stringify(FC.listItems(tid, pid));
+  const batchBefore = JSON.stringify(fcBatchRow(tid, pid));
+  assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '首采后收件箱为空');
+
+  // 手动刷新：价格 30 → 41（真实落库的新 attempt，但用途 = manual_refresh）
   CollectJobs.setExecutorForTest(makeExecutor({ products: [{ id: 'p-1', title: 'Tent', price: 41 }] }));
   const compObj = CollectJobs.loadCompetitor({ tenantId: tid, projectId: pid, competitorId: cid });
-  CollectReq.requestCollection({
+  const r = CollectReq.requestCollection({
     tenantId: tid, projectId: pid, competitorId: cid, capability: 'public_site_products',
-    comp: compObj, trigger: 'manual', tickNow: false, idempotencyKey: 'sc09-second-collect',
+    comp: compObj, trigger: 'manual', tickNow: false, idempotencyKey: 'sc09r2-manual-1',
+    collectionPurpose: 'manual_refresh',
   });
+  assert.strictEqual(r.status, 'accepted');
   await drain();
+
+  // ① 首采 item / batch 完全未被改写
+  assert.strictEqual(JSON.stringify(FC.listItems(tid, pid)), itemBefore, '首采 item 未被后续任务改写');
+  assert.strictEqual(JSON.stringify(fcBatchRow(tid, pid)), batchBefore, '首采批次状态与时间字段未被改写');
+  // ② 手动刷新不写每日情报收件箱
+  assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '手动刷新不冒充每日监控事件');
+  // ③ 变化进了品牌时间线（nature=observed，标注 manual_refresh，明确不计入收件箱）
+  const brandId = BrandStore.brandIdForCompetitor(tid, pid, cid);
+  const tl = BrandStore.listTimeline(tid, brandId, { limit: 20 }).filter(x => x.payload && x.payload.collectionPurpose === 'manual_refresh');
+  assert.ok(tl.length >= 1, '手动刷新变化已进入品牌时间线: ' + tl.length);
+  assert.ok(tl[0].payload.inboxEligible === false, '时间线条目明确标注不进收件箱');
+  assert.ok(/30/.test(tl[0].title) && /41/.test(tl[0].title), '时间线记录真实前值/后值: ' + tl[0].title);
+  CollectJobs.setExecutorForTest(null);
+});
+
+test('S9B 正式监控窗口的第二次可比观察才写收件箱；windowKey 来自真实监控窗口', async () => {
+  const tid = 'tenant:sc09r2s9b';
+  const pid = 'projSc09R2S9B';
+  const cid = 'c-s9b-a';
+  seedProject(tid, pid, [comp(cid, 1, false)]);
+  linkBrand(tid, pid, cid, 'Brand1', `${HOST_BASE}-1.example.com`);
+  const target = WS.createWatchTarget({
+    tenantId: tid, projectId: pid, competitorId: cid,
+    market: 'us', timezone: 'UTC', enabledSignals: ['price'], supportedSignals: ['price'],
+    enrichmentStatus: 'complete',
+  }).target;
+  let price = 30;
+  const publicSiteFn = async (comp) => ({
+    ok: true,
+    items: [{ id: 'p-mon', repPrice: price, currency: 'USD', title: 'Tent', soldOut: false }],
+    currency: 'USD', partialScan: false, snapshotIds: ['snap-mon'], sourceUrl: comp.url,
+  });
+
+  const c1 = WS.claimWindow(target, 'W1', '06:00', Date.now(), Date.now());
+  assert.strictEqual(c1.claimed, true);
+  const r1 = await WatchMonitor.executeWindow(target, c1.windowId, { publicSiteFn }, Date.now());
+  WS.completeWindow(c1.windowId, r1, Date.now());
+  assert.strictEqual(Inbox.listInbox({ tenantId: tid, projectId: pid }).total, 0, '第一次观察只建基线');
+
+  price = 41;
+  const c2 = WS.claimWindow(target, 'W2', '14:00', Date.now(), Date.now());
+  assert.strictEqual(c2.claimed, true);
+  const r2 = await WatchMonitor.executeWindow(target, c2.windowId, { publicSiteFn }, Date.now());
+  WS.completeWindow(c2.windowId, r2, Date.now());
   const box = Inbox.listInbox({ tenantId: tid, projectId: pid });
-  assert.strictEqual(box.total, 1, '第二次可比观察产生 1 条事件: ' + box.total);
+  assert.strictEqual(box.total, 1, '第二次可比观察写入 1 条事件: ' + box.total);
   const ev = box.groups[0].events[0];
   assert.strictEqual(ev.eventType, 'price_changed');
-  assert.strictEqual(ev.dimension, 'price');
-  assert.ok(String(ev.title).includes('30') && String(ev.title).includes('41'), '事件含前值/后值: ' + ev.title);
-  assert.ok(ev.verificationStatus === 'verified' || ev.verificationStatus === 'pending', '核验状态明确');
-  // 首采本身不创建 WatchTarget
-  assert.strictEqual(WS.listWatchTargets(tid, pid).length, 0);
-  CollectJobs.setExecutorForTest(null);
+  assert.strictEqual(ev.windowKey, c2.windowId, 'windowKey 来自真实监控窗口');
+  assert.ok(!String(ev.windowKey).startsWith('first_collection:'), '事件窗口绝不是首采批次号');
+  assert.ok(!/first_collection:/.test(JSON.stringify(box)), '收件箱里没有任何首采批次窗口');
 });
 
 // ============================================================

@@ -154,6 +154,8 @@ async function refresh(ctx, req, res, url, p) {
   const r = CollectReq.requestCollection({
     tenantId: tid, projectId: rc.projectId, competitorId,
     capability: cap.code, comp: rc.comp, trigger: 'manual',
+    // SC-09 r2 §一.8：用户手动刷新发现的变化只进品牌时间线，不冒充「每日雷达监控事件」
+    collectionPurpose: 'manual_refresh',
   });
   if (r.status === 'unknown_capability') {
     ctx.sendJSON(res, 404, { error: 'CAPABILITY_NOT_FOUND', message: '能力不存在。' }); return true;

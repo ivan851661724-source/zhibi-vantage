@@ -3347,6 +3347,7 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-fc-partial{color:#b06a1f;border-color:rgba(176,106,31,.35)}
 .core-fc-progress{font-size:12.5px;color:var(--ink2);font-family:var(--num)}
 .core-fc-hint{margin-left:auto;font-size:11.5px;color:var(--ink3)}
+.core-fc-hint.is-warn{color:#b06a1f}
 .core-fc-bar{height:4px;border-radius:999px;background:var(--line1);margin:9px 0 8px;overflow:hidden}
 .core-fc-bar>i{display:block;height:100%;background:var(--brand);transition:width .3s ease}
 .core-fc-facts{display:flex;flex-wrap:wrap;align-items:center;gap:16px;font-size:12px;color:var(--ink2)}

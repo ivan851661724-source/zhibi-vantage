@@ -102,8 +102,13 @@ async function firstCollectionStatus(ctx, req, res, url) {
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const FC = require('../../services/first-collection.js');
-  // 轮询入口同样对账（服务重启/worker 被禁用时也能自愈）
-  try { FC.refreshBatch((FC.getBatch(tid, rp.projectId) || {}).batch_id); } catch (e) { /* 无批次则跳过 */ }
+  // 轮询入口做**幂等对账**（补齐缺失计划 / 回收移出品牌 / 重新评估可恢复项），
+  // 绝不重跑已成功项、绝不重试仍未配置或覆盖外的来源；外部请求仍由持久任务执行，
+  // 本请求不等待任何抓取。
+  try {
+    const b = FC.getBatch(tid, rp.projectId);
+    if (b) FC.reconcileBatchPlan(b.batch_id);
+  } catch (e) { /* 无批次则跳过 */ }
   const summary = FC.summaryForProject(tid, rp.projectId);
   ctx.sendJSON(res, 200, { projectId: rp.projectId, firstCollection: summary });
   return true;
@@ -120,9 +125,11 @@ async function firstCollectionRetry(ctx, req, res, url) {
   const FC = require('../../services/first-collection.js');
   const r = FC.retryFailed(tid, rp.projectId);
   ctx.sendJSON(res, 200, {
-    projectId: rp.projectId, retried: r.retried || 0,
+    projectId: rp.projectId, retried: r.retried || 0, skipped: r.skipped || 0,
     firstCollection: FC.summaryForProject(tid, rp.projectId),
-    message: (r.retried || 0) > 0 ? '已重新安排失败项，页面会自动更新。' : '当前没有需要重新检查的失败项。',
+    message: (r.retried || 0) > 0
+      ? '已重新安排可恢复的项，页面会自动更新。'
+      : ((r.skipped || 0) > 0 ? '还有来源尚未完成配置，暂不重复请求。' : '当前没有需要重新检查的失败项。'),
   });
   return true;
 }

@@ -86,6 +86,14 @@ const RUNNING_LEASE_MS = 10 * 60 * 1000;
 const JOB_STATUSES = new Set(['pending', 'running', 'done', 'error', 'dead']);
 
 let _db = null;
+// 加法迁移（老库无此列时补上；并发启动时已存在则忽略）
+function ensureColumn(db, table, name, ddl) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    if (cols.includes(name)) return;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  } catch (e) { /* 已存在 / 并发迁移：忽略 */ }
+}
 function getDb() {
   // 不缓存连接句柄：随 surface-store 连接重开（closeDb 后重启恢复语义，
   // 避免持有关闭句柄报 "database is not open"）；建表语句幂等。
@@ -107,6 +115,10 @@ function getDb() {
     done_at TEXT,
     last_error TEXT
   )`);
+  // SC-09 r2 §一：采集用途必须随任务持久化——它决定变化能写到哪儿。
+  // 绝不能靠 trigger 推断（自动首采同样用 schedule）。加法迁移，老库不受影响。
+  ensureColumn(db, 'collection_jobs', 'collection_purpose', 'TEXT');
+  ensureColumn(db, 'collection_jobs', 'window_key', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_cj_claim ON collection_jobs(status, claim_expires_at)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_cj_scope ON collection_jobs(tenant_id, project_id, competitor_id, capability, status)');
   _db = db;
@@ -123,10 +135,21 @@ function rowToJob(r) {
     priority: r.priority, retry: r.retry, attempts: r.attempts,
     claimToken: r.claim_token, claimExpiresAt: r.claim_expires_at, heartbeatAt: r.heartbeat_at,
     createdAt: r.created_at, doneAt: r.done_at, lastError: r.last_error,
+    collectionPurpose: r.collection_purpose || null, windowKey: r.window_key || null,
   };
 }
 function assertStatus(s) {
   if (!JOB_STATUSES.has(s)) throw new Error('collect-jobs: invalid status: ' + String(s));
+}
+
+// 采集用途：显式声明优先；未声明时按 trigger 取**最保守**的默认值——
+// 手动 → manual_refresh（只进品牌时间线），系统 → first_collection（只建基线）。
+// 任何情况下都不会把「未声明用途」推断成 monitoring（否则自动首采会污染收件箱）。
+const PURPOSES = new Set(['first_collection', 'manual_refresh', 'monitoring']);
+function resolvePurpose(raw, trigger) {
+  const p = String(raw || '');
+  if (PURPOSES.has(p)) return p;
+  return trigger === 'manual' ? 'manual_refresh' : 'first_collection';
 }
 
 // 入队（幂等：同 scope 已有 pending/running job → 复用，不双任务双费用）
@@ -140,12 +163,14 @@ function enqueue(input) {
     .get(tid, String(input.projectId || ''), String(input.competitorId || ''), String(input.capability || ''));
   if (dup) return { jobId: dup.job_id, deduped: true, job: rowToJob(dup) };
   const id = rid('cj');
+  const trigger = input.trigger === 'schedule' ? 'schedule' : 'manual';
   db.prepare(`INSERT INTO collection_jobs
-    (job_id, tenant_id, project_id, competitor_id, capability, attempt_id, trigger, status, priority, created_at)
-    VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)`)
+    (job_id, tenant_id, project_id, competitor_id, capability, attempt_id, trigger, status, priority, created_at,
+     collection_purpose, window_key)
+    VALUES (?,?,?,?,?,?,?, 'pending', ?, ?, ?, ?)`)
     .run(id, tid, String(input.projectId || ''), String(input.competitorId || ''), String(input.capability || ''),
-      String(input.attemptId || ''), input.trigger === 'schedule' ? 'schedule' : 'manual',
-      Number(input.priority) || 1, nowIso());
+      String(input.attemptId || ''), trigger, Number(input.priority) || 1, nowIso(),
+      resolvePurpose(input.collectionPurpose, trigger), input.windowKey ? String(input.windowKey) : null);
   return { jobId: id, deduped: false, job: rowToJob(getDb().prepare('SELECT * FROM collection_jobs WHERE job_id=?').get(id)) };
 }
 
@@ -432,6 +457,46 @@ function notifyFirstCollection(job) {
   } catch (e) { return null; }
 }
 
+// SC-09 r2 §一.9/§一.10：变化检测收口到 services/observation-diff.js，
+// 且**必须**显式带 collectionPurpose：
+//   · first_collection → 只建基线，什么都不写（首采不是变化来源）
+//   · manual_refresh   → 只写品牌时间线，绝不进每日情报收件箱
+//   · monitoring       → 唯一允许写 intel_events 的用途，且必须有真实窗口键
+// 这里是「任务执行完之后」的唯一接线点，任何用途都不会绕过这个判定。
+function notifyObservationDiff(job) {
+  try {
+    const purpose = resolvePurpose(job && job.collectionPurpose, job && job.trigger);
+    if (purpose === 'first_collection') return { purpose, recorded: 0, reason: 'first_collection_baseline_only' };
+    const att = SurfaceStore.getAttempt(job.tenantId, job.attemptId);
+    if (!att || (att.status !== 'success' && att.status !== 'partial')) return { purpose, recorded: 0, reason: 'not_success' };
+    const Diff = require('./observation-diff.js');
+    const prev = Diff.previousComparable(job.tenantId, job.projectId, job.competitorId, job.capability, att.attemptId);
+    const comp = loadCompetitor(job);
+    return Diff.applyChanges({
+      tenantId: job.tenantId, projectId: job.projectId, competitorId: job.competitorId,
+      capability: job.capability, attempt: att, previousAttempt: prev,
+      collectionPurpose: purpose, windowKey: job.windowKey || null,
+      brandName: (comp && comp.name) || null, sourceUrl: att.sourceUrl || (comp && comp.url) || null,
+    });
+  } catch (e) {
+    return null; // 变化检测失败不影响采集结果本身
+  }
+}
+
+// SC-09 r2 §三.6：品牌已被移出项目 → 其尚未执行的首采任务不再采集。
+// 只对**首采 item 自己那条任务**生效（不影响手动刷新/正式监控的独立任务）。
+function isCancelledScope(job) {
+  try {
+    const db = getDb();
+    const row = db.prepare(`SELECT in_scope FROM first_collection_items
+      WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=? AND job_id=? AND attempt_id=?`)
+      .get(String(job.tenantId), String(job.projectId), String(job.competitorId), String(job.capability),
+        String(job.jobId), String(job.attemptId));
+    if (!row) return false;
+    return !row.in_scope;
+  } catch (e) { return false; }
+}
+
 // worker 单 tick：reclaim + reconcile + 认领一个 job 执行到底（含心跳）。
 // 返回 { claimed: bool, jobId?, status?, reclaimed?, reconciled? }
 async function tick(options) {
@@ -442,15 +507,25 @@ async function tick(options) {
   if (!job) return { claimed: false, reclaimed, reconciled };
   const hb = setInterval(() => { try { heartbeat(job.jobId, job.claimToken, Date.now()); } catch (e) {} }, HEARTBEAT_INTERVAL_MS);
   try {
+    // SC-09 r2 §三.6：认领后、执行前再确认一次范围——品牌在执行前被移出则不发外部请求
+    if (isCancelledScope(job)) {
+      finish(job.jobId, job.claimToken, 'done', 'brand_removed_from_project');
+      return { claimed: true, jobId: job.jobId, status: 'cancelled', reclaimed, reconciled, reason: 'brand_removed_from_project' };
+    }
     const out = await executeJob(job);
     finish(job.jobId, job.claimToken, 'done');
-    // SC-07 r2 §二 / r3 P0-2：公开商品采集完成 → 推进监控意向（读 attempt 库内真值，
-    // 不依赖 executeJob 返回形态；取消/已晋升意向由 onProbeFinished 忽略）
-    notifyWatchIntent(job);
-    // SC-09：项目级自动首采——任务完成后把真实 attempt 状态落回首采 item（幂等，无 item 则忽略）
-    notifyFirstCollection(job);
-    return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: !!(out && out.deduped) };
-  } catch (e) {
+    const dup = !!(out && out.deduped);
+    let diffOut = null;
+    if (!dup) {
+      // SC-07 r2 §二 / r3 P0-2：公开商品采集完成 → 推进监控意向（读 attempt 库内真值，
+      // 不依赖 executeJob 返回形态；取消/已晋升意向由 onProbeFinished 忽略）
+      notifyWatchIntent(job);
+      // SC-09：项目级自动首采——任务完成后把真实 attempt 状态落回首采 item（幂等，无 item 则忽略）
+      notifyFirstCollection(job);
+      // SC-09 r2：按用途分发确定性变化（monitoring 才进收件箱；手动刷新只进时间线）
+      diffOut = notifyObservationDiff(job);
+    }
+    return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: dup, diff: dup ? null : diffOut };  } catch (e) {
     const msg = String((e && e.message) || e);
     if (e && e.fenced) {
       // 失租约：不得写 attempt、不得 finish（claimToken 已失效，finish 天然无匹配）
@@ -470,6 +545,8 @@ async function tick(options) {
     // 有界退避重试，达到上限进入 source_failed；绝不留下无 job、无 next_probe_at 的 establishing。
     notifyWatchIntent(job);
     notifyFirstCollection(job);
+    // 失败任务没有可比值可 diff（内部按 not_success 直接返回）
+    try { notifyObservationDiff(job); } catch (e3) { /* 忽略 */ }
     finish(job.jobId, job.claimToken, 'error', msg);
     return { claimed: true, jobId: job.jobId, status: 'error', reclaimed, reconciled, error: msg.slice(0, 200) };
   } finally { clearInterval(hb); }

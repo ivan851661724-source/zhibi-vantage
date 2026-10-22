@@ -229,6 +229,8 @@ function planForCompetitor(input) {
         tenantId, projectId, competitorId: comp.id, capability: code,
         comp: { url: comp.url, isShopify: comp.isShopify, name: comp.name },
         trigger,
+        // SC-09 r2：调研后自动采集 = 首轮建基线，不产任何变化事件
+        collectionPurpose: 'first_collection',
       });
     } catch (e) {
       r = { status: 'failed', code: 'EXCEPTION', message: String((e && e.message) || e).slice(0, 160) };
