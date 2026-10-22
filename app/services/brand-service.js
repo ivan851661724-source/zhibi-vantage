@@ -950,13 +950,17 @@ function buildCollectionDigest(tenantId, projectId, comp) {
     out.search = { state: st, collectedAt: null, measurement: null };
   }
   // 广告覆盖：来源覆盖范围 × 品牌市场（未覆盖不等于 0 条广告）
+  // SC-09 r3 §二：市场走唯一解析入口（competitor.market → project intent.regions[0]）
   try {
-    const cov = require('../lib/tiktok-adlib.js').marketCoverage(c.market);
+    const TikTok = require('../lib/tiktok-adlib.js');
+    const intent = (loadProjectState(tenantId, projectId) || {}).intent || {};
+    const mk = require('../lib/brand-market.js').resolveBrandMarket(c, intent);
     out.ads = {
-      coverage: cov.coverageState, brandMarket: cov.brandMarket,
-      note: require('../lib/tiktok-adlib.js').coverageNoteFor(cov.coverageState, cov.brandMarket),
+      coverage: mk.coverageState, brandMarket: mk.brandMarket,
+      marketSource: mk.source,
+      note: TikTok.coverageNoteFor(mk.coverageState, mk.brandMarket),
     };
-  } catch (e) { out.ads = { coverage: 'unknown', brandMarket: null, note: null }; }
+  } catch (e) { out.ads = { coverage: 'unknown', brandMarket: null, marketSource: null, note: null }; }
   return out;
 }
 

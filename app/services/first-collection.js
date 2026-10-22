@@ -31,6 +31,7 @@ const SurfaceStore = require('./surface-store.js');
 const Registry = require('./capability-registry.js');
 const Readiness = require('./source-readiness.js');
 const TikTokAdLib = require('../lib/tiktok-adlib.js');
+const BrandMarket = require('../lib/brand-market.js');
 
 // item 状态（与任务书 §二 词表一致；r2 追加 cancelled = 品牌已移出项目，不是采集失败）
 const ITEM_STATES = Object.freeze([
@@ -127,12 +128,15 @@ function loadProjectIntent(tenantId, projectId) {
     return (st && st.intent) || {};
   } catch (e) { return {}; }
 }
-// 品牌主要市场（与 collect-jobs.loadCompetitor 同口径：competitor.market → intent.regions[0]）
+// 品牌主要市场：**唯一**入口是 lib/brand-market.js（competitor.market → intent.regions[0]）。
+// SC-09 r3 §二：本模块不得再自行读取未经回退的 comp.market。
 function marketOf(comp, intent) {
-  const m = comp && comp.market != null ? String(comp.market) : '';
-  if (m) return m;
-  const region = intent && Array.isArray(intent.regions) ? intent.regions[0] : null;
-  return region ? String(region) : '';
+  return BrandMarket.resolveMarketValue(comp, intent);
+}
+// 市场快照（用于「市场是否变化」的判定）：能归一就用 ISO2，归一不出来保留原词
+function marketSnapshotOf(comp, intent) {
+  const mk = BrandMarket.resolveBrandMarket(comp, intent);
+  return mk.brandMarket || mk.raw || null;
 }
 
 // ---------- 每个品牌的首采能力计划 ----------
@@ -143,21 +147,23 @@ function plannedCapabilities(comp) {
 
 // 初始状态判定（不伪造）：真实不覆盖 → out_of_coverage；无凭据 → not_configured；
 // 无官网 URL 的官方资料 → failed（如实原因）；其余进入 queued。
-function initialItemState(capability, comp) {
+// SC-09 r3 §二：市场一律走 BrandMarket.resolveBrandMarket（含项目地区回退），
+// 本函数**不得**直接读 comp.market。
+function initialItemState(capability, comp, intent) {
   if (capability === 'tiktok_commercial_content') {
-    const cov = TikTokAdLib.marketCoverage(comp.market);
-    if (cov.coverageState === 'out_of_coverage') {
-      return { state: 'out_of_coverage', failureText: TikTokAdLib.coverageNoteFor('out_of_coverage', cov.brandMarket) };
+    const mk = BrandMarket.resolveBrandMarket(comp, intent);
+    if (mk.coverageState === 'out_of_coverage') {
+      return { state: 'out_of_coverage', failureText: TikTokAdLib.coverageNoteFor('out_of_coverage', mk.brandMarket), market: mk };
     }
-    if (cov.coverageState === 'unknown') {
-      return { state: 'not_configured', failureText: '品牌主要市场未确定，暂不判断该来源的覆盖范围；这不代表该市场没有广告。' };
+    if (mk.coverageState === 'unknown') {
+      return { state: 'not_configured', failureText: '品牌主要市场未确定，暂不判断该来源的覆盖范围；这不代表该市场没有广告。', market: mk };
     }
     // 覆盖内：仍需官方研究凭据
     const rd = Readiness.getReadiness(capability);
     if (rd && rd.state === 'not_configured') {
-      return { state: 'not_configured', failureText: '数据服务暂不可用；该来源仅在官方支持国家提供公开广告信息。' };
+      return { state: 'not_configured', failureText: '数据服务暂不可用；该来源仅在官方支持国家提供公开广告信息。', market: mk };
     }
-    return { state: 'queued' };
+    return { state: 'queued', market: mk };
   }
   if (capability === 'official_site_profile' || capability === 'public_site_products') {
     if (!/^https?:\/\//i.test(String(comp.url || ''))) {
@@ -279,9 +285,9 @@ function reconcileBatchPlan(batchId) {
       const cur = byKey.get(key);
       if (!cur) {
         const prior = existingOutcome(tenantId, projectId, String(comp.id), cap);
-        const init = prior || initialItemState(cap, comp);
+        const init = prior || initialItemState(cap, comp, intent);
         const res = ins.run(rid('fci'), batchId, tenantId, projectId, String(comp.id), cap,
-          init.state, init.failureText || null, marketOf(comp, intent), readinessOf(cap), at, at);
+          init.state, init.failureText || null, marketSnapshotOf(comp, intent), readinessOf(cap), at, at);
         if (res && res.changes > 0) {
           added++;
           if (prior) {
@@ -338,19 +344,26 @@ function readinessOf(capability) {
   } catch (e) { return null; }
 }
 
-// 取消该 item 尚未执行的任务（pending → done + 原因；不删历史行）
+// 取消该品牌尚未执行的任务：job 与 attempt **同时**终结（SC-09 r3 §一）。
+// 不删历史行；不写 Evidence、不产变化事件、不发提醒（本函数只碰 job/attempt 状态）。
 function cancelPendingJobs(item) {
+  const tid = String(item.tenant_id);
   try {
-    if (item.job_id) {
-      db().prepare(`UPDATE collection_jobs SET status='done', done_at=?, last_error='brand_removed_from_project'
-        WHERE job_id=? AND tenant_id=? AND status='pending'`)
-        .run(nowIso(), String(item.job_id), String(item.tenant_id));
+    const rows = db().prepare(`SELECT job_id, attempt_id FROM collection_jobs
+      WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=? AND status IN ('pending','running')`)
+      .all(tid, String(item.project_id), String(item.competitor_id), String(item.capability));
+    for (const r of rows) {
+      CollectJobs.cancelCollectionJobAndAttempt({
+        tenantId: tid, jobId: r.job_id, attemptId: r.attempt_id, reasonCode: 'brand_removed_from_project',
+      });
     }
-    // 兜底：同 scope 的 pending 任务（可能由幂等/重排产生多个）一并取消
-    db().prepare(`UPDATE collection_jobs SET status='done', done_at=?, last_error='brand_removed_from_project'
-      WHERE tenant_id=? AND project_id=? AND competitor_id=? AND status='pending'`)
-      .run(nowIso(), String(item.tenant_id), String(item.project_id), String(item.competitor_id));
-  } catch (e) { /* 任务表不存在/已终态：忽略 */ }
+    // item 自己指向的 attempt 可能没有对应 job（历史重排残留）——同样必须终结
+    if (item.attempt_id) {
+      CollectJobs.cancelCollectionJobAndAttempt({
+        tenantId: tid, attemptId: item.attempt_id, reasonCode: 'brand_removed_from_project',
+      });
+    }
+  } catch (e) { /* 任务表不存在/已终态：忽略（幂等） */ }
 }
 
 // ---------- 可恢复项重新评估（SC-09 r2 §二） ----------
@@ -372,12 +385,12 @@ function evaluateRecoverable(batchId) {
     const comp = byId.get(String(it.competitor_id));
     if (!comp) continue;
     evaluated++;
-    const market = marketOf(comp, intent);
+    const market = marketSnapshotOf(comp, intent);
     const marketChanged = String(it.market_snapshot || '') !== String(market || '');
     const readiness = readinessOf(it.capability);
     const readinessChanged = !!it.readiness_state && String(it.readiness_state) !== String(readiness || '');
     if (marketChanged || readinessChanged) {
-      const next = initialItemState(it.capability, Object.assign({}, comp, { market: market || comp.market }));
+      const next = initialItemState(it.capability, comp, intent);
       db().prepare('UPDATE first_collection_items SET state=?, failure_text=?, market_snapshot=?, readiness_state=?, updated_at=? WHERE item_id=?')
         .run(next.state, next.failureText || null, market || null, readiness, nowIso(), it.item_id);
       if (next.state === 'queued') queued++;
@@ -476,7 +489,7 @@ function marketSnapshotFor(item) {
     const comps = loadCompetitors(item.tenant_id, item.project_id);
     const comp = comps.find(c => String(c.id) === String(item.competitor_id));
     if (!comp) return null;
-    return marketOf(comp, loadProjectIntent(item.tenant_id, item.project_id)) || null;
+    return marketSnapshotOf(comp, loadProjectIntent(item.tenant_id, item.project_id)) || null;
   } catch (e) { return null; }
 }
 
@@ -648,7 +661,9 @@ function summaryForProject(tenantId, projectId) {
   // 覆盖状态：failed 或当前仍未配置的来源 → partial；out_of_coverage 单独计数、不算失败
   const coverageStatus = (failedCount > 0 || notConfiguredCount > 0) ? 'partial' : 'complete';
   const recoverable = recoverableNotConfigured(items);
-  const removed = db().prepare('SELECT COUNT(*) AS n FROM first_collection_items WHERE batch_id=? AND in_scope=0').get(batch.batch_id).n;
+  // SC-09 r3 §四：已移出品牌必须按**品牌**计数（一个品牌有多个能力 item，项目口径不能重复计）
+  const removed = db().prepare('SELECT COUNT(DISTINCT competitor_id) AS n FROM first_collection_items WHERE batch_id=? AND in_scope=0')
+    .get(batch.batch_id).n;
 
   return {
     batchId: batch.batch_id,
@@ -712,7 +727,7 @@ function retryFailed(tenantId, projectId) {
       const rd = readinessOf(it.capability);
       if (!rd || rd === 'not_configured') { skipped++; continue; } // 仍未配置：不请求
       // 市场类未配置（覆盖未知/无覆盖）也走同一判定：market 未变且仍不覆盖 → 不重试
-      const mc = TikTokAdLib.marketCoverage(marketOf(comp, loadProjectIntent(tenantId, projectId)));
+      const mc = BrandMarket.resolveBrandMarket(comp, loadProjectIntent(tenantId, projectId));
       if (it.capability === 'tiktok_commercial_content' && mc.coverageState === 'out_of_coverage') { skipped++; continue; }
     }
     setItemState(it.item_id, { state: 'queued', jobId: null, attemptId: null, failureText: null });

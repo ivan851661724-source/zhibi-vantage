@@ -53,7 +53,10 @@ function resolveComp(ctx, tid, projectIdRaw, competitorId) {
   }
   const comp = state && Array.isArray(state.competitors) ? state.competitors.find(c => c && c.id === competitorId) : null;
   if (!comp) return { error: [404, 'COMPETITOR_NOT_FOUND', '竞争品牌不存在于当前项目。'] };
-  return { projectId, comp };
+  // SC-09 r3 §二：真实采集的竞品上下文同样走唯一市场解析（品牌无 market 时回退项目地区），
+  // 否则手动刷新与自动首采会对同一个品牌得出不同的覆盖结论。
+  const resolved = require('../../lib/brand-market.js').withResolvedMarket(comp, (state && state.intent) || {});
+  return { projectId, comp: resolved };
 }
 
 function attemptUserView(a) {

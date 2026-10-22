@@ -52,11 +52,89 @@ function previousComparable(tenantId, projectId, competitorId, capability, curre
     && Array.isArray(a.observations) && a.observations.length > 0) || null;
 }
 
+// ---------- 可比范围（SC-09 r3 §三） ----------
+// 缺陷：r2 对 success 与 partial 用同一套集合差 → 本次没抓到的商品被写成「下架」，
+// 内容条数因为分页失败变少被写成「内容减少」。没被观察到 ≠ 不存在。
+//
+// 口径：
+//   · 完整采集 = attempt.status==='success' 且 summary.partialScan 不为 true 且无 failedPage；
+//   · 比较范围一致 = 同一发现路径 / 同一测量方法 / 同一周期 / 同一国家或渠道范围；
+//   · 只有「两次都完整 且 范围一致」才允许下「东西没了」的结论（product_removed / 数量下降）；
+//   · partial 仍可记录「同一稳定 ID 的价格/库存变化」和「本次确实新观察到的东西」，
+//     但必须标注 scopeLimited=true，文案说明只代表已抓取到的部分；
+//   · 范围无法证明一致时宁可不下结论。
+function declaredCountOf(capability, s) {
+  const pick = {
+    shopify_catalog: s.count, public_site_products: s.productCount,
+    public_reviews: s.reviewCount, youtube_content: s.videoCount,
+    tiktok_commercial_content: s.creativeCount, dataforseo_trends: s.pointCount,
+  }[capability];
+  return typeof pick === 'number' ? pick : null;
+}
+
+function coverageProfile(attempt) {
+  const a = attempt || {};
+  const s = a.summary || {};
+  const obs = Array.isArray(a.observations) ? a.observations : [];
+  const pages = Number.isFinite(Number(s.successfullyFetchedPages)) ? Number(s.successfullyFetchedPages) : null;
+  const reasons = Array.isArray(s.matchReasons) ? s.matchReasons.map(String).sort().join(',') : '';
+  return {
+    status: a.status || null,
+    partialScan: s.partialScan === true,
+    failedPage: s.failedPage || null,
+    pages,
+    discoveryPath: s.discoveryPath || null,
+    method: s.measurementMethod || null,
+    periodStart: s.periodStart || null,
+    periodEnd: s.periodEnd || null,
+    scope: s.countryScope || s.region || s.channelId || null,
+    channelKey: reasons || null,
+    keyword: s.keyword || null,
+    declaredCount: declaredCountOf(a.capability, s),
+    observedCount: obs.length,
+    partialReason: s.partialScanReason || null,
+  };
+}
+
+function isComplete(p) {
+  return p.status === 'success' && !p.partialScan && !p.failedPage;
+}
+
+// 两次采集的「比较范围」是否一致；只要无法证明一致就返回 false（宁可不下结论）
+function sameComparisonScope(prev, cur, capability) {
+  if (capability === 'shopify_catalog') {
+    // 目录接口本身就是全量口径：稳定身份由 product id 保证，无发现路径可选
+    return true;
+  }
+  if (capability === 'public_site_products') {
+    // 发现路径不同 = 抽到的样本集合不同（jsonld / sitemap / 首页内链）
+    return String(prev.discoveryPath || '') === String(cur.discoveryPath || '');
+  }
+  // 评论 / 社媒 / 广告 / 热度：方法 + 周期 + 国家或渠道 + 关键词都必须一致
+  return String(prev.method || '') === String(cur.method || '')
+    && String(prev.periodStart || '') === String(cur.periodStart || '')
+    && String(prev.periodEnd || '') === String(cur.periodEnd || '')
+    && String(prev.scope || '') === String(cur.scope || '')
+    && String(prev.channelKey || '') === String(cur.channelKey || '')
+    && String(prev.keyword || '') === String(cur.keyword || '');
+}
+
+const SCOPE_LIMITED_NOTE = '（本次采集范围受限，只代表已抓取到的部分）';
+
 // ---------- 纯计算：不做任何写库 ----------
 function computeChanges(capability, prev, cur) {
   const out = [];
   const obs = (cur && Array.isArray(cur.observations)) ? cur.observations : [];
-  if (!prev || !obs.length) return out;
+  const isProduct = capability === 'public_site_products' || capability === 'shopify_catalog';
+  // 商品域没有观察就没有可比集合；评论/社媒的「0 条」本身是有意义的口径，不能被这条 guard 吞掉
+  if (!prev || (isProduct && !obs.length)) return out;
+  const prevP = coverageProfile(prev);
+  const curP = coverageProfile(cur);
+  const bothComplete = isComplete(prevP) && isComplete(curP);
+  const scopeSame = sameComparisonScope(prevP, curP, capability);
+  // 「确认不存在」的唯一允许条件
+  const mayConcludeAbsence = bothComplete && scopeSame;
+  const scopeLimited = !mayConcludeAbsence;
 
   if (capability === 'public_site_products' || capability === 'shopify_catalog') {
     const prevBy = new Map((prev.observations || []).map(o => [String(o.id || o.sourceUrl || ''), o]));
@@ -64,20 +142,22 @@ function computeChanges(capability, prev, cur) {
     for (const [id, c] of curBy) {
       const old = prevBy.get(id);
       if (!old) {
+        // 本次真实观察到的新商品：即便范围受限也成立（它确实被抓到了）
         out.push({
           dimension: 'product', eventType: 'product_added', subjectId: id,
           title: `新增商品：${c.title || id}`,
-          summary: `${c.title || id} 首次出现在公开商品页`,
-          change: { field: 'product', oldValue: null, newValue: c.title || id, basis: 'deterministic_diff' },
+          summary: `${c.title || id} 首次出现在公开商品页${scopeLimited ? SCOPE_LIMITED_NOTE : ''}`,
+          change: { field: 'product', oldValue: null, newValue: c.title || id, basis: 'deterministic_diff', scopeLimited },
         });
         continue;
       }
       if (typeof old.price === 'number' && typeof c.price === 'number' && old.price !== c.price) {
+        // 同一稳定商品 ID 的两次真实观察：partial 也可比较
         out.push({
           dimension: 'price', eventType: 'price_changed', subjectId: id,
           title: `${c.title || id}：价格由 ${old.price} 调整为 ${c.price}`,
-          summary: `${c.title || id} 价格 ${old.price} → ${c.price}${c.currency ? ' ' + c.currency : ''}`,
-          change: { field: 'price', oldValue: old.price, newValue: c.price, currency: c.currency || null, basis: 'deterministic_diff' },
+          summary: `${c.title || id} 价格 ${old.price} → ${c.price}${c.currency ? ' ' + c.currency : ''}${scopeLimited ? SCOPE_LIMITED_NOTE : ''}`,
+          change: { field: 'price', oldValue: old.price, newValue: c.price, currency: c.currency || null, basis: 'deterministic_diff', scopeLimited },
         });
       }
       const boolOld = old.available === true || old.available === false;
@@ -86,48 +166,60 @@ function computeChanges(capability, prev, cur) {
         out.push({
           dimension: 'stock', eventType: 'stock_changed', subjectId: id,
           title: `${c.title || id}：${c.available ? '恢复在售' : '变为缺货'}`,
-          summary: `${c.title || id} 在售状态 ${old.available ? '在售' : '缺货'} → ${c.available ? '在售' : '缺货'}`,
-          change: { field: 'availability', oldValue: old.available, newValue: c.available, basis: 'deterministic_diff' },
+          summary: `${c.title || id} 在售状态 ${old.available ? '在售' : '缺货'} → ${c.available ? '在售' : '缺货'}${scopeLimited ? SCOPE_LIMITED_NOTE : ''}`,
+          change: { field: 'availability', oldValue: old.available, newValue: c.available, basis: 'deterministic_diff', scopeLimited },
         });
       }
     }
-    for (const [id, old] of prevBy) {
-      if (curBy.has(id)) continue;
-      out.push({
-        dimension: 'product', eventType: 'product_removed', subjectId: id,
-        title: `商品下架：${old.title || id}`,
-        summary: `${old.title || id} 不再出现在公开商品页`,
-        change: { field: 'product', oldValue: old.title || id, newValue: null, basis: 'deterministic_diff' },
-      });
+    // 「没出现」只有在两次都完整且范围一致时才是「下架」
+    if (mayConcludeAbsence) {
+      for (const [id, old] of prevBy) {
+        if (curBy.has(id)) continue;
+        out.push({
+          dimension: 'product', eventType: 'product_removed', subjectId: id,
+          title: `商品下架：${old.title || id}`,
+          summary: `${old.title || id} 不再出现在公开商品页`,
+          change: { field: 'product', oldValue: old.title || id, newValue: null, basis: 'deterministic_diff', scopeLimited: false },
+        });
+      }
     }
     return out;
   }
 
   if (capability === 'public_reviews') {
+    // 数量口径必须同源同查询范围；范围不一致 → 只保存观察，不做数量结论
+    if (!scopeSame) return out;
     const p = prev.summary || {};
     const c = (cur && cur.summary) || {};
     const oldN = typeof p.reviewCount === 'number' ? p.reviewCount : null;
     const newN = typeof c.reviewCount === 'number' ? c.reviewCount : null;
     if (oldN != null && newN != null && oldN !== newN) {
+      const decline = newN < oldN;
+      if (decline && !bothComplete) return out; // 样本页变少 ≠ 评论变少
+      const limited = decline ? false : scopeLimited;
       out.push({
         dimension: 'review', eventType: 'review_changed', subjectId: null,
         title: `公开评论数量变化：${oldN} → ${newN}`,
-        summary: `公开评论页样本中的评论数量由 ${oldN} 变为 ${newN}（样本不等于全网口碑）`,
-        change: { field: 'reviewCount', oldValue: oldN, newValue: newN, basis: 'deterministic_diff' },
+        summary: `公开评论页样本中的评论数量由 ${oldN} 变为 ${newN}（样本不等于全网口碑）${limited ? SCOPE_LIMITED_NOTE : ''}`,
+        change: { field: 'reviewCount', oldValue: oldN, newValue: newN, basis: 'deterministic_diff', scopeLimited: limited },
       });
     }
     return out;
   }
 
   if (capability === 'youtube_content' || capability === 'tiktok_commercial_content') {
+    if (!scopeSame) return out; // 渠道/查询范围变了 → 条数不可比
     const oldN = Array.isArray(prev.observations) ? prev.observations.length : 0;
     const newN = obs.length;
     if (oldN !== newN) {
+      const decline = newN < oldN;
+      if (decline && !bothComplete) return out; // 分页失败导致条数变少 ≠ 内容减少
+      const limited = decline ? false : scopeLimited;
       out.push({
         dimension: 'social', eventType: 'social_changed', subjectId: null,
         title: `公开内容数量变化：${oldN} → ${newN}`,
-        summary: `公开内容条数由 ${oldN} 变为 ${newN}`,
-        change: { field: 'contentCount', oldValue: oldN, newValue: newN, basis: 'deterministic_diff' },
+        summary: `公开内容条数由 ${oldN} 变为 ${newN}${limited ? SCOPE_LIMITED_NOTE : ''}`,
+        change: { field: 'contentCount', oldValue: oldN, newValue: newN, basis: 'deterministic_diff', scopeLimited: limited },
       });
     }
   }
@@ -254,4 +346,6 @@ function writeIntelEvents(o, capability, attempt, changes, windowKey) {
 module.exports = {
   PURPOSE, PURPOSES,
   previousComparable, computeChanges, applyChanges,
+  // 可比范围（测试与审计用；纯函数，不写库）
+  coverageProfile, isComplete, sameComparisonScope,
 };

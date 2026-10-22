@@ -260,11 +260,8 @@ function loadCompetitor(job) {
     if (!st || !Array.isArray(st.competitors)) return null;
     const c = st.competitors.find(x => x && x.id === job.competitorId) || null;
     if (!c) return null;
-    if (c.market == null) {
-      const region = st.intent && Array.isArray(st.intent.regions) ? st.intent.regions[0] : null;
-      if (region) return Object.assign({}, c, { market: region });
-    }
-    return c;
+    // SC-09 r3 §二：市场解析唯一入口（competitor.market → project intent.regions[0]）
+    return require('../lib/brand-market.js').withResolvedMarket(c, st.intent || {});
   } catch (e) { return null; }
 }
 
@@ -483,18 +480,78 @@ function notifyObservationDiff(job) {
   }
 }
 
-// SC-09 r2 §三.6：品牌已被移出项目 → 其尚未执行的首采任务不再采集。
-// 只对**首采 item 自己那条任务**生效（不影响手动刷新/正式监控的独立任务）。
-function isCancelledScope(job) {
+// SC-09 r3 §一：统一取消——job 与 attempt 必须同时进入终态，绝不留下
+// 「无有效 job 对应的 running attempt」（r2 的缺陷：只把 job 改 done，attempt 仍 running）。
+//
+// 竞态处理（§一.6）：
+//   · job 用 CAS：只在「当前 status 与 claim_token 都仍是刚读到的值」时改写——
+//     错误 claimToken / 已被 worker finish 的任务都不可能被这里覆盖；
+//   · attempt 只在 status='running' 时终结，已完成（终态不可变，00 §56.2）绝不覆盖；
+//   · 已 running 的任务由执行前 fencing 拦截（tick 里 isCancelledScope → 本函数）。
+//
+// 状态词表（05 §11 冻结，本轮不新增枚举）：attempt 没有 cancelled 状态，因此复用
+// 合法失败状态 failed + source_status=internal_error（系统侧取消，不是来源侧故障），
+// 用户可见原因由 error_user_text 承载：「品牌已移出项目，采集已取消。」
+// 绝不写成 unavailable / blocked（那等于冤枉来源）。
+const CANCEL_TEXT = '品牌已移出项目，采集已取消。';
+function cancelCollectionJobAndAttempt(input) {
+  const o = input || {};
+  const tid = String(o.tenantId || '');
+  const jobId = String(o.jobId || '');
+  const attemptId = String(o.attemptId || '');
+  const reasonCode = String(o.reasonCode || 'brand_removed_from_project');
+  const userText = String(o.userText || CANCEL_TEXT);
+  const out = { jobCancelled: false, attemptCancelled: false, jobStatus: null, attemptStatus: null };
+  if (!tid) return out;
+  const db = getDb();
+
+  if (jobId) {
+    const job = db.prepare('SELECT status, claim_token FROM collection_jobs WHERE job_id=? AND tenant_id=?').get(jobId, tid);
+    if (job && !['done', 'error', 'dead'].includes(job.status)) {
+      const r = db.prepare(`UPDATE collection_jobs SET status='done', done_at=?, last_error=?
+        WHERE job_id=? AND tenant_id=? AND status=? AND IFNULL(claim_token,'')=?`)
+        .run(nowIso(), reasonCode, jobId, tid, job.status, String(job.claim_token || ''));
+      out.jobCancelled = r.changes > 0;
+    }
+    const a1 = db.prepare('SELECT status FROM collection_jobs WHERE job_id=? AND tenant_id=?').get(jobId, tid);
+    out.jobStatus = a1 ? a1.status : null;
+  }
+
+  if (attemptId) {
+    const att = db.prepare('SELECT status, snapshot_ids FROM collection_attempts WHERE attempt_id=? AND tenant_id=?')
+      .get(attemptId, tid);
+    if (att && att.status === 'running') {
+      let snapshots = [];
+      try { snapshots = JSON.parse(att.snapshot_ids || '[]'); } catch (e) { snapshots = []; }
+      try {
+        SurfaceStore.completeAttempt(tid, attemptId, {
+          status: 'failed', sourceStatus: 'internal_error', errorClass: 'cancelled_scope',
+          errorUserText: userText, observations: [], snapshotIds: snapshots, evidenceIds: [],
+        });
+        out.attemptCancelled = true;
+      } catch (e) { out.attemptError = String((e && e.message) || e).slice(0, 160); }
+    }
+    const a2 = db.prepare('SELECT status FROM collection_attempts WHERE attempt_id=? AND tenant_id=?').get(attemptId, tid);
+    out.attemptStatus = a2 ? a2.status : null;
+  }
+  return out;
+}
+
+// 该任务是否属于「已被移出项目」的首采 item（返回取消上下文，供 tick 统一取消）
+function cancelledScopeOf(job) {
   try {
-    const db = getDb();
-    const row = db.prepare(`SELECT in_scope FROM first_collection_items
+    const row = getDb().prepare(`SELECT in_scope, item_id FROM first_collection_items
       WHERE tenant_id=? AND project_id=? AND competitor_id=? AND capability=? AND job_id=? AND attempt_id=?`)
       .get(String(job.tenantId), String(job.projectId), String(job.competitorId), String(job.capability),
         String(job.jobId), String(job.attemptId));
-    if (!row) return false;
-    return !row.in_scope;
-  } catch (e) { return false; }
+    if (!row || row.in_scope) return null;
+    return { itemId: row.item_id, reasonCode: 'brand_removed_from_project' };
+  } catch (e) { return null; }
+}
+
+// 兼容旧调用点（r2 语义）：只回答「是否已移出项目」
+function isCancelledScope(job) {
+  return !!cancelledScopeOf(job);
 }
 
 // worker 单 tick：reclaim + reconcile + 认领一个 job 执行到底（含心跳）。
@@ -507,10 +564,18 @@ async function tick(options) {
   if (!job) return { claimed: false, reclaimed, reconciled };
   const hb = setInterval(() => { try { heartbeat(job.jobId, job.claimToken, Date.now()); } catch (e) {} }, HEARTBEAT_INTERVAL_MS);
   try {
-    // SC-09 r2 §三.6：认领后、执行前再确认一次范围——品牌在执行前被移出则不发外部请求
-    if (isCancelledScope(job)) {
-      finish(job.jobId, job.claimToken, 'done', 'brand_removed_from_project');
-      return { claimed: true, jobId: job.jobId, status: 'cancelled', reclaimed, reconciled, reason: 'brand_removed_from_project' };
+    // SC-09 r3 §一：认领后、执行前再确认一次范围——品牌在执行前被移出则不发外部请求，
+    // 并且**同时**把 job 与 attempt 终结（r2 只 finish job，留下孤儿 running attempt）
+    const cancelled = cancelledScopeOf(job);
+    if (cancelled) {
+      const cx = cancelCollectionJobAndAttempt({
+        tenantId: job.tenantId, jobId: job.jobId, attemptId: job.attemptId,
+        reasonCode: cancelled.reasonCode,
+      });
+      return {
+        claimed: true, jobId: job.jobId, status: 'cancelled', reclaimed, reconciled,
+        cancel: cx, reason: cancelled.reasonCode,
+      };
     }
     const out = await executeJob(job);
     finish(job.jobId, job.claimToken, 'done');
@@ -593,5 +658,6 @@ module.exports = {
   CLAIM_TTL_MS, HEARTBEAT_INTERVAL_MS, MAX_RETRY, RUNNING_LEASE_MS,
   getDb, enqueue, claim, heartbeat, finish, reclaimExpired, reconcileAbandoned,
   executeJob, tick, startWorker, stopWorker, setExecutorForTest, list, getJob,
+  cancelCollectionJobAndAttempt, cancelledScopeOf, isCancelledScope, CANCEL_TEXT,
   loadCompetitor, // R4.14：暴露给回归测试（市场回退口径），不对外暴露 HTTP 面
 };
