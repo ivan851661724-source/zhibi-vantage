@@ -137,10 +137,11 @@ test('I1 收件箱字段规则：baseline/backfill 不入箱，无证据只能 p
   assert.strictEqual(forbid.recorded, false);
   assert.strictEqual(forbid.reason, 'FORBIDDEN_CHANGE_FIELD:roi');
 
-  // 未接入维度（review）不得写入占位事件
+  // 未接入维度（search，尚无确定性可比 Diff 写入点）不得写入占位事件
+  //（SC-09 起 product/stock/review/social 已有真实 Diff 写入点，不再属于此列）
   const notYet = Inbox.recordEvent({
-    tenantId: TID, projectId: PID, competitorId: CID, dimension: 'review', eventType: 'review_changed',
-    title: 'x', observedAt: now, origin: 'monitoring', change: { field: 'rating', oldValue: 4.5, newValue: 4.4 },
+    tenantId: TID, projectId: PID, competitorId: CID, dimension: 'search', eventType: 'search_interest_changed',
+    title: 'x', observedAt: now, origin: 'monitoring', change: { field: 'interest', oldValue: 40, newValue: 55 },
   });
   assert.strictEqual(notYet.recorded, false);
   assert.ok(/DIMENSION_NOT_INTEGRATED/.test(notYet.reason), '未接入维度拒收: ' + notYet.reason);

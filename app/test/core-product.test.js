@@ -17,6 +17,7 @@ const path = require('path');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-core-'));
 process.env.ZB_DATA_DIR = path.join(TMP, 'data');
+process.env.ZB_FIRST_COLLECTION_AUTO = 'off'; // 既有用例不自动建首采批次
 fs.mkdirSync(process.env.ZB_DATA_DIR, { recursive: true });
 process.env.SCHEDULER_ENABLED = '0';
 process.env.ZB_COLLECT_WORKER_DISABLED = '1';

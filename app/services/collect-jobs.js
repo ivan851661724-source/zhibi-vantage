@@ -425,6 +425,13 @@ function notifyWatchIntent(job) {
   } catch (e) { return null; } // 意向推进失败不影响采集结果（由调度器自愈兜底）
 }
 
+// SC-09：首采批次推进钩子（异常安全：批次推进失败绝不影响采集本身）
+function notifyFirstCollection(job) {
+  try {
+    return require('./first-collection.js').onJobFinished(job);
+  } catch (e) { return null; }
+}
+
 // worker 单 tick：reclaim + reconcile + 认领一个 job 执行到底（含心跳）。
 // 返回 { claimed: bool, jobId?, status?, reclaimed?, reconciled? }
 async function tick(options) {
@@ -440,6 +447,8 @@ async function tick(options) {
     // SC-07 r2 §二 / r3 P0-2：公开商品采集完成 → 推进监控意向（读 attempt 库内真值，
     // 不依赖 executeJob 返回形态；取消/已晋升意向由 onProbeFinished 忽略）
     notifyWatchIntent(job);
+    // SC-09：项目级自动首采——任务完成后把真实 attempt 状态落回首采 item（幂等，无 item 则忽略）
+    notifyFirstCollection(job);
     return { claimed: true, jobId: job.jobId, status: 'done', reclaimed, reconciled, deduped: !!(out && out.deduped) };
   } catch (e) {
     const msg = String((e && e.message) || e);
@@ -460,6 +469,7 @@ async function tick(options) {
     // r3 P0-2：异常路径同样推进监控意向——失败按 internal_error 计入 auto_retries，
     // 有界退避重试，达到上限进入 source_failed；绝不留下无 job、无 next_probe_at 的 establishing。
     notifyWatchIntent(job);
+    notifyFirstCollection(job);
     finish(job.jobId, job.claimToken, 'error', msg);
     return { claimed: true, jobId: job.jobId, status: 'error', reclaimed, reconciled, error: msg.slice(0, 200) };
   } finally { clearInterval(hb); }

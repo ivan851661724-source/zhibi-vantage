@@ -828,6 +828,138 @@ function latestVerifiedChange(tenantId, projectId, competitorId) {
   } catch (e) { return null; }
 }
 
+// ---------- SC-09：商品视图（只聚合同一维度的两个**商品**能力） ----------
+// 缺陷修复：website_products 维度同时含 official_site_profile，直接取维度 observations
+// 会把「官网资料观察」当成商品展示（Grovemade 真实数据实测：只显示 1 条而非 10 件商品）。
+function buildProductsView(tenantId, projectId, comp) {
+  const out = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  if (!comp || !comp.id) return out;
+  const caps = ['shopify_catalog', 'public_site_products'];
+  const seen = new Set();
+  let latestAt = null, latestAttempt = null, discoveryPath = null;
+  for (const cap of caps) {
+    let atts = [];
+    try { atts = SurfaceStore.listAttempts(tenantId, projectId, comp.id, cap, 5) || []; } catch (e) { atts = []; }
+    const usable = atts.find(a => a && (a.status === 'success' || a.status === 'partial')
+      && Array.isArray(a.observations) && a.observations.length > 0);
+    if (!usable) continue;
+    const at = usable.endedAt || usable.startedAt || null;
+    if (at && (!latestAt || at > latestAt)) { latestAt = at; latestAttempt = usable; }
+    if (!discoveryPath && usable.summary && usable.summary.discoveryPath) discoveryPath = usable.summary.discoveryPath;
+    for (const o of usable.observations) {
+      const key = String(o.id || o.sourceUrl || o.title || '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.observations.push(o);
+    }
+    // 证据入口：每条可用 attempt 的 Evidence（引用其快照集合）
+    for (const eid of (usable.evidenceIds || [])) {
+      out.evidenceRefs.push({
+        evidenceId: eid,
+        snapshotId: (usable.snapshotIds || [])[0] || null,
+        sourceUrl: usable.sourceUrl || comp.url || null,
+        label: cap === 'shopify_catalog' ? '官网商品目录采集' : '官网公开商品页采集',
+      });
+    }
+  }
+  if (out.observations.length) {
+    const prices = out.observations.map(o => (o && typeof o.price === 'number' ? o.price : null)).filter(v => v != null);
+    const currencies = Array.from(new Set(out.observations.map(o => (o && o.currency) || null).filter(Boolean)));
+    out.summary = {
+      productCount: out.observations.length,
+      priceObservedCount: prices.length,
+      priceMin: prices.length ? Math.min(...prices) : null,
+      priceMax: prices.length ? Math.max(...prices) : null,
+      currencies,
+      // 单币种时给出 currency（与既有口径/测试兼容）；多币种时留 null，逐商品币种仍保留
+      currency: currencies.length === 1 ? currencies[0] : null,
+      currencyStatus: currencies.length === 1 ? 'confirmed' : 'unknown',
+      discoveryPath: discoveryPath,
+      sampleNote: '样本为公开页面可安全识别的商品（发现路径受限），非全量商品清单，不推断销量',
+    };
+    out.attemptId = latestAttempt ? latestAttempt.attemptId : null;
+    out.collectedAt = latestAt;
+  }
+  return out;
+}
+
+// ---------- SC-09 §四：品牌卡片的真实采集摘要（只读 attempt/summary，不推断、不补 0） ----------
+// 与「覆盖投影」分工：brandCoverage 表达维度状态；本摘要表达用户能看懂的事实
+//（商品数/价格区间/评论页数/内容数/热度与广告的覆盖状态/最近成功与最近失败）。
+function buildCollectionDigest(tenantId, projectId, comp) {
+  const c = comp || {};
+  const out = {
+    products: null, reviews: null, social: null, search: null, ads: null,
+    lastSuccessAt: null, lastFailureText: null,
+  };
+  if (!c.id) return out;
+  let atts = [];
+  try { atts = SurfaceStore.listAttemptsByCompetitor(tenantId, projectId, c.id, 100) || []; } catch (e) { atts = []; }
+  const usable = atts.filter(a => (a.status === 'success' || a.status === 'partial')
+    && (Array.isArray(a.observations) ? a.observations.length : 0) > 0);
+
+  // 最近成功（任意能力）
+  for (const a of usable) {
+    const at = a.endedAt || a.startedAt || null;
+    if (at && (!out.lastSuccessAt || at > out.lastSuccessAt)) out.lastSuccessAt = at;
+  }
+  // 最近失败原因（最新一次失败 attempt；成功后不再作为当前提醒）
+  const latest = atts[0] || null;
+  if (latest && latest.status === 'failed') out.lastFailureText = latest.errorUserText || '最近一次采集失败，可稍后重试。';
+
+  const firstOf = (caps) => usable.find(a => caps.includes(a.capability)) || null;
+
+  // 商品与价格区间（website_products 两能力任一）
+  const pa = firstOf(['shopify_catalog', 'public_site_products']);
+  if (pa) {
+    const obs = Array.isArray(pa.observations) ? pa.observations : [];
+    const prices = obs.map(o => (o && typeof o.price === 'number' ? o.price : null)).filter(v => v != null);
+    const currencies = Array.from(new Set(obs.map(o => (o && o.currency) || null).filter(Boolean)));
+    out.products = {
+      count: obs.length,
+      priceMin: prices.length ? Math.min(...prices) : null,
+      priceMax: prices.length ? Math.max(...prices) : null,
+      currencies,
+      collectedAt: pa.endedAt || pa.startedAt || null,
+    };
+  }
+  // 公开评论页（页数 + 摘要里的评论总数）
+  const ra = firstOf(['public_reviews']);
+  if (ra) {
+    const obs = Array.isArray(ra.observations) ? ra.observations : [];
+    const sum = ra.summary || {};
+    out.reviews = {
+      pageCount: obs.length,
+      reviewCount: typeof sum.reviewCount === 'number' ? sum.reviewCount : null,
+      collectedAt: ra.endedAt || ra.startedAt || null,
+    };
+  }
+  // 社媒内容
+  const sa = firstOf(['youtube_content', 'tiktok_commercial_content']);
+  if (sa) {
+    const obs = Array.isArray(sa.observations) ? sa.observations : [];
+    out.social = { count: obs.length, platform: sa.capability === 'youtube_content' ? 'youtube' : 'tiktok', collectedAt: sa.endedAt || sa.startedAt || null };
+  }
+  // 搜索热度：只有真实可用的 DataForSEO 观测才算；否则如实报 ready/not_configured
+  const sea = firstOf(['dataforseo_trends']);
+  if (sea) {
+    out.search = { state: 'available', collectedAt: sea.endedAt || sea.startedAt || null, measurement: '数据服务估算' };
+  } else {
+    let st = 'not_started';
+    try { if (Readiness.getReadiness('dataforseo_trends').state === 'not_configured') st = 'not_configured'; } catch (e) { st = 'not_started'; }
+    out.search = { state: st, collectedAt: null, measurement: null };
+  }
+  // 广告覆盖：来源覆盖范围 × 品牌市场（未覆盖不等于 0 条广告）
+  try {
+    const cov = require('../lib/tiktok-adlib.js').marketCoverage(c.market);
+    out.ads = {
+      coverage: cov.coverageState, brandMarket: cov.brandMarket,
+      note: require('../lib/tiktok-adlib.js').coverageNoteFor(cov.coverageState, cov.brandMarket),
+    };
+  } catch (e) { out.ads = { coverage: 'unknown', brandMarket: null, note: null }; }
+  return out;
+}
+
 // ---------- 品牌视图 ----------
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
@@ -854,22 +986,28 @@ function listBrandViews(tenantId, projectId) {
       lastVerifiedChange: latestVerifiedChange(tenantId, projectId, b.competitorRef),
       firstObservedAt: firstObservedAt(tenantId, b.brandId) || bc.firstObservedAt || null,
       lastObservedAt: last ? last.at : (bc.dimensions.reduce((acc, d) => (d.lastObservedAt && (!acc || d.lastObservedAt > acc) ? d.lastObservedAt : acc), null)),
+      // SC-09 §四：卡片真实摘要（商品/价格区间/评论/社媒/热度/广告覆盖/最近成功与失败）
+      collectionDigest: buildCollectionDigest(tenantId, projectId, comp || {}),
     };
   });
 }
 
 // 竞品数据库首页统计（与卡片同源派生，禁止前端各自算一套）
-function buildBrandsProjectStats(views) {
+function buildBrandsProjectStats(views, opts) {
   const list = Array.isArray(views) ? views : [];
+  const o = opts || {};
   const accumulating = list.filter(b => b.brandCoverage && b.brandCoverage.summary.available > 0).length;
   const collecting = list.filter(b => b.collection && (b.collection.state === 'collecting' || b.collection.state === 'queued')).length;
   const needsAttention = list.filter(b => {
     const bc = b.brandCoverage || { summary: {} };
     const cs = b.collection || {};
     // SC-08 r3 §三：「旧数据仍可用但最新采集失败」（usingPreviousData）也要计入需要处理
+    // SC-09：首采批次里任一能力失败（如公开商品页被拒）同样计入「需要处理」
+    const fc = o.fcByBrand && b.competitorId ? o.fcByBrand[b.competitorId] : null;
     return cs.state === 'failed' || cs.state === 'source_pending' || (b.monitoring && b.monitoring.state === 'source_failed')
       || (bc.summary && bc.summary.failed > 0)
-      || (Array.isArray(bc.dimensions) && bc.dimensions.some(d => d.usingPreviousData));
+      || (Array.isArray(bc.dimensions) && bc.dimensions.some(d => d.usingPreviousData))
+      || !!(fc && fc.hasFailure);
   }).length;
   return { brands: list.length, accumulating, collecting, needsAttention };
 }
@@ -887,21 +1025,31 @@ function getBrandView(tenantId, brandId, projectId) {
   const comp = competitorId ? findCompetitor(state, competitorId) : null;
   const bc = buildBrandCoverage(tenantId, projectId, comp || {});
   // 商品与价格（来自 Data Surface 已采集 attempt，不复制真值）
+  // 商品视图：只聚合同维度的两个商品能力（不把官网资料观察当商品）
   let products = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
   if (comp) {
-    try {
-      const det = Surface.buildDimensionDetail({ tenantId, projectId, competitorId: comp.id, dimension: 'website_products', offset: 0, limit: 50, comp });
-      products = {
-        observations: det.observations || [],
-        summary: det.summary || null,
-        attemptId: det.attemptId || null,
-        collectedAt: det.collectedAt || null,
-        evidenceRefs: (det.evidenceRefs || []).map(r => ({
-          evidenceId: r.evidenceId || null, snapshotId: r.snapshotId || null,
-          sourceUrl: r.sourceUrl || null, label: r.label || null,
-        })),
-      };
-    } catch (e) { /* 维度不可读：保持空，不填充 */ }
+    try { products = buildProductsView(tenantId, projectId, comp); }
+    catch (e) { /* 不可读：保持空，不填充 */ }
+  }
+  // SC-09 §四：详情 Tab 必须展示真实 observations + 证据入口（不得只报覆盖数字）
+  const dimensionDetails = {};
+  if (comp) {
+    for (const dim of ['reviews_reputation', 'social_content', 'search_interest', 'ad_campaigns']) {
+      try {
+        const det = Surface.buildDimensionDetail({ tenantId, projectId, competitorId: comp.id, dimension: dim, offset: 0, limit: 30, comp });
+        dimensionDetails[dim] = {
+          observations: det.observations || [],
+          summary: det.summary || null,
+          attemptId: det.attemptId || null,
+          collectedAt: det.collectedAt || null,
+          surfaceState: det.surfaceState || null,
+          evidenceRefs: (det.evidenceRefs || []).map(r => ({
+            evidenceId: r.evidenceId || null, snapshotId: r.snapshotId || null,
+            sourceUrl: r.sourceUrl || null, label: r.label || null,
+          })),
+        };
+      } catch (e) { dimensionDetails[dim] = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] }; }
+    }
   }
   const collection = buildCollectionState(tenantId, projectId, comp || {});
   const monitoring = buildMonitoringState(tenantId, projectId, comp || {});
@@ -926,6 +1074,8 @@ function getBrandView(tenantId, brandId, projectId) {
     lastVerifiedChange: latestVerifiedChange(tenantId, projectId, competitorId),
     unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, competitorId: comp ? comp.id : null, comp: comp || {} }),
     products,
+    dimensionDetails: dimensionDetails,
+    collectionDigest: buildCollectionDigest(tenantId, projectId, comp || {}),
     timeline: timelineView(tenantId, brandId, { limit: 100 }),
     intelligence: comp ? buildBrandIntelligence(tenantId, projectId, brandId, comp, {}) : [],
     reports: BrandStore.listReports(tenantId, projectId).filter(r => {
@@ -942,5 +1092,5 @@ module.exports = {
   listIntelligence, buildBrandIntelligence, constructionDimensions,
   listBrandViews, getBrandView, buildOfficialSiteStatus, buildPublicProductsStatus,
   buildCollectionState, buildProjectCollectionCoverage, COLLECTION_STATE_TEXT,
-  buildBrandCoverage, BRAND_COVER_STATE_TEXT, buildMonitoringState, buildBrandsProjectStats, latestVerifiedChange,
+  buildBrandCoverage, BRAND_COVER_STATE_TEXT, buildMonitoringState, buildBrandsProjectStats, latestVerifiedChange, buildCollectionDigest, buildProductsView,
 };

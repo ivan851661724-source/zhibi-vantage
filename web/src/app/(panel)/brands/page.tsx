@@ -19,7 +19,7 @@ import Link from 'next/link';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
-import { fetchBrands, type BrandListItem, type BrandsProjectStats } from '@/lib/core-api';
+import { fetchBrands, retryFirstCollection, type BrandListItem, type BrandsProjectStats, type FirstCollectionSummary } from '@/lib/core-api';
 import { apiPost } from '@/lib/api';
 import { BRAND_COVER_TEXT, brandCoverState, allBrandsNotCollected, relationText, type BrandCoverState } from '@/lib/core-logic';
 import { EmptyState } from '@/components/core-ui';
@@ -55,6 +55,23 @@ function fmtDateTime(iso: string | null | undefined): string {
     return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   } catch (e) { return '—'; }
 }
+// SC-09：真实状态的人话（不出现英文枚举/技术码）
+const SEARCH_STATE_TEXT: Record<string, string> = {
+  available: '已有估算',
+  not_configured: '数据服务暂不可用',
+  not_started: '尚未采集',
+};
+const ADS_COVERAGE_TEXT: Record<string, string> = {
+  covered: '该来源覆盖此市场',
+  out_of_coverage: '该来源不覆盖此市场',
+  unknown: '覆盖范围未知',
+};
+function priceRangeText(d: { priceMin: number | null; priceMax: number | null; currencies: string[] } | null | undefined): string | null {
+  if (!d || d.priceMin == null || d.priceMax == null) return null;
+  const cur = (d.currencies || [])[0] || '';
+  return `${cur ? cur + ' ' : ''}${d.priceMin}–${d.priceMax}`;
+}
+
 const DIM_LABEL: Record<string, string> = {
   price: '价格', website: '官网内容', product: '商品', stock: '库存',
   review: '评论', social: '社媒', ads: '广告', search: '搜索热度',
@@ -74,6 +91,10 @@ function BrandsInner() {
   const [bootstrapping, setBootstrapping] = useState(false);
   const [bootMsg, setBootMsg] = useState<string | null>(null);
   const [inFlight, setInFlight] = useState(false);
+  // SC-09：项目级首采（后端自动建立，前端只轮询到终态，不需要用户逐个点击）
+  const [fc, setFc] = useState<FirstCollectionSummary | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
 
   // 一次补齐首轮采集（有界、幂等；重复点击不会重复产生任务）
   const startBootstrap = async () => {
@@ -116,6 +137,7 @@ function BrandsInner() {
         if (!alive) return;
         setItems(r.brands || []);
         setStats(r.stats || null);
+        setFc(r.firstCollection || null);
         setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
         setErr(null);
       })
@@ -124,9 +146,10 @@ function BrandsInner() {
     return () => { alive = false; ctrl.abort(); };
   }, [projectId]);
 
-  // 有排队/采集中任务时定时刷新（含品牌卡与统计，用户能看到状态推进）
+  // 有排队/采集中任务、或首采未到终态时定时刷新（用户不需要手动刷新页面）
+  const fcRunning = !!(fc && fc.status === 'running');
   useEffect(() => {
-    if (!projectId || !inFlight) return;
+    if (!projectId || (!inFlight && !fcRunning)) return;
     let alive = true;
     const t = setInterval(() => {
       fetchBrands(projectId)
@@ -134,12 +157,30 @@ function BrandsInner() {
           if (!alive) return;
           setItems(r.brands || []);
           setStats(r.stats || null);
+          setFc(r.firstCollection || null);
           setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
         })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
-    }, 5000);
+    }, 4000);
     return () => { alive = false; clearInterval(t); };
-  }, [projectId, inFlight]);
+  }, [projectId, inFlight, fcRunning]);
+
+  // SC-09：重新检查失败项（幂等：只重排失败项，不动已成功的项）
+  const retryFailedItems = async () => {
+    if (!projectId) return;
+    setRetrying(true); setRetryMsg(null);
+    try {
+      const r = await retryFirstCollection(projectId);
+      setRetryMsg(r.message || null);
+      setFc(r.firstCollection || null);
+      const fresh = await fetchBrands(projectId);
+      setItems(fresh.brands || []);
+      setStats(fresh.stats || null);
+      setFc(fresh.firstCollection || null);
+    } catch (e) {
+      setRetryMsg(e instanceof Error ? e.message : '重试失败，请稍后再试。');
+    } finally { setRetrying(false); }
+  };
 
   const relOptions = useMemo(() => {
     const m = new Map<string, number>();
@@ -176,7 +217,35 @@ function BrandsInner() {
         <Link className="btn-ghost" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>
       </div>
 
-      {/* ② 紧凑项目统计（后端同源派生；点击「需要处理」可直接筛选） */}
+      {/* SC-09 ② 首轮采集进度（后端自动建立；轮询到终态，无需逐个点击品牌/手动刷新） */}
+      {fc ? (
+        <div className="core-fc" data-testid="first-collection">
+          <div className="core-fc-head">
+            <b>首轮采集</b>
+            <span className={'core-fc-state core-fc-' + fc.status}>
+              {fc.status === 'running' ? '正在采集' : fc.status === 'partial' ? '部分完成' : '已完成'}
+            </span>
+            <span className="core-fc-progress">{fc.brandsDone} / {fc.brandsTotal} 个品牌已完成</span>
+            {fc.status === 'running' ? <span className="core-fc-hint">结果会自动更新，无需刷新页面</span> : null}
+          </div>
+          <div className="core-fc-bar" role="progressbar" aria-valuemin={0} aria-valuemax={fc.brandsTotal || 1} aria-valuenow={fc.brandsDone}>
+            <i style={{ width: (fc.brandsTotal ? Math.round((fc.brandsDone / fc.brandsTotal) * 100) : 0) + '%' }} />
+          </div>
+          <div className="core-fc-facts">
+            <span>正在采集 <b>{fc.brandsCollecting}</b></span>
+            <span>部分完成 <b>{fc.brandsPartial}</b></span>
+            <span className={fc.brandsNeedsAttention > 0 ? 'is-warn' : ''}>需要处理 <b>{fc.brandsNeedsAttention}</b></span>
+            {fc.canRetry ? (
+              <button type="button" className="btn-ghost btn-mini" disabled={retrying} onClick={retryFailedItems}>
+                {retrying ? '正在重试…' : '重新检查失败项'}
+              </button>
+            ) : null}
+          </div>
+          {retryMsg ? <p className="hint">{retryMsg}</p> : null}
+        </div>
+      ) : null}
+
+      {/* ③ 紧凑项目统计（后端同源派生；点击「需要处理」可直接筛选） */}
       <div id="coverage" className="core-stat-row" data-testid="brands-stats">
         <div className="core-stat"><span className="core-stat-num">{stats ? stats.brands : items.length}</span><span className="core-stat-label">品牌总数</span></div>
         <div className="core-stat"><span className="core-stat-num">{stats ? stats.accumulating : 0}</span><span className="core-stat-label">已开始积累</span></div>
@@ -207,7 +276,7 @@ function BrandsInner() {
           sub="先在竞品雷达发现并添加品牌，这里会为每个品牌建立长期数据档案。"
           action={<Link className="btn primary" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>}
         />
-      ) : allBrandsNotCollected(items) && !hasFilter ? (
+      ) : allBrandsNotCollected(items) && !hasFilter && !(fc && (fc.status === 'running' || fc.brandsDone > 0)) ? (
         <EmptyState
           title="品牌已登记，首轮采集尚未开始"
           sub={`已登记 ${items.length} 个竞争品牌。系统会按公开来源逐项采集（官网资料 / 公开商品页 / 公开评论），完成后这里会显示各自的档案。`}
@@ -226,6 +295,7 @@ function BrandsInner() {
             const sum = b.brandCoverage.summary;
             const dims = b.brandCoverage.dataDimensions || [];
             const mon = b.monitoring;
+            const dg = b.collectionDigest || null;
             const href = `/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`;
             return (
               <li key={b.brandId} className="core-brand-card">
@@ -236,24 +306,51 @@ function BrandsInner() {
                 <p className="core-brand-domain" title={b.officialDomain || ''}>{b.officialDomain || '官网待确认'}</p>
 
                 <dl className="core-brand-facts">
-                  <div><dt>官网</dt><dd>{b.officialSite ? b.officialSite.statusText : '未采集'}</dd></div>
+                  <div><dt>官网</dt><dd>{b.officialSite ? b.officialSite.statusText : '尚未采集'}</dd></div>
+                  {/* SC-09 §四：真实采集摘要（无数据就不显示该行，不补 0） */}
+                  {dg && dg.products ? (
+                    <div><dt>商品</dt><dd>
+                      {dg.products.count} 个
+                      {priceRangeText(dg.products) ? <span className="core-brand-sig">{priceRangeText(dg.products)}</span> : null}
+                    </dd></div>
+                  ) : null}
+                  {dg && (dg.reviews || dg.social) ? (
+                    <div><dt>口碑 / 内容</dt><dd>
+                      {dg.reviews ? `评论页 ${dg.reviews.pageCount} 个` : '评论尚未采集'}
+                      {dg.social ? ` · 内容 ${dg.social.count} 条` : ''}
+                    </dd></div>
+                  ) : null}
+                  {dg && dg.search ? (
+                    <div><dt>搜索热度</dt><dd className={dg.search.state === 'available' ? undefined : 'core-brand-muted'}>
+                      {SEARCH_STATE_TEXT[dg.search.state] || '尚未采集'}
+                    </dd></div>
+                  ) : null}
+                  {dg && dg.ads ? (
+                    <div><dt>广告</dt><dd className={dg.ads.coverage === 'covered' ? undefined : 'core-brand-muted'}>
+                      {ADS_COVERAGE_TEXT[dg.ads.coverage] || '覆盖范围未知'}
+                    </dd></div>
+                  ) : null}
                   <div><dt>监控</dt><dd className={mon && mon.state === 'active' ? 'is-on' : undefined}>
                     {mon ? mon.stateText : '未加入监控'}{mon && mon.signalsText ? <span className="core-brand-sig">{mon.signalsText}</span> : null}
                   </dd></div>
-                  <div><dt>数据维度</dt><dd>
-                    {dims.length
-                      ? <span className="core-brand-dims">{dims.map(d => d.label).join('、')}</span>
-                      : <span className="core-brand-muted">{sum.available} / {sum.total} 个维度有数据</span>}
-                  </dd></div>
-                  <div><dt>最近变化</dt><dd>
-                    {b.lastVerifiedChange
-                      ? <span className="core-brand-change-line" title={b.lastVerifiedChange.title}>
+                  <div><dt>最近成功</dt><dd>{dg && dg.lastSuccessAt ? fmtDateTime(dg.lastSuccessAt) : <span className="core-brand-muted">尚未采集成功</span>}</dd></div>
+                  {b.lastVerifiedChange ? (
+                    <div><dt>最近变化</dt><dd>
+                      <span className="core-brand-change-line" title={b.lastVerifiedChange.title}>
                         {DIM_LABEL[b.lastVerifiedChange.dimension] || '变化'} · {fmtDateTime(b.lastVerifiedChange.at)}
                       </span>
-                      : <span className="core-brand-muted">暂未观察到可核实变化</span>}
-                  </dd></div>
-                  <div><dt>积累起点</dt><dd>{b.firstObservedAt ? fmtDate(b.firstObservedAt) : <span className="core-brand-muted">尚未开始积累</span>}</dd></div>
+                    </dd></div>
+                  ) : null}
                 </dl>
+                {/* 最近一次失败：只在当前确实失败时提示（成功后自动消失） */}
+                {dg && dg.lastFailureText ? <p className="core-brand-warn">{dg.lastFailureText}</p> : null}
+                {/* 首采逐能力状态：只在有失败/采集中时给一行人话，不铺技术枚举 */}
+                {b.firstCollection && b.firstCollection.collecting ? <p className="core-brand-muted core-brand-mini">首采进行中，结果会自动更新</p> : null}
+                {/* 首采失败但没有「最近一次失败」摘要（如最新一次是官网成功、商品失败）时，
+                    仍要如实提示一次，并引导到来源与采集记录 */}
+                {b.firstCollection && b.firstCollection.hasFailure && !(dg && dg.lastFailureText)
+                  ? <p className="core-brand-warn">{b.firstCollection.failureText || '部分来源采集失败，可查看来源与采集记录。'}</p>
+                  : null}
 
                 <div className="core-brand-card-foot">
                   <span className={`core-cover-badge core-cover-${cs}`}>{BRAND_COVER_TEXT[cs]}</span>

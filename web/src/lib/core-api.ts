@@ -29,6 +29,41 @@ export interface Coverage {
   summary: CoverageSummary;
 }
 
+
+// ---------- SC-09：项目级自动首采 ----------
+export type FirstCollectionStatus = 'running' | 'complete' | 'partial';
+export interface FirstCollectionSummary {
+  batchId: string;
+  status: FirstCollectionStatus;
+  startedAt: string;
+  completedAt: string | null;
+  brandsTotal: number;
+  brandsDone: number;
+  brandsCollecting: number;
+  brandsPartial: number;
+  brandsNeedsAttention: number;
+  items: Record<string, number>;
+  totalItems: number;
+  canRetry: boolean;
+}
+// 逐品牌 × 逐能力首采状态（真实任务状态，不含推断）
+export interface BrandFirstCollection {
+  items: Record<string, { state: string; resultCount: number | null }>;
+  hasFailure: boolean;
+  failureText: string | null;
+  collecting: boolean;
+}
+// 品牌卡片真实摘要（后端从 attempt 派生；无数据即 null，不补 0）
+export interface BrandCollectionDigest {
+  products: { count: number; priceMin: number | null; priceMax: number | null; currencies: string[]; collectedAt: string | null } | null;
+  reviews: { pageCount: number; reviewCount: number | null; collectedAt: string | null } | null;
+  social: { count: number; platform: string; collectedAt: string | null } | null;
+  search: { state: 'available' | 'not_started' | 'not_configured'; collectedAt: string | null; measurement: string | null } | null;
+  ads: { coverage: 'covered' | 'out_of_coverage' | 'unknown'; brandMarket: string | null; note: string | null } | null;
+  lastSuccessAt: string | null;
+  lastFailureText: string | null;
+}
+
 // ---------- SC-08 r2 §六：唯一覆盖投影 brandCoverage（后端 Registry 派生） ----------
 export type BrandCoverState6 = 'available' | 'collecting' | 'empty' | 'failed' | 'not_configured' | 'not_started';
 export interface BrandCoverageDimension {
@@ -105,6 +140,9 @@ export interface BrandListItem {
   lastVerifiedChange?: BrandVerifiedChange | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
+  // SC-09：品牌真实采集摘要 + 首采逐能力状态
+  collectionDigest?: BrandCollectionDigest | null;
+  firstCollection?: BrandFirstCollection | null;
 }
 
 // 竞品数据库首页四项统计（后端同源派生，禁止前端各算一套）
@@ -169,6 +207,18 @@ export interface ProductObservation {
   currency?: string | null;
   available?: boolean;
   publishedAt?: string | null;
+  // SC-09 §三.A：商品观察至少保留 图片/观察时间/来源快照
+  image?: string | null;
+  observedAt?: string | null;
+  snapshotId?: string | null;
+}
+
+// 任意维度的观察（商品/评论页/视频/趋势）：字段取并集，缺省即 null（不补值）
+export interface DimensionObservation extends ProductObservation {
+  rating?: number | null;
+  reviewCount?: number | null;
+  snippet?: string | null;
+  sourceUrl?: string | null;
 }
 
 export interface EvidenceRefLite {
@@ -392,6 +442,16 @@ export interface BrandDetail {
   brandCoverage: BrandCoverage;
   monitoring?: BrandMonitoringState | null;
   lastVerifiedChange?: BrandVerifiedChange | null;
+  // SC-09 §四：详情 Tab 的真实 observations（评论/社媒/热度/广告）+ 证据引用
+  dimensionDetails?: Record<string, {
+    observations: DimensionObservation[];
+    summary: Record<string, unknown> | null;
+    attemptId: string | null;
+    collectedAt: string | null;
+    surfaceState?: string | null;
+    evidenceRefs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label: string | null }[];
+  }>;
+  collectionDigest?: BrandCollectionDigest | null;
   // SC-06 二：官网确认状态（confirmed/unavailable/not_collected，非「官网不支持」语义）
   officialSite?: { status: 'confirmed' | 'unavailable' | 'not_collected'; statusText: string; canonical?: string | null; siteName?: string | null; hasOrganization?: boolean; lastCollectedAt?: string | null; sampleNote?: string } | null;
   // SC-06 r2：官网公开商品采集状态（与官方资料分离；未验证不写「已采集」）
@@ -413,9 +473,19 @@ export interface BrandDetail {
 }
 
 export function fetchBrands(projectId: string, signal?: AbortSignal) {
-  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; stats?: BrandsProjectStats; collectionCoverage?: CollectionCoverage | null }>(
+  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; stats?: BrandsProjectStats; firstCollection?: FirstCollectionSummary | null; collectionCoverage?: CollectionCoverage | null }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
+// SC-09：首采进度轮询 / 失败项重试
+export function fetchFirstCollection(projectId: string, signal?: AbortSignal) {
+  return apiGet<{ projectId: string; firstCollection: FirstCollectionSummary | null }>(
+    `/api/first-collection?projectId=${encodeURIComponent(projectId)}`, signal);
+}
+export function retryFirstCollection(projectId: string) {
+  return apiPost<{ projectId: string; retried: number; firstCollection: FirstCollectionSummary | null; message: string }>(
+    '/api/first-collection/retry-failed', { projectId });
+}
+
 export function fetchBrand(brandId: string, opts: { projectId?: string; signal?: AbortSignal } = {}) {
   const q = opts.projectId ? `?projectId=${encodeURIComponent(opts.projectId)}` : '';
   return apiGet<BrandDetail>(`/api/brands/${encodeURIComponent(brandId)}${q}`, opts.signal);

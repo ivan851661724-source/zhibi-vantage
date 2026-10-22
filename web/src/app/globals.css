@@ -3334,3 +3334,35 @@ a.core-inbox-text:hover{text-decoration:underline}
   .core-stat-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px}
   .core-stat{min-width:0}
 }
+
+/* ============================================================
+   SC-09：项目级首采进度块 + 卡片真实摘要 + 详情观察列表
+   ============================================================ */
+.core-fc{margin:6px 0 4px;padding:12px 14px;border:1px solid var(--line1);border-radius:10px;min-width:0}
+.core-fc-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;min-width:0}
+.core-fc-head b{font-size:13px;color:var(--ink)}
+.core-fc-state{font-size:11.5px;border:1px solid var(--line1);border-radius:999px;padding:1px 8px;color:var(--ink2)}
+.core-fc-running{color:#8a6d1a;border-color:rgba(138,109,26,.30)}
+.core-fc-complete{color:#1D9E75;border-color:rgba(29,158,117,.35)}
+.core-fc-partial{color:#b06a1f;border-color:rgba(176,106,31,.35)}
+.core-fc-progress{font-size:12.5px;color:var(--ink2);font-family:var(--num)}
+.core-fc-hint{margin-left:auto;font-size:11.5px;color:var(--ink3)}
+.core-fc-bar{height:4px;border-radius:999px;background:var(--line1);margin:9px 0 8px;overflow:hidden}
+.core-fc-bar>i{display:block;height:100%;background:var(--brand);transition:width .3s ease}
+.core-fc-facts{display:flex;flex-wrap:wrap;align-items:center;gap:16px;font-size:12px;color:var(--ink2)}
+.core-fc-facts b{font-family:var(--num);color:var(--ink)}
+.core-fc-facts .is-warn b{color:#b06a1f}
+.core-fc-facts .btn-mini{margin-left:auto}
+@media (max-width:640px){.core-fc-hint{margin-left:0;flex-basis:100%}}
+
+/* 卡片：真实摘要的辅助行 */
+.core-brand-warn{margin:2px 0 0;font-size:11.5px;color:#b06a1f;overflow-wrap:anywhere}
+.core-brand-mini{margin:2px 0 0;font-size:11.5px}
+
+/* 详情：观察列表（评论/内容/热度/广告的真实条目） */
+.core-obs-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.core-obs-list>li{border-top:1px solid var(--line1);padding:8px 0 0;min-width:0}
+.core-obs-title{font-size:13px;color:var(--ink);overflow-wrap:anywhere}
+.core-obs-meta{display:flex;flex-wrap:wrap;gap:10px;font-size:11.5px;color:var(--ink3);margin-top:3px;font-family:var(--num)}
+.core-obs-snip{font-size:12.5px;color:var(--ink2);margin-top:3px;overflow-wrap:anywhere}
+.core-obs-ev{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}

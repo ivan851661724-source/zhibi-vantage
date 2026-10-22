@@ -1967,6 +1967,10 @@ const officialSiteProductsAdapter = {
       reviewCount: typeof p.reviewCount === 'number' ? p.reviewCount : null,
       snippet: null,
       sourceUrl: p.url || null,
+      // SC-09 §三.A：商品观察至少保留 图片/观察时间/来源快照（拿不到就 null，不编造）
+      image: p.image || null,
+      observedAt: p.observedAt || res.observedAt || null,
+      snapshotId: p.snapshotId || null,
     }));
     const partial = !!res.partialScan;
     return {

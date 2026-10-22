@@ -39,7 +39,10 @@ const TYPE_BY_DIMENSION = {
   search: ['search_interest_changed'],
 };
 // 当前**真实存在**确定性 Diff 写入点的维度。其余维度结构上支持但不得写入占位事件。
-const DIMENSIONS_WITH_WRITERS = new Set(['price', 'website']);
+// SC-09：product/stock/review/social 也已有真实确定性 Diff 写入点（首采后的二次采集比较）：
+//   商品价格/在售状态/商品增减、评论数量、公开内容条数。
+// search/ads 仍无确定性可比值（估算/覆盖说明）→ 保持不可写入，绝不产生占位事件。
+const DIMENSIONS_WITH_WRITERS = new Set(['price', 'website', 'product', 'stock', 'review', 'social']);
 // 不可直接观测字段（禁入确定性 change）
 const FORBIDDEN_CHANGE_KEYS = new Set(['spend', 'cost', 'roi', 'gmv', 'revenue', 'profit', 'margin', 'conversion', 'conversion_rate', 'ltv', 'cac', 'ad_spend']);
 

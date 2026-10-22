@@ -32,6 +32,7 @@ import { BackfillCard } from '@/components/memory/backfill-card';
 import { VoicePanel } from '@/components/brand/voice-panel';
 import { EmptyState } from '@/components/core-ui';
 import { relationText, marketText } from '@/lib/core-logic';
+import type { DimensionObservation } from '@/lib/core-api';
 
 // 公开商品的发现路径（只描述「怎么找到的」，不暗示覆盖率更高）
 function discoveryPathText(p: string): string {
@@ -65,6 +66,40 @@ function fmt(iso: string | null | undefined, withTime?: boolean): string {
     const day = `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}`;
     return withTime ? `${day} ${p(d.getHours())}:${p(d.getMinutes())}` : day;
   } catch (e) { return '—'; }
+}
+
+// SC-09 §四：详情 Tab 的真实观察列表（只渲染后端返回的 observations；无数据不渲染）
+function ObsList({ items, evidenceRefs, onEvidence }: {
+  items: DimensionObservation[];
+  evidenceRefs?: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label?: string | null }[];
+  onEvidence?: (refs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label?: string | null }[]) => void;
+}) {
+  if (!items || !items.length) return null;
+  return (
+    <>
+      <ul className="core-obs-list">
+        {items.slice(0, 30).map((o, i) => (
+          <li key={o.id || o.sourceUrl || i}>
+            <div className="core-obs-title">{o.title || o.sourceUrl || '未命名条目'}</div>
+            <div className="core-obs-meta">
+              {o.sourceUrl ? <a href={o.sourceUrl} target="_blank" rel="noopener noreferrer nofollow">来源页</a> : null}
+              {o.price != null ? <span>{priceText(o)}</span> : null}
+              {o.rating != null ? <span>评分 {o.rating}</span> : null}
+              {o.reviewCount != null ? <span>评论 {o.reviewCount}</span> : null}
+              {o.publishedAt ? <span>{fmt(o.publishedAt)}</span> : null}
+              {o.observedAt ? <span>观察于 {fmt(o.observedAt, true)}</span> : null}
+            </div>
+            {o.snippet ? <p className="core-obs-snip">{o.snippet}</p> : null}
+          </li>
+        ))}
+      </ul>
+      {onEvidence && evidenceRefs && evidenceRefs.length ? (
+        <p className="core-obs-ev">
+          <button type="button" className="btn-mini btn-ghost" onClick={() => onEvidence(evidenceRefs)}>查看证据（{evidenceRefs.length}）</button>
+        </p>
+      ) : null}
+    </>
+  );
 }
 
 export default function BrandDetailPage() {
@@ -157,6 +192,12 @@ function BrandDetailInner() {
   const configuredDims = sum.total - (sum.notConfigured || 0);
   // SC-08 r3 §三：有历史数据但最近一次更新失败的维度数（旧数据保留，不冒充正常）
   const staleDims = (bc.dimensions || []).filter(x => x.usingPreviousData).length;
+  // SC-09 §四：评论/社媒/热度/广告的真实 observations（后端只读派生）
+  const dd = (d.dimensionDetails || {}) as Record<string, { observations: DimensionObservation[]; summary: Record<string, unknown> | null; collectedAt: string | null; evidenceRefs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label?: string | null }[] }>;
+  const reviewsDet = dd.reviews_reputation || null;
+  const socialDet = dd.social_content || null;
+  const searchDet = dd.search_interest || null;
+  const adsDet = dd.ad_campaigns || null;
   const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
   const rangePicker = (
     <TimeRangePicker
@@ -320,9 +361,15 @@ function BrandDetailInner() {
                     <span>{o.title}</span>
                     <span>{priceText(o)}</span>
                     <span>{o.available === false ? '断货' : '在售'}</span>
+                    {o.observedAt ? <span className="core-obs-meta">{fmt(o.observedAt, true)}</span> : null}
                   </li>
                 ))}
               </ul>
+              {products.evidenceRefs && products.evidenceRefs.length ? (
+                <p className="core-obs-ev">
+                  <button type="button" className="btn-mini btn-ghost" onClick={() => setEvRefs(products.evidenceRefs)}>查看证据（{products.evidenceRefs.length}）</button>
+                </p>
+              ) : null}
             </details>
           ) : null}
         </section>
@@ -332,6 +379,21 @@ function BrandDetailInner() {
       {tab === 'voice' && (
         <section className="core-sec">
           <VoicePanel voice={d.unifiedVoice} onEvidence={setEvRefs} />
+          {/* SC-09 §四：公开评论页的真实观察（不是搜索摘要，正文经合规抓取） */}
+          <div className="core-sub" data-testid="reviews-observations">
+            <h4>公开评论页</h4>
+            {reviewsDet && reviewsDet.observations.length ? (
+              <>
+                <p className="hint">本次采集到 {reviewsDet.observations.length} 个可访问的公开页面{reviewsDet.collectedAt ? `（${fmt(reviewsDet.collectedAt, true)}）` : ''}；样本不等于全网口碑。</p>
+                <ObsList items={reviewsDet.observations} evidenceRefs={reviewsDet.evidenceRefs} onEvidence={setEvRefs} />
+              </>
+            ) : (
+              <p className="hint">
+                {(bc.dimensions.find(x => x.code === 'reviews_reputation') || {}).stateText || '尚未采集'}
+                ；暂无可展示的公开评论页观察。
+              </p>
+            )}
+          </div>
         </section>
       )}
 
@@ -350,16 +412,42 @@ function BrandDetailInner() {
               />;
             }
             return (
-              <ul className="core-dim-list">
-                {dims.map(x => (
-                  <li key={x.code}>
-                    <b>{x.label}</b>：{x.stateText}
-                    {x.observationCount ? <span className="hint">（{x.observationCount} 条观察，{x.evidenceCount} 条证据）</span> : null}
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="core-dim-list">
+                  {dims.map(x => (
+                    <li key={x.code}>
+                      <b>{x.label}</b>：{x.stateText}
+                      {x.observationCount ? <span className="hint">（{x.observationCount} 条观察，{x.evidenceCount} 条证据）</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                {/* SC-09 §四：真实内容观察（YouTube 公开视频等） */}
+                {socialDet && socialDet.observations.length ? (
+                  <div className="core-sub">
+                    <h4>公开内容（{socialDet.observations.length} 条，{socialDet.collectedAt ? fmt(socialDet.collectedAt, true) : '—'}）</h4>
+                    <ObsList items={socialDet.observations} evidenceRefs={socialDet.evidenceRefs} onEvidence={setEvRefs} />
+                  </div>
+                ) : null}
+                {adsDet && adsDet.observations.length ? (
+                  <div className="core-sub">
+                    <h4>公开广告信息（{adsDet.observations.length} 条）</h4>
+                    <ObsList items={adsDet.observations} evidenceRefs={adsDet.evidenceRefs} onEvidence={setEvRefs} />
+                  </div>
+                ) : null}
+              </>
             );
           })()}
+          <div className="core-sub" data-testid="search-interest">
+            <h4>搜索热度</h4>
+            {searchDet && searchDet.observations.length ? (
+              <>
+                <p className="hint">数据服务估算（非绝对搜索量，不等于销量或市场份额）{searchDet.collectedAt ? `　观察时间：${fmt(searchDet.collectedAt, true)}` : ''}</p>
+                <ObsList items={searchDet.observations} evidenceRefs={searchDet.evidenceRefs} onEvidence={setEvRefs} />
+              </>
+            ) : (
+              <p className="hint">{(bc.dimensions.find(x => x.code === 'search_interest') || {}).stateText || '尚未采集'}；该维度不生成任何估算数据。</p>
+            )}
+          </div>
           <p className="hint">
             <Link href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>在每日变化收件箱里查看该品牌的变化 →</Link>
           </p>

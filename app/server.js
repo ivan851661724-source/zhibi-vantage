@@ -370,4 +370,6 @@ try { require('./services/backfill-service.js').startWorker(); } catch (e) { con
 // SC-07 r2 §二：监控意向建立流程调度（到期执行第二次/后续 public_site_products 探测；
 // next_probe_at 持久化，重启后照常恢复）。ZB_INTENT_SCHEDULER=0 可停。
 try { require('./services/watch-intent.js').startScheduler(console); } catch (e) { console.error('[watch-intent] scheduler 启动失败（忽略，意向保留可在恢复后继续）:', e.message); }
+// SC-09：项目级自动首采——启动即对账未完成批次并续跑被中断的入队（幂等键保证不重复计费）
+try { require('./services/first-collection.js').startWorker(); } catch (e) { console.error('[first-collection] worker 启动失败（忽略，进入竞品数据库时会自动对账）:', e.message); }
 startServer(PORT0);

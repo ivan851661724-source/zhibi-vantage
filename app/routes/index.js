@@ -136,6 +136,9 @@ function registerAll() {
   registry.register('GET', '/api/intelligence', 'tenant', CoreH.intelligence);
   // SC-08 §二：每日变化收件箱（只含 monitoring 确定性变化；cursor 分页）
   registry.register('GET', '/api/intel/inbox', 'tenant', CoreH.intelInbox);
+  // SC-09：项目级自动首采（进度轮询 / 失败项重试）
+  registry.register('GET', '/api/first-collection', 'tenant', CoreH.firstCollectionStatus);
+  registry.register('POST', '/api/first-collection/retry-failed', 'tenant', CoreH.firstCollectionRetry);
   registry.register('GET', '/api/opportunities', 'tenant', CoreH.opportunities);
   registry.register('GET', '/api/reports', 'tenant', CoreH.reportsList);
   registry.register('POST', '/api/reports', 'tenant', CoreH.reportsCreate);

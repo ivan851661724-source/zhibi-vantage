@@ -28,6 +28,7 @@ process.env.ZB_COLLECT_WORKER_DISABLED = '1';
 process.env.WATCH_MONITOR_ENABLED = '0';
 process.env.ZB_INTENT_SCHEDULER = '0';
 process.env.CACHE_ENABLED = '0';
+process.env.ZB_FIRST_COLLECTION_AUTO = 'off'; // 既有用例不自动建首采批次（SC-09 有独立用例）
 process.env.ZB_INTENT_PROBE_INTERVAL_MS = '1000';
 try { fs.mkdirSync(path.join(__dirname, '..', 'data'), { recursive: true }); } catch (e) {}
 

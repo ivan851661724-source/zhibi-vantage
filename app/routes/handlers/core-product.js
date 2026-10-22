@@ -53,17 +53,76 @@ async function brandsList(ctx, req, res, url) {
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  // SC-09 §二/§四：进入竞品数据库即自动建立（并对账）本项目首采批次——
+  // 用户不需要逐个点击品牌；幂等：刷新/重复进入/重启都不会产生第二条批次或双任务。
+  // ZB_FIRST_COLLECTION_AUTO=off 只关闭「进入页面自动建批次」（测试/运维场景）；
+  // 显式调用 ensureBatch 与端点重试不受影响。
+  let firstCollection = null;
+  try {
+    const FC = require('../../services/first-collection.js');
+    if (String(process.env.ZB_FIRST_COLLECTION_AUTO || '') !== 'off') {
+      FC.ensureBatch({ tenantId: tid, projectId: rp.projectId });
+    }
+    firstCollection = FC.summaryForProject(tid, rp.projectId);
+  } catch (e) { firstCollection = null; }
   const items = BrandSvc.listBrandViews(tid, rp.projectId);
+  // 品牌卡片的「首采」事实（逐品牌 × 逐能力真实状态；不含推断）
+  let fcByBrand = {};
+  try {
+    const FC = require('../../services/first-collection.js');
+    for (const b of items) {
+      if (!b.competitorId) continue;
+      const s = FC.brandSummary(tid, rp.projectId, b.competitorId);
+      if (s) fcByBrand[b.competitorId] = s;
+    }
+  } catch (e) { fcByBrand = {}; }
+  for (const b of items) {
+    b.firstCollection = b.competitorId ? (fcByBrand[b.competitorId] || null) : null;
+  }
   ctx.sendJSON(res, 200, {
     projectId: rp.projectId, brands: items, count: items.length,
+    firstCollection,
     // SC-08 r2 §四：首页四项统计（品牌总数 / 已开始积累 / 正在采集 / 需要处理），
     // 与卡片同源派生（后端算，禁止前端各算一套）
-    stats: BrandSvc.buildBrandsProjectStats(items),
+    stats: BrandSvc.buildBrandsProjectStats(items, { fcByBrand }),
     // 项目级采集覆盖（七态计数 + 失败明细）：只作为「需要处理」的下钻明细，
     // 不再在首页顶部重复铺一条覆盖条
     collectionCoverage: (() => {
       try { return BrandSvc.buildProjectCollectionCoverage(tid, rp.projectId); } catch (e) { return null; }
     })(),
+  });
+  return true;
+}
+
+// ---------- SC-09：项目级自动首采（状态轮询 / 失败项重试） ----------
+async function firstCollectionStatus(ctx, req, res, url) {
+  if (req.method !== 'GET') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const FC = require('../../services/first-collection.js');
+  // 轮询入口同样对账（服务重启/worker 被禁用时也能自愈）
+  try { FC.refreshBatch((FC.getBatch(tid, rp.projectId) || {}).batch_id); } catch (e) { /* 无批次则跳过 */ }
+  const summary = FC.summaryForProject(tid, rp.projectId);
+  ctx.sendJSON(res, 200, { projectId: rp.projectId, firstCollection: summary });
+  return true;
+}
+
+async function firstCollectionRetry(ctx, req, res, url) {
+  if (req.method !== 'POST') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const rp = resolveProject(ctx, tid, body.projectId || q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const FC = require('../../services/first-collection.js');
+  const r = FC.retryFailed(tid, rp.projectId);
+  ctx.sendJSON(res, 200, {
+    projectId: rp.projectId, retried: r.retried || 0,
+    firstCollection: FC.summaryForProject(tid, rp.projectId),
+    message: (r.retried || 0) > 0 ? '已重新安排失败项，页面会自动更新。' : '当前没有需要重新检查的失败项。',
   });
   return true;
 }
@@ -257,6 +316,7 @@ async function reportDetail(ctx, req, res, url, p) {
 
 module.exports = {
   brandsList, brandDetail, brandCoverage,
+  firstCollectionStatus, firstCollectionRetry,
   intelInbox, intelligence, opportunities,
   reportsList, reportsCreate, reportDetail,
 };
