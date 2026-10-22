@@ -102,9 +102,26 @@ async function createTarget(ctx, req, res, url, p) {
       signals: ['price', 'launch'],
     });
     if (r0.error) { ctx.sendJSON(res, 400, { error: r0.error, message: '无法保存监控意向。' }); return true; }
-    // SC-08 r3 §一：既有 establishing 意向 = 建立进行中。重复点击只返回原意向，
-    // 不得再次安排探测、不得再跑全量 planForCompetitor（否则重复点击会新增
-    // 在途任务、甚至把 site_prime/site_confirm 阶段的进度拉回商品探测）。
+    // SC-08 r4 §1/§3：promoted 重复提交 → 原样返回正式监控状态，**零副作用**：
+    // 不安排探测、不跑 planForCompetitor、不新增 job/attempt、不改 WatchTarget/
+    // 意向/基线/窗口/事件/时间线。
+    if (r0.promoted) {
+      const promotedIntent = WIntent.getIntent(tid, r0.intent.intentId);
+      const promotedTargetId = promotedIntent && promotedIntent.promotedTargetId;
+      const promotedTarget = promotedTargetId ? WS.getWatchTarget(tid, promotedTargetId) : null;
+      ctx.sendJSON(res, 200, {
+        existed: true,
+        promoted: true,
+        intent: WIntent.view(promotedIntent),
+        // 前端若需要 target 字段则一并返回（不改既有响应字段）
+        ...(promotedTarget ? { target: targetView(promotedTarget, WS.latestWindowFor(tid, promotedTarget.watchTargetId)) } : {}),
+        message: '该品牌已在正式监控中。',
+      });
+      return true;
+    }
+    // SC-08 r3 §一 / r4 §3：handler 分支明确三分——
+    //   新意向 / source_failed 重试 / cancelled 重新加入 → 安排首次探测 + 初始采集计划；
+    //   establishing 重复提交 → 原样返回当前进度，不新增任何任务。
     let baseline = null;
     if (!r0.establishing) {
       // r2 §二：保存/重新激活意向后**安排第一次 public_site_products 探测**（持久化 next_probe_at，
@@ -118,7 +135,8 @@ async function createTarget(ctx, req, res, url, p) {
     }
     let intent = WIntent.getIntent(tid, r0.intent.intentId);
     // 连官网都不可采（无 URL）→ 如实标来源失败，不制造「建立中」假象
-    if (comp.url == null || !/^https?:\/\//i.test(String(comp.url || ''))) {
+    //（仅对未晋升的意向；promoted 已在上面零副作用分支返回）
+    if (!r0.promoted && (comp.url == null || !/^https?:\/\//i.test(String(comp.url || '')))) {
       intent = WIntent.setFailed(tid, r0.intent.intentId, 'no_official_url', '该品牌没有可核验的官网地址，暂无法建立监控来源。');
     }
     ctx.sendJSON(res, r0.existed ? 200 : 202, {
