@@ -96,7 +96,7 @@ async function collectPublicSiteProducts(comp, tid, pid, opts) {
     .map(o => ({ id: o.id, repPrice: o.price, currency: o.currency || null, title: o.title || null, soldOut: false }));
   // 证据：来源快照（本轮真实抓取的页面快照）——价格变化事件据此才能标「已核实」
   return {
-    ok: true, items,
+    ok: true, items, attempt: att,
     currency: (obs.map(o => o && o.currency).filter(Boolean)[0] || null),
     partialScan: att.status === 'partial',
     snapshotIds: Array.isArray(att.snapshotIds) ? att.snapshotIds : [],
@@ -104,63 +104,129 @@ async function collectPublicSiteProducts(comp, tid, pid, opts) {
   };
 }
 
-// ---------- 价格变化 → 收件箱（SC-08 r2 §三：先写库，再决定提醒/计数/前移快照） ----------
-// 返回 kind：verified | pending | duplicate | failed
-//   · 只有 verified 才允许提醒并计入已核实
-//   · pending 只计入待核实（提醒按待核实发）
-//   · duplicate 不提醒、不计数（调用方仍可前移价格快照）
-//   · failed 不提醒、不计数，且调用方**不得**落新快照 → 下次窗口重试这次变化
-function applyPriceChange({ tid, pid, comp, ev, windowId, observedAt, sourceUrl, snapshotIds, alertsPushFn, inboxFn }) {
-  let rec = null;
-  try {
-    const refs = [];
-    for (const sid of (snapshotIds || []).slice(0, 3)) refs.push({ snapshotId: sid, sourceUrl: sourceUrl || null, observedAt });
-    const delta = (typeof ev.old === 'number' && typeof ev.new === 'number') ? ev.new - ev.old : null;
-    rec = (inboxFn || require('./intel-inbox.js')).recordEvent({
-      tenantId: tid, projectId: pid, competitorId: comp.id,
-      brandName: comp.name || null,
-      dimension: 'price', eventType: 'price_changed',
-      title: (ev.title ? ev.title + '：' : '') + '价格由 ' + (ev.oldDisplay != null ? ev.oldDisplay : ev.old) + ' 调整为 ' + (ev.display != null ? ev.display : ev.new),
-      summary: (ev.title || '商品') + ' 价格 ' + ev.old + ' → ' + ev.new + (ev.deltaPct != null ? ('（' + (ev.deltaPct > 0 ? '+' : '') + ev.deltaPct + '%）') : ''),
-      subjectId: ev.subjectId ? String(ev.subjectId) : null,
-      observedAt,
-      effectiveAt: null, // 无可靠发布时间来源 → null，不复制 observedAt
-      sourceKind: 'live_observation', origin: 'monitoring',
-      change: {
-        field: 'price', oldValue: ev.old, newValue: ev.new,
-        direction: delta == null ? null : (delta > 0 ? 'increase' : delta < 0 ? 'decrease' : 'flat'),
-        delta: delta == null ? null : Number(delta.toFixed(2)),
-        pct: ev.deltaPct != null ? ev.deltaPct : null,
-        currency: ev.currency || null,
-        basis: 'deterministic_diff',
-      },
-      evidenceRefs: refs,
-      verificationStatus: refs.length ? 'verified' : 'pending',
-      windowKey: windowId,
-    });
-  } catch (e) {
-    rec = { recorded: false, reason: 'EXCEPTION' };
+// ---------- SC-10 §一：正式监控的价格变化统一走 observation-diff ----------
+// 历史双实现：本文件曾用 lib/watch-price 自算涨跌、再自己拼 payload 直写
+// intel_events；collection_jobs → observation-diff 是另一套。两套算法即使口径
+// 写得一致也会各自漂移。现在统一为：
+//   · 比较：Diff.computeChanges（含可比范围 / 币种 / 规格签名保护，partial 不下架结论）
+//   · 写入：Diff.applyChanges / Diff.recordMonitoringEvent（purpose=monitoring，
+//     windowKey=真实监控窗口，origin=monitoring）
+//   · 本文件只剩：组装观察上下文、按 kind 决定提醒与是否前移基线、窗口覆盖计数。
+const Diff = require('./observation-diff.js');
+
+// 单品观察（统一形态：id / price / currency / specSignature / available / publishedAt）
+function priceObservationOf(it, defaultCurrency) {
+  const cur = it.currency ? String(it.currency).toUpperCase()
+    : (defaultCurrency ? String(defaultCurrency).toUpperCase() : null);
+  return {
+    id: String(it.id),
+    title: it.title != null ? String(it.title) : null,
+    price: Number(it.repPrice),
+    currency: cur,
+    specSignature: WPrice.specSignatureOf(it) || '',
+    available: it.soldOut === true ? false : true,
+    publishedAt: it.publishedAt || null,
+  };
+}
+
+// 本轮采集 → 可比「观察上下文」（attempt 形态，供 observation-diff 消费）
+function priceAttemptContext(o) {
+  const capability = String(o.capability || 'shopify_catalog');
+  return {
+    attemptId: null, capability,
+    status: o.partialScan ? 'partial' : 'success',
+    observations: (o.items || []).map(it => priceObservationOf(it, o.currency)),
+    summary: {
+      partialScan: !!o.partialScan,
+      // shopify 全量目录口径固定；公开商品页走适配器，发现路径由 adapter 摘要提供
+      discoveryPath: o.discoveryPath || (capability === 'shopify_catalog' ? 'shopify_products_json' : null),
+      measurementMethod: o.measurementMethod || 'shopify_public_endpoint',
+    },
+    snapshotIds: o.snapshotIds || [], evidenceIds: [],
+    sourceUrl: o.sourceUrl || null,
+  };
+}
+
+// 上一次监控基线（watch_price_snapshots）→ 可比「观察上下文」；无基线 → null（只建基线）
+// 同一商品可能留存多个币种的历史基线（币种切换后旧行仍保留用于审计）：
+//   · 优先取与本次币种一致的基线；
+//   · 没有同币种基线 → 保留最近一条，其币种必然与本次不同 → 由统一 Diff 判定不可比。
+function previousPriceContext(prevList, capability, currency) {
+  if (!prevList || !prevList.length) return null;
+  const want = currency ? String(currency).toUpperCase() : null;
+  const picked = new Map();
+  for (const p of prevList) {
+    const id = String(p.subjectId);
+    const cur = p.currency ? String(p.currency).toUpperCase() : null;
+    const prev = picked.get(id);
+    if (!prev) { picked.set(id, p); continue; }
+    const prevCur = prev.currency ? String(prev.currency).toUpperCase() : null;
+    const prevHit = want && prevCur === want;
+    const curHit = want && cur === want;
+    if (curHit && !prevHit) { picked.set(id, p); continue; }
+    if (prevHit) continue;
+    if (String(p.at || '') > String(prev.at || '')) picked.set(id, p); // 都不同币种 → 取最近
   }
-  const kind = (rec && rec.recorded === true)
-    ? (rec.verificationStatus === 'verified' ? 'verified' : 'pending')
-    : (rec && rec.reason === 'DUPLICATE' ? 'duplicate' : 'failed');
-  if (kind === 'verified' || kind === 'pending') {
+  return {
+    attemptId: null, capability, status: 'success',
+    observations: Array.from(picked.values()).map(p => ({
+      id: String(p.subjectId), title: p.title || null,
+      price: Number(p.price),
+      currency: p.currency ? String(p.currency).toUpperCase() : null,
+      specSignature: String(p.specSignature == null ? '' : p.specSignature),
+      available: true,
+    })),
+    summary: { partialScan: false, measurementMethod: 'shopify_public_endpoint' },
+    snapshotIds: [], evidenceIds: [],
+  };
+}
+
+// 唯一的监控价格变化入口：比较 + 写库都在 observation-diff 内完成
+function runMonitoringPriceDiff(o) {
+  return Diff.applyChanges({
+    tenantId: o.tid, projectId: o.pid, competitorId: o.competitorId, capability: o.capability,
+    collectionPurpose: 'monitoring', windowKey: o.windowId,
+    attempt: priceAttemptContext(o),
+    previousAttempt: previousPriceContext(o.prevList, o.capability, o.currency),
+    brandName: o.brandName || null,
+    sourceUrl: o.sourceUrl || null,
+    inboxFn: o.inboxFn,
+  });
+}
+
+// 按统一 Diff 的结果计数 + 提醒 + 决定是否前移基线（kind=failed 一律不前移）
+function settlePriceDiff({ diffRes, tid, pid, comp, items, sourceUrl, alertsPushFn, events }) {
+  const kindBy = new Map();
+  for (const r of (diffRes.results || [])) kindBy.set(String(r.subjectId), r.kind);
+  const titleBy = new Map((items || []).map(it => [String(it.id), it.title != null ? String(it.title) : null]));
+  for (const r of (diffRes.results || [])) {
+    if (r.kind === 'verified') events.verified += 1;
+    else if (r.kind === 'pending') events.pending += 1;
+    else if (r.kind === 'duplicate') events.duplicate += 1;
+    else { events.writeFailed += 1; continue; } // 不提醒、不计已核实
+    if (r.eventType !== 'price_changed') continue; // 上新/下架/库存由各自信号负责，不复用价格提醒
+    const ch = r.change || {};
+    const ev = {
+      subjectId: r.subjectId, title: titleBy.get(String(r.subjectId)) || null,
+      currency: ch.currency || null, old: ch.oldValue, new: ch.newValue,
+      oldDisplay: ch.oldValue, display: ch.newValue,
+      deltaPct: WPrice.deltaPctOf(ch.oldValue, ch.newValue),
+    };
     try {
       alertsPushFn(tid, {
         type: 'price-change', projectId: pid,
-        competitorId: comp.id, competitorName: comp.name, subjectId: ev.subjectId,
+        competitorId: comp.id, competitorName: comp.name, subjectId: r.subjectId,
         title: ev.title,
         text: (ev.title ? ev.title + '：' : '') + PH.describeChange(ev, () => ''),
         old: ev.old, new: ev.new,
         deltaPct: ev.deltaPct != null ? ev.deltaPct : null,
-        currency: ev.currency, sourceUrl: sourceUrl || null, basis: kind === 'verified' ? 'verified' : 'pending',
+        currency: ev.currency, sourceUrl: sourceUrl || null,
+        basis: r.kind === 'verified' ? 'verified' : 'pending',
       });
     } catch (e) { /* 推送失败不影响窗口落账 */ }
   }
-  return { kind, rec };
+  return kindBy;
 }
-
-
 // ---------- 非 Shopify：官网内容结构化指纹采集（SC-08 §三 C） ----------
 // 走 official_site_profile adapter：SSRF/FetchGate/robots/重定向/大小/超时/快照/证据链
 // 与手动刷新完全一致。返回稳定结构化指纹 + 证据引用；不在这里判定「变化」。
@@ -233,18 +299,13 @@ async function executeWindow(target, windowId, deps, nowMs) {
   // SC-08 r2 §三：事件写库结果的真实计数（不得把 pending/重复/写失败都算成「已核实」）
   let eventsPending = 0, eventsWriteFailed = 0, eventsDuplicate = 0;
 
-  // 事件写入结果的唯一分类口径（§三 规则 1–6）：
+  // 事件写入结果的唯一分类口径（§三 规则 1–6 / SC-10 §一：口径来自 observation-diff，
+  // 本文件不得再自行实现一套分类）：
   //   recorded && verified → 计入已核实（才允许提醒、才前移基线）
   //   recorded && pending  → 只计入待核实（提醒可按待核实发，但绝不进已核实）
   //   DUPLICATE            → 不重复提醒、不重复计数；允许前移基线（内容确实已是新状态）
   //   WRITE_FAILED / 拒收  → 不提醒、不计数、不前移基线（下次巡检必须能重试这次变化）
-  const classifyInboxResult = (rec) => {
-    if (rec && rec.recorded === true) {
-      return rec.verificationStatus === 'verified' ? 'verified' : 'pending';
-    }
-    if (rec && rec.reason === 'DUPLICATE') return 'duplicate';
-    return 'failed';
-  };
+  const classifyInboxResult = (rec) => Diff.classifyInboxResult(rec);
 
   let comp = null;
   try {
@@ -293,29 +354,27 @@ async function executeWindow(target, windowId, deps, nowMs) {
             if (diff.comparable && diff.changes.length) {
               // 🔴 SC-08 r2 §三：顺序必须是 确定性 Diff → 写 intel_events → 再处理
               // 基线 / 窗口统计 / 提醒。先发提醒再写库会让「写失败」悄悄变成「已通知」。
-              const first = diff.changes[0];
               const refs = (sres.evidenceRefs || []).slice(0, 6);
-              const rec = inboxFn.recordEvent({
+              const first = diff.changes[0] || {};
+              // SC-10 §一：正式监控的所有事件都经 observation-diff 的监控写入口
+              const mr = Diff.recordMonitoringEvent({
                 tenantId: tid, projectId: pid, competitorId: comp.id,
                 brandName: comp.name || null,
                 dimension: 'website', eventType: 'website_changed',
+                subjectId: sres.sourceUrl || comp.url || null,
                 title: '官网内容变化：' + FP.describeChanges(diff.changes),
                 summary: FP.describeChanges(diff.changes),
-                subjectId: sres.sourceUrl || comp.url || null,
                 observedAt: nowIsoS,
-                // effectiveAt 无可靠来源 → null（不得复制 observedAt）
-                effectiveAt: null,
-                sourceKind: 'live_observation', origin: 'monitoring',
                 change: {
                   field: first.field, oldValue: first.oldValue, newValue: first.newValue,
                   basis: 'deterministic_diff', fields: diff.changes.slice(0, 8).map(c => c.field),
                   detail: diff.changes.slice(0, 8),
                 },
                 evidenceRefs: refs,
-                verificationStatus: refs.length ? 'verified' : 'pending',
                 windowKey: windowId,
+                inboxFn,
               });
-              const kind = classifyInboxResult(rec);
+              const kind = classifyInboxResult(mr.rec);
               if (kind === 'verified') {
                 eventsVerified += 1;
                 try {
@@ -388,33 +447,38 @@ async function executeWindow(target, windowId, deps, nowMs) {
           const nowIsoS = new Date(now).toISOString();
           const currency = String(pres.currency || comp.currency || 'USD').toUpperCase();
           const prevList = productPricesFn(tid, pid, comp.id) || [];
-          const byKey = new Map(prevList.map(p => [String(p.subjectId) + '|' + String(p.currency).toUpperCase(), p]));
+          // SC-10 §一：比较与写库统一交给 observation-diff（监控用途 + 真实窗口键）
+          const diffRes = runMonitoringPriceDiff({
+            tid, pid, competitorId: comp.id, capability: 'official_site_products',
+            windowId, prevList, items: onSale, currency,
+            partialScan: !!pres.partialScan,
+            discoveryPath: (pres.attempt && pres.attempt.summary && pres.attempt.summary.discoveryPath) || null,
+            snapshotIds: (pres && pres.snapshotIds) || [],
+            sourceUrl: pres.sourceUrl || comp.url || null,
+            brandName: comp.name || null,
+            inboxFn,
+          });
+          const ev = { verified: 0, pending: 0, duplicate: 0, writeFailed: 0 };
+          const kindBy = settlePriceDiff({
+            diffRes, tid, pid, comp, items: onSale,
+            sourceUrl: pres.sourceUrl || comp.url || null, alertsPushFn, events: ev,
+          });
+          eventsVerified += ev.verified; eventsPending += ev.pending; eventsDuplicate += ev.duplicate;
+          if (ev.writeFailed) {
+            eventsWriteFailed += ev.writeFailed;
+            failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + ev.writeFailed;
+            partialScan = true;
+          }
           for (const it of onSale) {
-            const prev = byKey.get(String(it.id) + '|' + currency) || null;
-            const entry = {
-              subjectId: String(it.id), currency,
-              specSignature: WPrice.specSignatureOf(it),
-              price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
-            };
-            const r2 = WPrice.applyProductSnapshot(prev, entry);
-            if (r2.event && r2.event.kind === 'changed') {
-              const ap = applyPriceChange({
-                tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
-                sourceUrl: it.id || pres.sourceUrl || comp.url || null,
-                snapshotIds: (pres && pres.snapshotIds) || [], alertsPushFn, inboxFn,
+            // 事件写库失败的商品**不得**前移基线 → 下个窗口必须能重试这次变化
+            if (kindBy.get(String(it.id)) === 'failed') continue;
+            try {
+              productPriceSaveFn(tid, pid, comp.id, {
+                subjectId: String(it.id), currency,
+                specSignature: WPrice.specSignatureOf(it),
+                price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
               });
-              if (ap.kind === 'verified') eventsVerified += 1;
-              else if (ap.kind === 'pending') eventsPending += 1;
-              else if (ap.kind === 'duplicate') eventsDuplicate += 1;
-              else {
-                // 写库失败：不提醒、不计数、不落新快照 → 下个窗口重试这次变化
-                eventsWriteFailed += 1;
-                failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
-                partialScan = true;
-                continue;
-              }
-            }
-            try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
+            } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
           attempt('price', true);
         } catch (e) { attempt('price', false, 'parse_failed'); }
@@ -442,36 +506,39 @@ async function executeWindow(target, windowId, deps, nowMs) {
       // price（整改 §6）：按稳定商品身份逐品比较——同商品 id、同市场（WatchTarget 圈定）、
       // 同币种、同规格签名（变体数代理）才允许涨跌事件；新增/删除其他商品不影响原商品
       // 的比较（逐品独立）；目录中位数只作独立 Metric，绝不冒充单品 price-change。
+      // SC-10 §一：比较与写库统一走 observation-diff（上述规则已在 observation-diff 内实现）
       if (signals.includes('price')) {
         try {
           const prevList = productPricesFn(tid, pid, comp.id) || [];
-          const byKey = new Map(prevList.map(p => [String(p.subjectId) + '|' + String(p.currency).toUpperCase(), p]));
+          const diffRes = runMonitoringPriceDiff({
+            tid, pid, competitorId: comp.id, capability: 'shopify_catalog',
+            windowId, prevList, items: onSale, currency,
+            partialScan: !!res.truncated || !!res.partialScan,
+            snapshotIds: res.snapshotId ? [res.snapshotId] : (res.snapshotIds || []),
+            sourceUrl: res.url || comp.url || null,
+            brandName: comp.name || null,
+            inboxFn,
+          });
+          const ev = { verified: 0, pending: 0, duplicate: 0, writeFailed: 0 };
+          const kindBy = settlePriceDiff({
+            diffRes, tid, pid, comp, items: onSale,
+            sourceUrl: res.url || comp.url || null, alertsPushFn, events: ev,
+          });
+          eventsVerified += ev.verified; eventsPending += ev.pending; eventsDuplicate += ev.duplicate;
+          if (ev.writeFailed) {
+            eventsWriteFailed += ev.writeFailed;
+            failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + ev.writeFailed;
+            partialScan = true;
+          }
           for (const it of onSale) {
-            const prev = byKey.get(String(it.id) + '|' + currency) || null;
-            const entry = {
-              subjectId: String(it.id), currency,
-              specSignature: WPrice.specSignatureOf(it),
-              price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
-            };
-            const r2 = WPrice.applyProductSnapshot(prev, entry);
-            if (r2.event && r2.event.kind === 'changed') {
-              const ap = applyPriceChange({
-                tid, pid, comp, ev: r2.event, windowId, observedAt: nowIsoS,
-                sourceUrl: res.url || comp.url || null,
-                snapshotIds: res.snapshotId ? [res.snapshotId] : (res.snapshotIds || []),
-                alertsPushFn, inboxFn,
+            if (kindBy.get(String(it.id)) === 'failed') continue; // 写失败不前移基线
+            try {
+              productPriceSaveFn(tid, pid, comp.id, {
+                subjectId: String(it.id), currency,
+                specSignature: WPrice.specSignatureOf(it),
+                price: it.repPrice, display: String(it.repPrice), title: it.title || null, at: nowIsoS,
               });
-              if (ap.kind === 'verified') eventsVerified += 1;
-              else if (ap.kind === 'pending') eventsPending += 1;
-              else if (ap.kind === 'duplicate') eventsDuplicate += 1;
-              else {
-                eventsWriteFailed += 1;
-                failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
-                partialScan = true;
-                continue;
-              }
-            }
-            try { productPriceSaveFn(tid, pid, comp.id, entry); } catch (e) { /* 落库失败不影响窗口结论 */ }
+            } catch (e) { /* 落库失败不影响窗口结论 */ }
           }
           attempt('price', true);
         } catch (e) { attempt('price', false, 'fetch_failed'); }
