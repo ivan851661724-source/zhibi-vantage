@@ -275,5 +275,8 @@ test('O7 品牌视图整份载荷不含 internal_error / adapter_output_invalid 
           'failureKind 必须在用户级白名单内：' + d.failureKind);
       }
     }
+    // attempt 内部标识不得出现（SC-12 §三 明令）
+    assert.ok(!/'attemptId"/.test(blob), '载荷不得出现 attemptId 字段');
+    assert.ok(!/\batt_[a-z0-9]{6,}/i.test(blob), '载荷不得出现 att_xxx 形式的 attempt 标识');
   }
 });

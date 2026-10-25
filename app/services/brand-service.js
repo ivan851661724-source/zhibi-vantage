@@ -452,6 +452,8 @@ function rebuildTimeline(tenantId, brandId, projectId, competitor) {
 }
 
 function timelineView(tenantId, brandId, opts) {
+  // 注：refId 是「证据/事件追溯锚点」（SC-08 冻结契约，前端用作打开来源的引用），
+  // 与「attempt 内部标识」不是同一语义；用户页面不渲染其值。
   return BrandStore.listTimeline(tenantId, brandId, opts).map(e => Object.assign({}, e, {
     natureText: NATURE_TEXT[e.nature] || '来源直接记录',
     statusText: INTEL_STATUS_TEXT[e.status] || '待核实',
@@ -513,7 +515,9 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
       }).filter(Boolean);
       const hasEvidence = evRefs.length > 0;
       push({
-        id: a.attemptId, brandId, brandName: comp.name || null, competitorId: comp.id || null,
+        // SC-12 §三：情报条目 id 不得是 attempt 内部标识（att_xxx），改为不透明外部 ID
+        id: 'intel_' + String(a.attemptId || '').replace(/[^a-zA-Z0-9]/g, '').slice(-16),
+        brandId, brandName: comp.name || null, competitorId: comp.id || null,
         type: cap.code === 'shopify_catalog' ? 'product' : 'monitor',
         typeText: cap.code === 'shopify_catalog' ? '商品' : '监控状态',
         at, nature: 'observed', natureText: NATURE_TEXT.observed,
@@ -523,7 +527,8 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
         detail: a.status === 'failed' ? (a.errorUserText || '采集失败') : `观察 ${a.observationCount || 0} 条`,
         evidence: evRefs,
         correctionEndpoint: '/api/field-correct',
-        attemptId: a.attemptId, capability: cap.code,
+        // SC-12 §三：用户载荷不得出现 attempt 内部标识，只给「是否有该次采集」的布尔
+        hasAttempt: !!a.attemptId, capability: cap.code,
       });
     }
   }
@@ -865,7 +870,7 @@ function latestVerifiedChange(tenantId, projectId, competitorId) {
 // 缺陷修复：website_products 维度同时含 official_site_profile，直接取维度 observations
 // 会把「官网资料观察」当成商品展示（Grovemade 真实数据实测：只显示 1 条而非 10 件商品）。
 function buildProductsView(tenantId, projectId, comp) {
-  const out = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  const out = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
   if (!comp || !comp.id) return out;
   const caps = ['shopify_catalog', 'public_site_products'];
   const seen = new Set();
@@ -910,7 +915,7 @@ function buildProductsView(tenantId, projectId, comp) {
       discoveryPath: discoveryPath,
       sampleNote: '样本为公开页面可安全识别的商品（发现路径受限），非全量商品清单，不推断销量',
     };
-    out.attemptId = latestAttempt ? latestAttempt.attemptId : null;
+    out.hasAttempt = !!(latestAttempt && latestAttempt.attemptId);
     out.collectedAt = latestAt;
   }
   return out;
@@ -1122,7 +1127,7 @@ function getBrandView(tenantId, brandId, projectId) {
   const bc = buildBrandCoverage(tenantId, projectId, comp || {});
   // 商品与价格（来自 Data Surface 已采集 attempt，不复制真值）
   // 商品视图：只聚合同维度的两个商品能力（不把官网资料观察当商品）
-  let products = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  let products = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
   if (comp) {
     try { products = buildProductsView(tenantId, projectId, comp); }
     catch (e) { /* 不可读：保持空，不填充 */ }
@@ -1136,7 +1141,8 @@ function getBrandView(tenantId, brandId, projectId) {
         dimensionDetails[dim] = {
           observations: det.observations || [],
           summary: det.summary || null,
-          attemptId: det.attemptId || null,
+          // SC-12 §三：attempt 内部标识不进入用户载荷，只给布尔
+          hasAttempt: !!det.attemptId,
           collectedAt: det.collectedAt || null,
           surfaceState: det.surfaceState || null,
           evidenceRefs: (det.evidenceRefs || []).map(r => ({
@@ -1144,7 +1150,7 @@ function getBrandView(tenantId, brandId, projectId) {
             sourceUrl: r.sourceUrl || null, label: r.label || null,
           })),
         };
-      } catch (e) { dimensionDetails[dim] = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] }; }
+      } catch (e) { dimensionDetails[dim] = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] }; }
     }
   }
   const collection = buildCollectionState(tenantId, projectId, comp || {});

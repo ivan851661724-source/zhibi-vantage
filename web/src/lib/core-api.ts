@@ -535,7 +535,7 @@ export interface BrandDetail {
   dimensionDetails?: Record<string, {
     observations: DimensionObservation[];
     summary: Record<string, unknown> | null;
-    attemptId: string | null;
+    hasAttempt: boolean;
     collectedAt: string | null;
     surfaceState?: string | null;
     evidenceRefs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label: string | null }[];
@@ -552,7 +552,7 @@ export interface BrandDetail {
   products: {
     observations: ProductObservation[];
     summary: Record<string, unknown> | null;
-    attemptId: string | null;
+    hasAttempt: boolean;
     collectedAt: string | null;
     evidenceRefs: EvidenceRefLite[];
   };

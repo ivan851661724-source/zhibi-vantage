@@ -211,7 +211,7 @@ function BrandDetailInner() {
   const socialDet = dd.social_content || null;
   const searchDet = dd.search_interest || null;
   const adsDet = dd.ad_campaigns || null;
-  const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  const products = d.products || { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
   // 可核验证据数：各维度 Evidence 引用去重（不重复计数同一证据）
   // （普通计算而非 useMemo：位于早返回之后，Hooks 不可条件调用）
   const evidenceSet = new Set<string>();
