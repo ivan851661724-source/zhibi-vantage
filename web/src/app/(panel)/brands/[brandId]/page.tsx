@@ -294,7 +294,8 @@ function BrandDetailInner() {
           <button type="button" className="btn-mini" disabled={refreshing} onClick={doRefresh}>
             {refreshing ? '正在更新…' : '立即更新'}
           </button>
-          <Link className="btn-ghost btn-mini" href={`/monitoring?${keep}`}>加入 / 管理监控</Link>
+          {/* 监控管理入口在情报库的品牌档案（MonitoringControls 所在处），不得指向不存在的路由 */}
+          <Link className="btn-ghost btn-mini" href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>加入 / 管理监控</Link>
           {refreshMsg ? <span className="core-brand-muted core-brand-mini">{refreshMsg}</span> : null}
         </div>
       </section>
