@@ -93,6 +93,8 @@ export interface BrandCoverageDimension {
   lastSuccessfulAt?: string | null;
   latestAttemptStatus?: 'success' | 'partial' | 'failed' | 'running' | null;
   usingPreviousData?: boolean;
+  // SC-12：维度下辖能力（含 maturity）——「立即更新」据此挑选可刷新的能力
+  capabilities?: { code: string; label?: string; displayName?: string; maturity?: string }[];
   observationCount: number;
   evidenceCount: number;
   sourceCount: number;
@@ -153,7 +155,9 @@ export interface BrandListItem {
   lastVerifiedChange?: BrandVerifiedChange | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
-  // SC-09：品牌真实采集摘要 + 首采逐能力状态
+  // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
+  status?: { code: string; text: string; detail: string | null };
+  // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
   collectionDigest?: BrandCollectionDigest | null;
   firstCollection?: BrandFirstCollection | null;
 }
@@ -364,6 +368,76 @@ export interface OpportunityView {
   nextSteps?: string[];
   limits: string[];
   note?: string | null;
+  // SC-12 §六：机会数据基础（缺失维度如实标注；不因单个维度缺失而整页空白）
+  foundation?: OpportunityFoundation | null;
+}
+
+// ---------- SC-12 §六：机会数据基础（服务端按可用维度独立产出） ----------
+export interface OpportunityDimensionBasis {
+  code: string; label: string;
+  status: 'complete' | 'partial' | 'missing' | 'not_covered' | 'not_configured';
+  statusText: string | null;
+  brandCount: number;        // 参与品牌数
+  observationCount: number;  // 观察数量
+  evidenceCount: number;     // Evidence 数量
+  window: { from: string | null; to: string | null };
+  measurementMethod: string | null;
+  limits: string[];
+}
+
+export interface OpportunityPriceRow {
+  brandId: string; name: string; competitorId: string | null;
+  productCount: number | null; available: number | null; soldOut: number | null;
+  priceMin: number | null; priceMedian: number | null; priceMax: number | null;
+  currency: string | null; observedAt: string | null; evidenceIds: string[];
+}
+
+export interface OpportunityFoundation {
+  projectId: string;
+  generatedAt: string;
+  brandScope: {
+    total: number; withData: number; withReviews: number;
+    list: { brandId: string; competitorId: string | null; name: string; domain: string | null; relation: string | null; market: string | null; category: string | null; hasPrice: boolean; hasReviews: boolean }[];
+  };
+  dimensions: Record<string, OpportunityDimensionBasis>;
+  modules: {
+    priceBands: {
+      available: boolean;
+      bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[];
+      rows: OpportunityPriceRow[];
+      currency: string | null;
+      limits: string[];
+    };
+    matrixDensity: { available: boolean; rows: OpportunityPriceRow[]; medianProductCount: number | null; limits: string[] };
+    newItemDynamics: {
+      available: boolean;
+      rows: { brandId: string; name: string; baselineItems: number; firstSeenAt: string | null; lastSeenAt: string | null; days: { day: string; count: number; firstAt: string | null }[] }[];
+      comparableWindows: number;
+      limits: string[];
+    };
+    reviewInsights: {
+      available: boolean;
+      rows: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; sourceCount: number | null; observedAt: string | null; evidenceIds: string[]; pages: { url: string | null; title: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null }[] }[];
+      ratedObjects: number;
+      limits: string[];
+    };
+    satisfactionScatter: {
+      available: boolean; minObjects: number; comparableObjects: number;
+      objects: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; observedAt: string | null; evidenceIds: string[] }[];
+      reason: string | null;
+      limits: string[];
+    };
+  };
+  opportunities: {
+    id: string; title: string; fact: string; dimension: string; sampleSize: string;
+    window: { from: string | null; to: string | null };
+    evidenceRefs: string[]; limits: string[]; question: string;
+  }[];
+  summary: {
+    usableDimensionCodes: string[]; missingDimensionCodes: string[];
+    usableDimensionCount: number; missingDimensionCount: number;
+    brandCount: number; brandsWithData: number; opportunityCount: number;
+  };
 }
 
 export interface ReportListItem {
@@ -584,6 +658,13 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {
   return apiGet<OpportunityView>(`/api/opportunities?projectId=${encodeURIComponent(projectId)}`, signal);
 }
+// SC-12 §五：品牌详情页「立即更新」——对单个能力的真实刷新（后端 202 入队，非前端伪造状态）
+export function refreshBrandSource(body: { projectId: string; competitorId: string; capability: string }) {
+  return apiPost<{ attempt?: { attemptId: string; status: string }; jobId?: string; deduped?: boolean; message?: string }>(
+    '/api/data-surface/refresh', body,
+  );
+}
+
 export function fetchReports(projectId: string, signal?: AbortSignal) {
   return apiGet<{ projectId: string; reports: ReportListItem[] }>(`/api/reports?projectId=${encodeURIComponent(projectId)}`, signal);
 }

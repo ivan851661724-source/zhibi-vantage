@@ -3258,6 +3258,55 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-cover-failed{color:#b06a1f;border-color:rgba(176,106,31,.35)}
 .core-cover-notCollected,.core-cover-notIntegrated{color:var(--ink3)}
 
+/* ---- SC-12 §六：机会视图模块（价格带 / 定位 / 矩阵 / 动态 / 评论 / 线索） ---- */
+.core-opp-modules{display:block;margin:0 0 16px}
+.core-opp-basis-line{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;
+  font-size:12.5px;color:var(--ink2);border:1px solid var(--line1);border-radius:10px;padding:9px 12px;margin:0 0 12px;background:var(--bg1,#fff)}
+.core-opp-basis-line b{color:var(--ink);font-size:14px}
+.core-opp-grid{display:grid;gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
+@media (max-width:1499px){.core-opp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){.core-opp-grid{grid-template-columns:minmax(0,1fr)}}
+.core-opp-card{border:1px solid var(--line1);border-radius:12px;padding:14px 16px;background:var(--bg1,#fff);min-width:0}
+.core-opp-card h4{margin:0 0 10px;font-size:13.5px;font-weight:600;color:var(--ink)}
+.core-opp-bands,.core-opp-bars{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.core-opp-bands li,.core-opp-bars li{display:grid;grid-template-columns:74px minmax(0,1fr) 84px;gap:8px;align-items:center}
+.core-opp-band-label{font-size:12px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.core-opp-band-bar{display:block;height:8px;border-radius:4px;background:rgba(29,158,117,.10);overflow:hidden}
+.core-opp-band-bar i{display:block;height:100%;background:var(--brand);border-radius:4px}
+.core-opp-band-num{font-size:11.5px;color:var(--ink3);text-align:right;white-space:nowrap}
+.core-opp-table{width:100%;border-collapse:collapse;font-size:12px}
+.core-opp-table th,.core-opp-table td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line1);white-space:nowrap}
+.core-opp-table th{color:var(--ink3);font-weight:500}
+.core-opp-table td{color:var(--ink2)}
+.core-opp-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--ink2)}
+.core-opp-list b{color:var(--ink)}
+.core-opp-gate{font-size:13px;color:var(--ink);font-weight:600;margin:0 0 6px}
+.core-opp-gate-block{border:1px dashed var(--line1);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.015)}
+.core-opp-dim-state{color:var(--ink3)}
+.core-opp-opps{margin-top:14px}
+.core-opp-opps h3{margin:0 0 10px;font-size:14px;color:var(--ink)}
+.core-opp-opp{border:1px solid var(--line1);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:var(--bg1,#fff)}
+.core-opp-opp h4{margin:0 0 6px;font-size:13px;color:var(--ink)}
+.core-opp-fact{margin:0 0 8px;font-size:12.5px;color:var(--ink2);line-height:1.6}
+.core-opp-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px;margin:0}
+.core-opp-meta>div{display:grid;grid-template-columns:68px minmax(0,1fr);gap:8px;min-width:0}
+.core-opp-meta dt{font-size:11.5px;color:var(--ink3);white-space:nowrap}
+.core-opp-meta dd{margin:0;font-size:12px;color:var(--ink2);overflow-wrap:anywhere}
+@media (max-width:760px){.core-opp-meta{grid-template-columns:minmax(0,1fr)}}
+
+/* ---- SC-12 §三/§四：品牌卡片短状态（首页只显示短状态，不铺长错误段落） ---- */
+.core-brand-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px}
+.core-state-chip{font-size:11.5px;font-weight:600;line-height:1.5;padding:2px 9px;border-radius:999px;
+  border:1px solid var(--line1);color:var(--ink2);background:var(--bg1,#fff);white-space:nowrap}
+.core-state-updated{color:#1D9E75;border-color:rgba(29,158,117,.35);background:rgba(29,158,117,.07)}
+.core-state-partial{color:#8a6d1a;border-color:rgba(138,109,26,.30);background:rgba(138,109,26,.07)}
+.core-state-collecting{color:#1f6fb2;border-color:rgba(31,111,178,.30);background:rgba(31,111,178,.07)}
+.core-state-stale{color:#8a6d1a;border-color:rgba(138,109,26,.30);background:rgba(138,109,26,.10)}
+.core-state-needs_attention,.core-state-source_unreachable,.core-state-source_blocked,
+.core-state-source_rate_limited,.core-state-source_parse_failed{color:#b06a1f;border-color:rgba(176,106,31,.35);background:rgba(176,106,31,.07)}
+.core-state-awaiting_config,.core-state-not_started{color:var(--ink3)}
+.core-brand-state .core-brand-mini{font-size:11.5px}
+
 /* ---- 品牌详情：总览卡 ---- */
 .core-brand-hero{border:1px solid var(--line1);border-radius:12px;padding:18px 20px;margin:10px 0 14px;min-width:0}
 .core-brand-hero-head{display:flex;align-items:baseline;gap:10px;min-width:0}

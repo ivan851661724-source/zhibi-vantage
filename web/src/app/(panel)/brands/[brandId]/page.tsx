@@ -17,7 +17,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { fetchBrand, priceText, type BrandDetail } from '@/lib/core-api';
+import { fetchBrand, priceText, refreshBrandSource, type BrandDetail } from '@/lib/core-api';
 import { ReportPanel } from '@/components/brand/report-panel';
 import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 import {
@@ -58,6 +58,16 @@ const DIM_TEXT: Record<string, string> = {
 };
 
 // 时间只精确到分钟（机器口径的秒不展示给用户）
+// 价格区间文案（真实观察值；无价格时返回 null，不补 0）
+function productPriceText(obs: { price?: number | null; currency?: string | null }[]): string | null {
+  const ps = obs.map(o => (o && typeof o.price === 'number' ? o.price : null)).filter(v => v != null) as number[];
+  if (!ps.length) return null;
+  const cur = (obs.map(o => (o && o.currency) || null).filter(Boolean)[0] as string) || '';
+  const lo = Math.min(...ps); const hi = Math.max(...ps);
+  const money = (n: number) => (cur ? cur + ' ' : '') + n.toFixed(2);
+  return lo === hi ? money(lo) : money(lo) + '–' + money(hi);
+}
+
 function fmt(iso: string | null | undefined, withTime?: boolean): string {
   if (!iso) return '—';
   try {
@@ -126,6 +136,9 @@ function BrandDetailInner() {
   const [err, setErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [evRefs, setEvRefs] = useState<EvidenceRef[] | null>(null);
+  // SC-12 §五：品牌级「立即更新」（真实刷新 → 后端 202 入队）
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!brandId || !projectId) return;
@@ -199,6 +212,32 @@ function BrandDetailInner() {
   const searchDet = dd.search_interest || null;
   const adsDet = dd.ad_campaigns || null;
   const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  // 可核验证据数：各维度 Evidence 引用去重（不重复计数同一证据）
+  // （普通计算而非 useMemo：位于早返回之后，Hooks 不可条件调用）
+  const evidenceSet = new Set<string>();
+  for (const dim of Object.values(dd || {})) {
+    for (const r of (dim && dim.evidenceRefs) || []) if (r && r.evidenceId) evidenceSet.add(r.evidenceId);
+  }
+  for (const r of (products.evidenceRefs || [])) if (r && r.evidenceId) evidenceSet.add(r.evidenceId);
+  const evidenceTotal = evidenceSet.size;
+  // 「立即更新」目标：优先修复失败/待更新的维度；否则刷新评论能力（真实请求，非前端伪造状态）
+  const dimsAll = (bc && bc.dimensions) || [];
+  const needDim = dimsAll.find(x => x.state === 'failed') || dimsAll.find(x => x.usingPreviousData) || dimsAll.find(x => x.state === 'not_started');
+  const needCap = needDim && (needDim.capabilities || []).find(c => c.maturity !== 'not_integrated');
+  const refreshTarget = needCap ? needCap.code : 'public_reviews';
+  async function doRefresh() {
+    if (!b.competitorId || refreshing) return;
+    setRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const r = await refreshBrandSource({ projectId, competitorId: b.competitorId, capability: refreshTarget });
+      setRefreshMsg(r && r.attempt ? '已入队，完成后自动更新' : '已入队');
+    } catch (e) {
+      setRefreshMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
   const rangePicker = (
     <TimeRangePicker
       preset={preset} from={effectiveRange?.from || null} to={effectiveRange?.to || null}
@@ -248,7 +287,16 @@ function BrandDetailInner() {
               失败的采集不能冒充成功观察时间 */}
           <div><dt>最近一次成功观察</dt><dd>{d.collection && d.collection.lastSuccessfulAt ? fmt(d.collection.lastSuccessfulAt, true) : '—'}</dd></div>
           <div><dt>已接入维度</dt><dd>{configuredDims} / {sum.total}{sum.available ? `（${sum.available} 个已有数据）` : ''}</dd></div>
+          <div><dt>可核验证据</dt><dd>{evidenceTotal} 条</dd></div>
         </dl>
+        {/* SC-12 §五：品牌总览必须给「立即更新」与「加入/管理监控」两个操作 */}
+        <div className="core-brand-hero-actions">
+          <button type="button" className="btn-mini" disabled={refreshing} onClick={doRefresh}>
+            {refreshing ? '正在更新…' : '立即更新'}
+          </button>
+          <Link className="btn-ghost btn-mini" href={`/monitoring?${keep}`}>加入 / 管理监控</Link>
+          {refreshMsg ? <span className="core-brand-muted core-brand-mini">{refreshMsg}</span> : null}
+        </div>
       </section>
 
       <nav className="core-tabs" role="tablist" aria-label="品牌档案分区">
@@ -295,6 +343,51 @@ function BrandDetailInner() {
             <div className="core-overview-card">
               <h4>下一步</h4>
               <p className="core-overview-main">{nextStep}</p>
+            </div>
+            {/* SC-12 §五.1：概览补商品/声音/内容摘要与数据完整度（不复制诊断区） */}
+            <div className="core-overview-card">
+              <h4>商品与价格</h4>
+              <p className="core-overview-main">
+                {products.observations.length
+                  ? `${products.observations.length} 款在售观察${productPriceText(products.observations) ? ' · ' + productPriceText(products.observations) : ''}`
+                  : <span className="core-brand-muted">尚无商品观察</span>}
+              </p>
+              {products.collectedAt ? <p className="core-brand-muted core-brand-mini">采集于 {fmt(products.collectedAt, true)}</p> : null}
+            </div>
+            <div className="core-overview-card">
+              <h4>用户声音</h4>
+              <p className="core-overview-main">
+                {reviewsDet && reviewsDet.observations.length
+                  ? `${reviewsDet.observations.length} 个可核验公开页面`
+                  : <span className="core-brand-muted">尚无公开评论观察</span>}
+              </p>
+              {reviewsDet && reviewsDet.collectedAt ? <p className="core-brand-muted core-brand-mini">采集于 {fmt(reviewsDet.collectedAt, true)}</p> : null}
+            </div>
+            <div className="core-overview-card">
+              <h4>内容与广告</h4>
+              <p className="core-overview-main">
+                {socialDet && socialDet.observations.length
+                  ? `${socialDet.observations.length} 条内容观察`
+                  : (searchDet && searchDet.observations.length ? `${searchDet.observations.length} 条热度观察` : null)
+                    || (adsDet && adsDet.observations.length ? `${adsDet.observations.length} 条广告观察` : null)
+                    || <span className="core-brand-muted">该维度数据服务尚未接入</span>}
+              </p>
+              <p className="core-brand-muted core-brand-mini">未接入的维度不生成数据、估算或结论。</p>
+            </div>
+            <div className="core-overview-card">
+              <h4>数据完整度</h4>
+              <p className="core-overview-main">
+                {sum.total} 个维度中 {sum.available} 个已有数据、{sum.collecting} 个正在采集
+                {sum.failed ? `、${sum.failed} 个需要处理` : ''}
+                {staleDims ? `、${staleDims} 个已有历史数据但最近更新失败` : ''}，
+                共 {evidenceTotal} 条可核验证据。
+              </p>
+              <button type="button" className="btn-ghost btn-mini" onClick={() => switchTab('sources')}>查看数据覆盖与来源</button>
+            </div>
+            <div className="core-overview-card">
+              <h4>相关报告</h4>
+              <p className="core-overview-main">基于该品牌已核验事实生成调研报告（含证据引用与冻结事实包）。</p>
+              <Link className="btn-ghost btn-mini" href={`/report?${keep}`}>打开调研报告</Link>
             </div>
           </div>
           <p className="hint">

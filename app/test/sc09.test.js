@@ -490,17 +490,29 @@ test('S10 不同租户不能读取彼此首采任务 / 观察 / 证据 / 事件'
 test('S11 前端能区分全部采集状态（尚未开始/正在采集/已检查无发现/失败但历史可用/未配置/不覆盖）', () => {
   const brands = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'app', '(panel)', 'brands', 'page.tsx'), 'utf8');
   const detail = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'app', '(panel)', 'brands', '[brandId]', 'page.tsx'), 'utf8');
+  const both = brands + detail;
   // 首采进度：三态 + 完成品牌数
   assert.ok(/brandsDone/.test(brands) && /brandsTotal/.test(brands), '首采进度 = 已完成/总数');
   assert.ok(/正在采集/.test(brands) && /部分完成/.test(brands) && /需要处理/.test(brands), '首采三态文案');
   assert.ok(/重新检查失败项/.test(brands), '失败项重试入口');
   assert.ok(/setInterval/.test(brands), '页面轮询到终态');
-  // 六类状态的人话
-  assert.ok(/尚未采集/.test(brands) && /尚未采集成功/.test(brands), '尚未开始');
-  assert.ok(/数据服务暂不可用/.test(brands), '未配置');
-  assert.ok(/该来源不覆盖此市场/.test(brands), '来源不覆盖');
-  assert.ok(/最近一次更新失败|lastFailureText/.test(brands), '失败但历史可用（失败提示）');
+  // SC-12 §三/§四：六类状态改为「首页短状态 + 详情完整诊断」两处分工
+  //   · 首页卡片只给短状态词（不铺长错误段落、不铺逐维度重复行）
+  //   · 完整六态（未配置/不覆盖/空/失败但历史可用）在详情「数据覆盖与来源」呈现
+  const logic = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'lib', 'core-logic.ts'), 'utf8');
+  assert.ok(/CARD_STATUS_TEXT/.test(brands) && /CARD_STATUS_TEXT/.test(logic), '首页短状态走统一词表');
+  assert.ok(/已更新/.test(logic) && /部分数据待更新/.test(logic) && /正在采集/.test(logic), '短状态：已更新/部分数据待更新/正在采集');
+  assert.ok(/来源暂时不可达/.test(logic) && /需要重试/.test(logic), '短状态：来源暂时不可达/需要重试');
+  assert.ok(/等待系统数据服务配置/.test(logic), '短状态：等待系统数据服务配置');
+  assert.ok(/尚未开始采集/.test(logic), '短状态：尚未开始采集');
+  assert.ok(/已有历史数据，最近更新失败/.test(logic), '短状态：已有历史数据，最近更新失败');
+  assert.ok(/数据服务暂不可用/.test(both), '未配置');
+  assert.ok(/该来源不覆盖此市场/.test(both), '来源不覆盖');
+  assert.ok(/最近一次更新失败/.test(detail), '失败但历史可用（失败提示）');
   assert.ok(/暂无可展示/.test(detail), '已检查但没有发现（空态文案）');
+  // SC-12 §三.3：首页不得再铺长错误段落（详细原因只在详情诊断区）
+  assert.ok(!/core-brand-warn/.test(brands), '首页卡片不得铺长错误段落');
+  assert.ok(!/lastFailureText/.test(brands), '首页卡片不得直接渲染失败长文案');
   // 详情必须展示真实 observations 与证据入口
   assert.ok(/dimensionDetails/.test(detail) && /ObsList/.test(detail), '详情渲染真实观察');
   assert.ok(/查看证据/.test(detail), '详情有证据入口');

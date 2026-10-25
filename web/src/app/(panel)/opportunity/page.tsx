@@ -8,28 +8,247 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import type { ZhibiState } from '@/types/state';
-import { fetchOpportunities, type OpportunityView } from '@/lib/core-api';
+import { fetchOpportunities, type OpportunityView, type OpportunityFoundation, type OpportunityDimensionBasis } from '@/lib/core-api';
 
 // 统一读模型机会基础（SC-04 UI 框架轮）：先展示「已具备什么数据」（品牌样本 + 维度构成），
 // 再展示机会线索；样本不足 → 明确「资料不足，暂不生成机会判断」并给出补齐方向，
 // 绝不把未接入维度伪装成市场机会。
-function UnifiedOpportunityBasis({ projectId }: { projectId: string }) {
+// ============================================================
+// SC-12 §六：机会模块（按可用维度独立工作）
+//   · 价格带分布 / 品牌价格定位 / 产品矩阵密度 / 上新与库存动态 / 公开评论与声音
+//   · 满意度×重要性：仅服务端门槛满足时渲染；不足时显示规定文案（不出空图）
+//   · 缺失维度：显示状态而不是空白；不填 0
+// ============================================================
+function DimStatusLine({ d }: { d: OpportunityDimensionBasis }) {
+  const t = d.statusText || (d.status === 'missing' ? '暂无数据' : d.status);
+  return <span className="core-opp-dim-state">{t}</span>;
+}
+
+function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
+  if (!f) return null;
+  const price = f.modules.priceBands;
+  const matrix = f.modules.matrixDensity;
+  const dyn = f.modules.newItemDynamics;
+  const rev = f.modules.reviewInsights;
+  const sat = f.modules.satisfactionScatter;
+  const maxBand = Math.max(1, ...price.bands.map(b => b.brandCount));
+  const maxSku = Math.max(1, ...matrix.rows.map(r => r.productCount || 0));
+  const fmtWin = (w: { from: string | null; to: string | null }) =>
+    w && w.from ? `${String(w.from).slice(0, 10)} → ${String(w.to || '').slice(0, 10) || '至今'}` : '—';
+
+  return (
+    <section className="core-opp-modules" data-testid="opp-modules">
+      {/* ① 数据基础摘要 */}
+      <div className="core-opp-basis-line">
+        <span>品牌 <b>{f.brandScope.total}</b> 个，已有数据 <b>{f.brandScope.withData}</b> 个</span>
+        <span>可用维度 <b>{f.summary.usableDimensionCount}</b> 个</span>
+        <span>缺失维度 <b>{f.summary.missingDimensionCount}</b> 个</span>
+        <span>机会线索 <b>{f.summary.opportunityCount}</b> 条</span>
+        <span className="core-brand-muted">缺失维度不填 0，也不参与统计</span>
+      </div>
+
+      {/* ② 模块网格 */}
+      <div className="core-opp-grid">
+        {/* 价格带分布 */}
+        <div className="core-opp-card" data-testid="opp-price-bands">
+          <h4>价格带分布</h4>
+          {price.available ? (
+            <>
+              <ul className="core-opp-bands">
+                {price.bands.map(b => (
+                  <li key={b.key}>
+                    <span className="core-opp-band-label">{b.label}</span>
+                    <span className="core-opp-band-bar"><i style={{ width: Math.round((b.brandCount / maxBand) * 100) + '%' }} /></span>
+                    <span className="core-opp-band-num">{b.brandCount} 个品牌</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="core-brand-muted core-brand-mini">
+                口径：{price.currency || '未标注币种'} 公开标价截面；覆盖数为在售品牌数，未采集品牌不计入。
+              </p>
+            </>
+          ) : <p className="core-brand-muted">暂无可用价格数据（未采集，不按 0 计入）。</p>}
+        </div>
+
+        {/* 品牌价格定位 */}
+        <div className="core-opp-card" data-testid="opp-price-position">
+          <h4>品牌价格定位</h4>
+          {price.rows.length ? (
+            <table className="core-opp-table">
+              <thead><tr><th>品牌</th><th>中位价</th><th>价格区间</th><th>在售 SKU</th><th>证据</th></tr></thead>
+              <tbody>
+                {price.rows.map(r => (
+                  <tr key={r.brandId}>
+                    <td>{r.name}</td>
+                    <td>{r.priceMedian != null ? (r.currency ? r.currency + ' ' : '') + r.priceMedian : '—'}</td>
+                    <td>{r.priceMin != null && r.priceMax != null
+                      ? (r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax
+                      : '—'}</td>
+                    <td>{r.productCount != null ? r.productCount : '—'}</td>
+                    <td>{r.evidenceIds.length || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <p className="core-brand-muted">暂无可用价格数据。</p>}
+        </div>
+
+        {/* 产品矩阵密度 */}
+        <div className="core-opp-card" data-testid="opp-matrix">
+          <h4>产品矩阵密度</h4>
+          {matrix.available ? (
+            <>
+              <ul className="core-opp-bars">
+                {matrix.rows.map(r => (
+                  <li key={r.brandId}>
+                    <span className="core-opp-band-label">{r.name}</span>
+                    <span className="core-opp-band-bar"><i style={{ width: Math.round(((r.productCount || 0) / maxSku) * 100) + '%' }} /></span>
+                    <span className="core-opp-band-num">{r.productCount != null ? r.productCount + ' 款' : '—'}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="core-brand-muted core-brand-mini">
+                同项目中位数：{matrix.medianProductCount != null ? matrix.medianProductCount + ' 款' : '—'}；在售 {matrix.rows.filter(r => r.available != null).reduce((s, r) => s + (r.available || 0), 0)} 款，缺货 {matrix.rows.filter(r => r.soldOut != null).reduce((s, r) => s + (r.soldOut || 0), 0)} 款。
+              </p>
+            </>
+          ) : <p className="core-brand-muted">暂无可用商品数据。</p>}
+        </div>
+
+        {/* 上新与库存动态 */}
+        <div className="core-opp-card" data-testid="opp-dynamics">
+          <h4>上新与库存动态</h4>
+          {dyn.available ? (
+            <>
+              <ul className="core-opp-list">
+                {dyn.rows.map(r => (
+                  <li key={r.brandId}>
+                    <b>{r.name}</b>：已建立 {r.baselineItems} 款商品的采集基线（{String(r.firstSeenAt || '').slice(0, 10)}）
+                  </li>
+                ))}
+              </ul>
+              <p className="core-brand-muted core-brand-mini">
+                当前只有 {dyn.comparableWindows} 个可比窗口，因此只陈述「首次观察到的商品数」，不判断上新或下架；不可比记录不伪装成变化。
+              </p>
+            </>
+          ) : <p className="core-brand-muted">尚无带可比窗口的商品观察。</p>}
+        </div>
+
+        {/* 公开评论与用户声音 */}
+        <div className="core-opp-card" data-testid="opp-reviews">
+          <h4>公开评论与用户声音</h4>
+          {rev.available ? (
+            <>
+              <ul className="core-opp-list">
+                {rev.rows.map(r => (
+                  <li key={r.brandId}>
+                    <b>{r.name}</b>：{r.pageCount} 个可核验公开页面
+                    {r.reviewCount != null ? `，页面报告评论数 ${r.reviewCount}` : '，页面未报告可核验评论数'}
+                    {r.ratedPages ? `，其中 ${r.ratedPages} 个带评分` : ''}
+                    {r.pages && r.pages[0] && r.pages[0].url ? (
+                      <> · <a href={r.pages[0].url} target="_blank" rel="noopener noreferrer nofollow">来源页</a></>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+              <p className="core-brand-muted core-brand-mini">样本是本次采集窗口内通过校验的公开页面，不等于全网口碑；缺分类依据时不做满意度结论。</p>
+            </>
+          ) : <p className="core-brand-muted">尚未采集到公开评论页面。</p>}
+        </div>
+
+        {/* 满意度 × 重要性（门槛由服务端判定） */}
+        <div className="core-opp-card" data-testid="opp-satisfaction">
+          <h4>满意度 × 重要性</h4>
+          {sat.available ? (
+            <>
+              <p className="core-brand-muted">可比对象 {sat.comparableObjects} 个（门槛 ≥ {sat.minObjects}）：{sat.objects.map(o => o.name).join('、')}</p>
+              <p className="core-brand-muted core-brand-mini">散点坐标来自可追溯评分与主题分类依据；重叠点使用碰撞避让与重叠计数，不修改真实数值。</p>
+            </>
+          ) : (
+            <>
+              <p className="core-opp-gate">{sat.reason || '当前评论样本不足，暂不生成满意度分布'}</p>
+              <p className="core-brand-muted core-brand-mini">
+                可比对象 {sat.comparableObjects} 个，至少需要 {sat.minObjects} 个带评分且样本范围一致的对象才出图。
+                价格、商品等已有模块不受影响。
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ③ 缺失维度：显示状态而不是空白 */}
+      {f.summary.missingDimensionCodes.length ? (
+        <div className="core-building core-opp-building" data-testid="opp-missing">
+          <div className="core-building-head">当前不可用的维度</div>
+          <ul className="core-building-list">
+            {f.summary.missingDimensionCodes.map(code => {
+              const d = f.dimensions[code];
+              if (!d) return null;
+              return (
+                <li key={code}>
+                  <span className="core-building-name">{d.label}</span>
+                  <span className="core-building-state"><DimStatusLine d={d} /></span>
+                  <span className="core-building-meta">最近观察：—</span>
+                  <span className="core-building-meta">当前不生成数据、估算或结论</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+
+      {/* ④ 机会线索（只陈述事实 + 限制 + 建议验证的问题） */}
+      {f.opportunities.length ? (
+        <div className="core-opp-opps" data-testid="opp-opportunities">
+          <h3>可核验的机会线索</h3>
+          {f.opportunities.map(op => (
+            <div key={op.id} className="core-opp-opp">
+              <h4>{op.title}</h4>
+              <p className="core-opp-fact">{op.fact}</p>
+              <dl className="core-opp-meta">
+                <div><dt>使用维度</dt><dd>{op.dimension}</dd></div>
+                <div><dt>样本量</dt><dd>{op.sampleSize}</dd></div>
+                <div><dt>时间范围</dt><dd>{fmtWin(op.window)}</dd></div>
+                <div><dt>证据入口</dt><dd>{op.evidenceRefs.length ? op.evidenceRefs.join('、') : '本次无逐条证据引用'}</dd></div>
+                <div><dt>限制</dt><dd>{op.limits.join('；')}</dd></div>
+                <div><dt>建议验证</dt><dd>{op.question}</dd></div>
+              </dl>
+            </div>
+          ))}
+          <p className="core-brand-muted core-brand-mini">线索只陈述观察到的事实与样本口径，不替你做经营决策。</p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// SC-12 §六：机会视图统一取数（父页 + 数据基础块共用同一份，避免重复请求）
+function useOpportunityView(projectId: string) {
   const [v, setV] = useState<OpportunityView | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     if (!projectId) return;
     let alive = true;
     const ctrl = new AbortController();
+    setV(null);
     fetchOpportunities(projectId, ctrl.signal)
       .then(r => { if (alive) { setV(r); setErr(null); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; ctrl.abort(); };
   }, [projectId]);
+  return { view: v, err };
+}
+
+function UnifiedOpportunityBasis({ projectId, view }: { projectId: string; view?: OpportunityView | null }) {
+  const own = useOpportunityView(projectId);
+  const v = view !== undefined ? view : own.view;
+  const err = view !== undefined ? null : own.err;
   if (err) return <p className="core-err">{err}</p>;
   if (!v) return null;
   const db = v.dimensionBasis;
   return (
     <section className="core-opp-basis">
+      {/* SC-12 §六.2：机会模块按可用数据独立工作——有价格/商品就必须有分析 */}
+      <FoundationModules f={v.foundation || null} />
       <h3>数据基础与样本范围</h3>
       <ul>
         <li>竞争品牌数：{v.sample.brandCount}（已具备真实数据：{v.sample.brandsWithData}{v.sample.required ? ` / 至少需要 ${v.sample.required}` : ''}）</li>
@@ -470,6 +689,8 @@ function OpportunityInner() {
     if (urlProjectId && s.projectId && String(s.projectId) !== String(urlProjectId)) return null;
     return (s.opportunity as Opportunity) || null;
   }, [state, urlProjectId]);
+  // SC-12：机会数据基础（服务端按可用维度独立产出）——与旧视图同一接口，一次请求
+  const oppView = useOpportunityView(urlProjectId);
 
   if (loading) return <p className="hint">加载机会视图…</p>;
   if (!op) {
@@ -481,7 +702,7 @@ function OpportunityInner() {
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
-        <UnifiedOpportunityBasis projectId={urlProjectId} />
+        <UnifiedOpportunityBasis projectId={urlProjectId} view={oppView.view} />
         <div className="ws-empty">
           <h3>机会地图</h3>
           <p>暂无数据。</p>
@@ -494,6 +715,10 @@ function OpportunityInner() {
   // 不画假散点、不按相对百分位强行分「重点机会」，也不把旧评论主题混装成市场结论；
   // 保留数据基础（UnifiedOpportunityBasis）、卖点空缺与下一步建议。
   const voiceGate = (op.voiceBasis && op.voiceBasis.gate) || op.reason;
+  // SC-12 §六.3：满意度×重要性的渲染门槛以服务端判定为准（≥3 个可比对象 + 可追溯依据），
+  // 样本不足不出空坐标图；旧视图的散点同样受此门控。
+  const satGate = oppView.view && oppView.view.foundation ? oppView.view.foundation.modules.satisfactionScatter : null;
+  const satBlocked = !!(satGate && !satGate.available);
   if (op.hidden && (voiceGate === 'no_evidence_backed_polarity' || voiceGate === 'insufficient_sample')) {
     const vb = op.voiceBasis || {};
     return (
@@ -504,7 +729,7 @@ function OpportunityInner() {
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
-        <UnifiedOpportunityBasis projectId={urlProjectId} />
+        <UnifiedOpportunityBasis projectId={urlProjectId} view={oppView.view} />
         <div className="ws-head">
           <h3>口碑机会 · 尚不足以形成满意度判断</h3>
           <p className="ws-prelim-banner">
@@ -541,7 +766,7 @@ function OpportunityInner() {
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
-        <UnifiedOpportunityBasis projectId={urlProjectId} />
+        <UnifiedOpportunityBasis projectId={urlProjectId} view={oppView.view} />
         <div className="ws-head">
           <h3>机会地图 · 初步（样本不足）</h3>
           <p className="ws-prelim-banner">⚠️ <b>初步信号 · 样本不足</b>：以下不是正式机会图，仅列出目前已识别的用户声音主题，<b>不作排序结论、不标重点机会</b>。{reasonLine}</p>
@@ -594,7 +819,7 @@ function OpportunityInner() {
           <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
         </div>
       </div>
-      <UnifiedOpportunityBasis projectId={urlProjectId} />
+      <UnifiedOpportunityBasis projectId={urlProjectId} view={oppView.view} />
       <div className="ws-head">
         <h3>口碑机会 · 重要但没人做好的地方（补充层）</h3>
         <p>
@@ -606,7 +831,18 @@ function OpportunityInner() {
       <MarketGapSection state={state!} />
       <div className="pano-quad-wrap opp-chart">
         <div className="pano-sec-title">机会分布 · 满意度 × 重要性</div>
-        <OppScatter op={op} hl={hl} onPick={onPick} />
+        {/* SC-12 §六.3：样本不足不渲染空坐标图（真实数值不变；重叠由碰撞避让处理） */}
+        {satBlocked ? (
+          <div className="core-opp-gate-block" data-testid="opp-scatter-gated">
+            <p className="core-opp-gate">当前评论样本不足，暂不生成满意度分布</p>
+            <p className="pano-tip">
+              可比对象 {satGate ? satGate.comparableObjects : 0} 个，至少需要 {satGate ? satGate.minObjects : 3} 个带评分且样本范围一致的对象才出图。
+              满意度与重要性都需可追溯依据，缺一即不出结论；价格与商品等已有模块不受影响。
+            </p>
+          </div>
+        ) : (
+          <OppScatter op={op} hl={hl} onPick={onPick} />
+        )}
         <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝需求呼声较高、负面反馈集中，是建议优先验证的机会区域；右侧＝需求已被较好满足，该区域竞争较为充分。</p>
         <p className="pano-tip">分母：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</p>
         <p className="pano-tip">推理：{op.method}</p>

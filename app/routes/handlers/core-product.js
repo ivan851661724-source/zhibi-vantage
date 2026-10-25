@@ -261,7 +261,12 @@ async function opportunities(ctx, req, res, url) {
   // SC-05：机会判断的数据基础补「可用历史跨度」与「本次使用的时间范围」
   let historyBasis = null;
   try { historyBasis = MemView.projectHistoryBasis(tid, rp.projectId); } catch (e) { historyBasis = null; }
-  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis }, view));
+  // SC-12 §六.1：机会数据基础——按可用维度独立工作（价格/商品/上新/评论独立成模块），
+  // 缺失维度保持 null 并如实标注状态；不再因单个维度不可用而整页空白。
+  let foundation = null;
+  try { foundation = require('../../services/opportunity-foundation.js').buildOpportunityFoundation(tid, rp.projectId); }
+  catch (e) { foundation = null; }
+  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
   return true;
 }
 
