@@ -316,7 +316,12 @@ test('S7 公开评论：搜索只用于发现，正文必须经 FetchGate/robots
   assert.ok(start > 0, '找到 reviewsAdapter');
   const block = src.slice(start, start + 9000);
   assert.ok(/fanoutSearch\(/.test(block), '发现阶段使用搜索链');
-  assert.ok(/candidates = \(r && r\.results \|\| \[\]\)\.map\(x => \(\{ url: x\.url \|\| x\.link, title: x\.title \|\| null \}\)\)/.test(block),
+  // 🔴 SC-11：fanoutSearch 契约定死——「每查询一个 searchProvider 结果」的数组
+  // （discover.js 同款）。旧消费方式（当 {results} 单对象）使候选恒为 0，
+  // 测试服 37/37 public_reviews job 全灭；此处把契约钉在代码级断言里。
+  assert.ok(/const fanoutRows = await Search\.fanoutSearch\(/.test(block) && /Array\.isArray\(fanoutRows\)/.test(block),
+    'fanoutSearch 必须按真实契约（数组）消费');
+  assert.ok(/const url = x\.url \|\| x\.link;/.test(block) && /title: x\.title \|\| null/.test(block),
     '搜索结果只取 url/title，不把摘要当正文');
   assert.ok(/Net\.fetchPage\(/.test(block), '正文阶段逐页真实抓取（FetchGate/robots 在 Net 内）');
   assert.ok(/snippet/.test(block), '评论片段来自页面抓取结果');
