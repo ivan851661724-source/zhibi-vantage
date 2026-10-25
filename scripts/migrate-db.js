@@ -1,6 +1,6 @@
 'use strict';
 // ============================================================
-// scripts/migrate-db.js —— 数据库**加法**迁移执行器
+// scripts/migrate-db.js —— 数据库**加法**迁移执行器 / 只读核验器
 // ------------------------------------------------------------
 // 设计约束（与代码内迁移一致，禁止破坏性变更）：
 //   · 只允许 CREATE TABLE IF NOT EXISTS / ADD COLUMN / CREATE INDEX IF NOT EXISTS；
@@ -9,12 +9,25 @@
 //   · 迁移由各 service 模块惰性执行，本脚本只负责按固定顺序 require 并核验结果。
 //
 // 用法：
-//   ZB_DATA_DIR=/srv/zhibi/data node scripts/migrate-db.js
-//   ZB_DATA_DIR=/srv/zhibi/data node scripts/migrate-db.js --check   # 只核验不写
-// 退出码：0 成功 / 1 失败（任一表缺失）
+//   ZB_DATA_DIR=/srv/zhibi/data node scripts/migrate-db.js            # 执行加法迁移
+//   ZB_DATA_DIR=/srv/zhibi/data node scripts/migrate-db.js --check    # 只读核验
+// 退出码：0 成功 / 1 失败
+//
+// 🔴 --check 只读纪律（SC-10 r2 §二）：
+//   · 禁止 mkdir（数据目录不存在即失败，绝不创建）；
+//   · 禁止 require 任何会触发建表的业务模块；
+//   · 禁止调用 getDb() / ensureTable() 等写入入口；
+//   · 禁止创建或修改任何 DB / WAL / SHM 文件——
+//     实测（node:sqlite）：即便 SQLITE_OPEN_READONLY，打开 WAL 库也会创建/改写
+//     -shm/-wal 文件。因此 --check 把 *.db（连同 -wal/-shm）**复制到系统临时
+//     Scratch 区**，只对副本做查询；数据目录全程只读；
+//   · 执行前后对数据目录**全部文件**（递归）做 清单/大小/mtime/SHA-256 指纹比对，
+//     任一变化即失败退出。
 // ============================================================
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 
 const REPO = path.resolve(__dirname, '..');
 const APP = path.join(REPO, 'app');
@@ -44,6 +57,131 @@ const REQUIRED_TABLES = [
   'intel_events', 'provider_verifications',
 ];
 
+// ---------- 数据目录指纹（--check 专用）：递归全部文件 ----------
+// 记录 相对路径 → { size, mtimeMs, sha256 }；任一维度变化都算「目录被改动」。
+function fingerprintDir(dir) {
+  const out = {};
+  const walk = (rel) => {
+    const abs = rel ? path.join(dir, rel) : dir;
+    let entries = [];
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch (e) { return; }
+    for (const ent of entries) {
+      const childRel = rel ? rel + '/' + ent.name : ent.name;
+      if (ent.isDirectory()) { walk(childRel); continue; }
+      if (!ent.isFile()) continue; // 符号链接等不纳入指纹（避免跟随逃逸目录）
+      try {
+        const st = fs.statSync(path.join(dir, childRel));
+        const buf = fs.readFileSync(path.join(dir, childRel));
+        out[childRel] = { size: st.size, mtimeMs: st.mtimeMs, sha256: crypto.createHash('sha256').update(buf).digest('hex') };
+      } catch (e) { out[childRel] = { error: String((e && e.message) || e) }; }
+    }
+  };
+  walk('');
+  return out;
+}
+function diffFingerprints(before, after) {
+  const diffs = [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    const b = before[k], a = after[k];
+    if (!b) { diffs.push('新增文件: ' + k); continue; }
+    if (!a) { diffs.push('文件消失: ' + k); continue; }
+    if (b.error || a.error) { diffs.push('读取失败: ' + k); continue; }
+    if (b.size !== a.size) diffs.push('大小变化: ' + k + ' (' + b.size + ' → ' + a.size + ')');
+    if (b.mtimeMs !== a.mtimeMs) diffs.push('修改时间变化: ' + k);
+    if (b.sha256 !== a.sha256) diffs.push('内容变化(SHA-256): ' + k);
+  }
+  return diffs;
+}
+
+// ---------- --check：复制到临时 Scratch 区后只读查询 ----------
+function checkMode(dir) {
+  const before = fingerprintDir(dir);
+  const dbFiles = fs.readdirSync(dir).filter(f => f.endsWith('.db'));
+  if (!dbFiles.length) {
+    console.error('[migrate] --check：数据目录没有任何 .db 文件 ' + dir);
+    process.exit(1);
+  }
+  // 复制 *.db 连同 -wal/-shm 到临时目录（只读数据目录，副本上允许 SQLite 正常打开）
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-migrate-check-'));
+  const dbs = {};
+  const colCache = {};
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    for (const f of dbFiles) {
+      for (const suffix of ['', '-wal', '-shm']) {
+        const src = path.join(dir, f + suffix);
+        if (!fs.existsSync(src)) continue;
+        fs.copyFileSync(src, path.join(scratch, f + suffix));
+      }
+      // 副本以只读方式打开（双保险：即使代码写错也改不到数据目录）
+      const h = new DatabaseSync(path.join(scratch, f), { readOnly: true });
+      dbs[f] = h.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+      h.close();
+    }
+    // 列核验同样只读副本
+    const colOf = (t) => {
+      if (colCache[t]) return colCache[t];
+      for (const f of Object.keys(dbs)) {
+        if (!dbs[f].includes(t)) continue;
+        try {
+          const h = new DatabaseSync(path.join(scratch, f), { readOnly: true });
+          const cols = h.prepare('PRAGMA table_info(' + t + ')').all().map(r => r.name);
+          h.close();
+          colCache[t] = cols;
+          return cols;
+        } catch (e) { return []; }
+      }
+      return [];
+    };
+    var columnCheck = colOf; // 供下方报告使用
+  } catch (e) {
+    console.error('[migrate] --check：副本打开失败 :: ' + String((e && e.message) || e).slice(0, 300));
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e2) {}
+    process.exit(1);
+  }
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* 临时目录清理失败不影响结论 */ }
+
+  const allTables = Array.from(new Set(Object.values(dbs).flat()));
+  const missing = REQUIRED_TABLES.filter(t => !allTables.includes(t));
+  const report = {
+    dataDir: dir,
+    mode: 'check',
+    readOnlyVerified: true,
+    dbFiles: Object.keys(dbs).sort(),
+    tableCount: allTables.length,
+    requiredMissing: missing,
+    sc10Columns: {},
+  };
+  // SC-10 相关加法列核验（列集合已在只读副本上取回）
+  for (const [t, cols] of Object.entries({
+    collection_jobs: ['collection_purpose', 'window_key'],
+    first_collection_items: ['in_scope', 'enqueue_generation', 'cancel_reason'],
+    monitoring_windows: ['events_pending', 'events_write_failed', 'events_duplicate'],
+  })) {
+    const have = columnCheck(t);
+    report.sc10Columns[t] = cols.map(c => ({ column: c, present: have.includes(c) }));
+  }
+
+  // 前后指纹比对：数据目录必须逐字节不变
+  const after = fingerprintDir(dir);
+  const diffs = diffFingerprints(before, after);
+  if (diffs.length) {
+    console.error('[migrate] --check 失败：数据目录在核验过程中发生变化（违反只读纪律）');
+    for (const d of diffs.slice(0, 20)) console.error('  - ' + d);
+    process.exit(1);
+  }
+
+  if (missing.length) {
+    console.error('[migrate] 缺表: ' + JSON.stringify(missing));
+    console.log(JSON.stringify(report, null, 2));
+    process.exit(1);
+  }
+  console.log(JSON.stringify(report, null, 2));
+  console.log('[migrate] 只读核验通过（表 ' + allTables.length + ' 张；数据目录逐字节未变）');
+}
+
+// ---------- 普通模式：加法迁移（行为保持不变） ----------
 function dbHandle() {
   // 采集/首采/监控三张库都在 surface-store 的连接上（collect-jobs.getDb 即同一句柄）
   try {
@@ -55,20 +193,10 @@ function dbHandle() {
   return { handle: new DatabaseSync(dbmod.STORE_PATH), scope: 'multitenant' };
 }
 
-function main() {
-  if (!process.env.ZB_DATA_DIR) {
-    console.error('[migrate] 必须设置 ZB_DATA_DIR（例如 /srv/zhibi/data）');
-    process.exit(1);
-  }
-  const dir = process.env.ZB_DATA_DIR;
-  if (!checkOnly) fs.mkdirSync(dir, { recursive: true });
-  if (checkOnly && !fs.existsSync(dir)) {
-    console.error('[migrate] --check：数据目录不存在 ' + dir);
-    process.exit(1);
-  }
-
+function applyMode(dir) {
+  fs.mkdirSync(dir, { recursive: true });
   console.log('[migrate] 数据目录: ' + dir);
-  console.log('[migrate] 模式: ' + (checkOnly ? '只核验' : '执行加法迁移'));
+  console.log('[migrate] 模式: 执行加法迁移');
 
   for (const m of MODULES) {
     const p = path.join(APP, m);
@@ -133,13 +261,12 @@ function main() {
   const missing = REQUIRED_TABLES.filter(t => !allTables.includes(t));
   const report = {
     dataDir: dir,
-    mode: checkOnly ? 'check' : 'apply',
+    mode: 'apply',
     dbFiles: Object.keys(dbs).sort(),
     tableCount: allTables.length,
     requiredMissing: missing,
     sc10Columns: {},
   };
-  // SC-10 相关加法列核验（历史库升级后必须存在）
   const colOf = (t) => {
     for (const f of Object.keys(dbs)) {
       if (!dbs[f].includes(t)) continue;
@@ -167,6 +294,27 @@ function main() {
   }
   console.log(JSON.stringify(report, null, 2));
   console.log('[migrate] 加法迁移完成（表 ' + allTables.length + ' 张，无破坏性变更）');
+}
+
+function main() {
+  if (!process.env.ZB_DATA_DIR) {
+    console.error('[migrate] 必须设置 ZB_DATA_DIR（例如 /srv/zhibi/data）');
+    process.exit(1);
+  }
+  const dir = process.env.ZB_DATA_DIR;
+  if (checkOnly) {
+    if (!fs.existsSync(dir)) {
+      console.error('[migrate] --check：数据目录不存在（只读模式绝不创建） ' + dir);
+      process.exit(1);
+    }
+    if (!fs.statSync(dir).isDirectory()) {
+      console.error('[migrate] --check：不是目录 ' + dir);
+      process.exit(1);
+    }
+    checkMode(dir);
+    return;
+  }
+  applyMode(dir);
 }
 
 main();

@@ -537,6 +537,29 @@ function cancelCollectionJobAndAttempt(input) {
   return out;
 }
 
+// 品牌被移出项目（SC-10 r2 §四）：把该品牌在本项目全部未终结任务**双终结**。
+// 与首采 cancelPendingJobs 同一口径：job → done + last_error=reasonCode；
+// attempt → failed + cancelled_scope + 用户文案。不删历史行、不产事件、不发提醒。
+// 覆盖首采 / 手动刷新 / 监控等一切来源的 pending+running 任务（按竞品维度，不按能力）。
+function cancelCompetitorJobs(tenantId, projectId, competitorId, reasonCode) {
+  const tid = String(tenantId || ''), pid = String(projectId || ''), cid = String(competitorId || '');
+  if (!tid || !pid || !cid) return { cancelled: 0 };
+  let rows = [];
+  try {
+    rows = getDb().prepare(`SELECT job_id, attempt_id FROM collection_jobs
+      WHERE tenant_id=? AND project_id=? AND competitor_id=? AND status IN ('pending','running')`)
+      .all(tid, pid, cid);
+  } catch (e) { return { cancelled: 0 }; }
+  let cancelled = 0;
+  for (const r of rows) {
+    try {
+      cancelCollectionJobAndAttempt({ tenantId: tid, jobId: r.job_id, attemptId: r.attempt_id, reasonCode: reasonCode || 'brand_removed_from_project' });
+      cancelled++;
+    } catch (e) { /* 单条失败不影响其余；下轮 reconcile 兜底 */ }
+  }
+  return { cancelled };
+}
+
 // 该任务是否属于「已被移出项目」的首采 item（返回取消上下文，供 tick 统一取消）
 function cancelledScopeOf(job) {
   try {
@@ -659,5 +682,6 @@ module.exports = {
   getDb, enqueue, claim, heartbeat, finish, reclaimExpired, reconcileAbandoned,
   executeJob, tick, startWorker, stopWorker, setExecutorForTest, list, getJob,
   cancelCollectionJobAndAttempt, cancelledScopeOf, isCancelledScope, CANCEL_TEXT,
+  cancelCompetitorJobs, // SC-10 r2 §四：品牌移出项目 → 该项目该品牌全部未终结任务双终结
   loadCompetitor, // R4.14：暴露给回归测试（市场回退口径），不对外暴露 HTTP 面
 };

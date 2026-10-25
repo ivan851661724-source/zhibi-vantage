@@ -31,6 +31,18 @@ const Logger = require('./logger.js');
 const M = require('../lib/metrics.js');
 const { projFile } = require('../core/state-store.js');
 
+// ---------- 写失败日志的安全 reason code ----------
+// observation-diff / intel-inbox 的 reason 形如 'WRITE_FAILED:<数据库错误原文>'，
+// 冒号后可能带路径、SQL 片段或正文——日志只取冒号前的代码段并过白名单，
+// 不匹配记 'REDACTED'；绝不记录 URL、查询密钥、调用栈与正文（05 §11 词表纪律）。
+const SAFE_REASON_CODE = /^[A-Z][A-Z0-9_]{0,40}$/;
+function safeReasonCode(writeResult) {
+  const raw = writeResult && writeResult.rec && typeof writeResult.rec.reason === 'string' ? writeResult.rec.reason : null;
+  if (!raw) return null;
+  const code = raw.split(':')[0];
+  return SAFE_REASON_CODE.test(code) ? code : 'REDACTED';
+}
+
 function medianOf(nums) {
   const s = nums.slice().sort((a, b) => a - b);
   const n = s.length;
@@ -422,7 +434,8 @@ async function executeWindow(target, windowId, deps, nowMs) {
                 failureReasons.event_write_failed = (failureReasons.event_write_failed || 0) + 1;
                 partialScan = true;
                 attempt('site_change', true);
-                try { Logger.error('intel event 写入失败（官网变化）', { tenantId: tid, projectId: pid, competitorId: comp.id, reason: (rec && rec.reason) || null }); } catch (e2) {}
+                // 写失败仍不提醒、不前移基线；日志只记安全 reason code（不泄漏 URL/密钥/栈/正文）
+                try { Logger.error('intel event 写入失败（官网变化）', { tenantId: tid, projectId: pid, competitorId: comp.id, reason: safeReasonCode(mr) }); } catch (e2) {}
               }
             } else {
               attempt('site_change', true);
@@ -664,4 +677,4 @@ function startTick(logger) {
 }
 function stopTick() { if (_timer) { clearInterval(_timer); _timer = null; } }
 
-module.exports = { dueWindows, jitterMsFor, executeWindow, runDueWindows, startTick, stopTick, medianOf, collectPublicSiteProducts, collectSiteFingerprint };
+module.exports = { dueWindows, jitterMsFor, executeWindow, runDueWindows, startTick, stopTick, medianOf, collectPublicSiteProducts, collectSiteFingerprint, safeReasonCode };

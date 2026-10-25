@@ -240,6 +240,34 @@ function listBrandLinksForProject(tenantId, projectId) {
     }));
 }
 
+// 项目成员关系对账（SC-10 r2 §四）：回收已不在项目内的品牌链接。
+// 项目状态文件是成员关系事实源；本函数只删 (tenant, project) 下**可验证**的失效链接：
+//   · competitor_ref 非空且不在保留集 → 删除该链接；
+//   · competitor_ref 为空 → 无法验证成员关系，保守保留并如实计数（unverifiable）。
+// 严禁删除：品牌历史记录 / Snapshot / Evidence / 品牌时间线 / 其他项目对同一品牌的链接
+// （本函数只碰 brand_project_links 的本项目行）。
+function reclaimProjectLinks(tenantId, projectId, keepCompetitorRefs) {
+  const db = getDb();
+  const tid = String(tenantId || ''), pid = String(projectId || '');
+  const keep = new Set((keepCompetitorRefs || []).map(r => String(r)));
+  const rows = db.prepare('SELECT link_id, competitor_ref FROM brand_project_links WHERE tenant_id=? AND project_id=?')
+    .all(tid, pid);
+  let reclaimed = 0, unverifiable = 0;
+  const linkIds = [];
+  const reclaimedRefs = [];
+  const del = db.prepare('DELETE FROM brand_project_links WHERE link_id=?');
+  for (const r of rows) {
+    const ref = r.competitor_ref == null ? null : String(r.competitor_ref);
+    if (!ref) { unverifiable++; continue; } // 无引用无法验证成员关系：保留
+    if (keep.has(ref)) continue;
+    del.run(r.link_id);
+    reclaimed++;
+    linkIds.push(r.link_id);
+    reclaimedRefs.push(ref);
+  }
+  return { reclaimed, unverifiable, kept: rows.length - reclaimed - unverifiable, linkIds, reclaimedRefs };
+}
+
 // ---------------- Brand Timeline Index ----------------
 // kind: price | product | promo | channel | voice | gap | monitor | correction | report
 // nature: observed（Vantage 当时观察到）| backfilled（后续补入的历史）|
@@ -431,7 +459,7 @@ module.exports = {
   SCHEMA_VERSION, TIMELINE_KINDS, TIMELINE_NATURES, REPORT_JOB_TTL_MS, REPORT_JOB_MAX_RETRY,
   getDb, closeDb, rid,
   upsertBrand, getBrand, listBrands,
-  linkProject, brandIdForCompetitor, linksForBrand, getLink, listBrandLinksForProject,
+  linkProject, brandIdForCompetitor, linksForBrand, getLink, listBrandLinksForProject, reclaimProjectLinks,
   appendTimeline, listTimeline,
   createReport, updateReport, getReport, listReports, addCitation, listCitations,
   enqueueReportJob, claimReportJob, heartbeatReportJob, finishReportJob, requeueReportJob, reclaimExpiredReportJobs, listReportJobs,

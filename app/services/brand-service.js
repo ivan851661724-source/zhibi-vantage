@@ -78,9 +78,16 @@ function domainOfUrl(u) {
 }
 
 // ---------- 同步：项目状态 competitors → Brand Record + Link（幂等） ----------
+// SC-10 r2 §四：项目状态文件是竞品成员关系的**事实源**。每次同步同时做三件事：
+//   ① 新增品牌链接（upsertBrand + linkProject，幂等）；
+//   ② 保留仍在项目中的链接；
+//   ③ 回收已不在项目中的 brand_project_links（只删链接，不删品牌历史/Snapshot/
+//      Evidence/时间线，不碰其他项目对同一品牌的链接）。
+// 回收后与首采/监控取消保持一致：该品牌在本项目的在途 job/attempt 双终结，
+// 不留 running；首采 item 转 cancelled（由 reconcileBatchPlan 完成，历史保留审计）。
 function syncProjectBrands(tenantId, projectId, state) {
   const st = state || loadProjectState(tenantId, projectId);
-  if (!st) return { synced: 0 };
+  if (!st) return { synced: 0 }; // 档案缺失：无法验证成员关系，绝不回收任何链接
   const list = Array.isArray(st.competitors) ? st.competitors : [];
   let n = 0;
   for (const c of list) {
@@ -95,7 +102,29 @@ function syncProjectBrands(tenantId, projectId, state) {
     BrandStore.linkProject({ tenantId, brandId: brand.brandId, projectId, competitorRef: c.id });
     n++;
   }
-  return { synced: n };
+  // ③ 回收失效链接（可验证口径：competitor_ref 非空且不在当前成员列表）
+  let reclaimed = 0, unverifiableKept = 0;
+  try {
+    const r = BrandStore.reclaimProjectLinks(tenantId, projectId, list.map(c => c && c.id).filter(Boolean));
+    reclaimed = r.reclaimed;
+    unverifiableKept = r.unverifiable;
+    // ④ 与首取消除法一致：被移出品牌的在途任务双终结，不留 running
+    if (reclaimed > 0) {
+      try {
+        const CollectJobs = require('./collect-jobs.js');
+        for (const cid of (r.reclaimedRefs || [])) {
+          CollectJobs.cancelCompetitorJobs(tenantId, projectId, cid, 'brand_removed_from_project');
+        }
+      } catch (e) { /* 取消失败不阻塞链接回收；下轮 reconcile/巡检兜底 */ }
+      // ⑤ 首采批次对账：item 转 cancelled（不是失败），历史保留审计
+      try {
+        const FC = require('./first-collection.js');
+        const batch = FC.getBatch(tenantId, projectId);
+        if (batch) FC.reconcileBatchPlan(batch.batch_id);
+      } catch (e) { /* 无批次：不存在首采任务，无需对账 */ }
+    }
+  } catch (e) { /* 回收失败不影响既有链接可读 */ }
+  return { synced: n, reclaimed, unverifiableKept };
 }
 
 // ---------- 覆盖：Registry 驱动，未接入 ≠ 未采集 ≠ 无数据 ----------
