@@ -23,6 +23,18 @@
 //     Scratch 区**，只对副本做查询；数据目录全程只读；
 //   · 执行前后对数据目录**全部文件**（递归）做 清单/大小/mtime/SHA-256 指纹比对，
 //     任一变化即失败退出。
+//
+// 🔴 SC-10 r3 P0 修复（--check 假通过）：
+//   · 旧实现的缺陷：列核验闭包 columnCheck 依赖 scratch 临时库，但 scratch 在
+//     实际调用 columnCheck 之前就被删除；读取异常被 catch 成 []，报告出现
+//     present:false，退出条件却只查缺表 → 照常打印「只读核验通过」并返回 0。
+//     SC-10 必需字段缺失时，部署前检查形同虚设。
+//   · 新实现：
+//     1) 删除 scratch **之前**，一次性读入全部表的列集合（colCache 内存缓存）；
+//     2) 报告与判定只读内存缓存，不保留任何依赖已删除 scratch 的闭包；
+//     3) 必需字段走单一清单 REQUIRED_COLUMNS；缺任一字段 → exit 1、
+//        输出 表名.字段名、不打印「只读核验通过」；
+//     4) scratch 清理入 finally：检查成功与失败都清理临时副本。
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -56,6 +68,14 @@ const REQUIRED_TABLES = [
   'watch_targets', 'monitoring_windows', 'watch_intents', 'watch_price_snapshots', 'watch_site_baselines',
   'intel_events', 'provider_verifications',
 ];
+
+// 🔴 SC-10 必需字段**单一清单**（表 → 列数组）：
+// --check 与 apply 的核验都只以此为准，杜绝两处口径漂移；缺任一字段即失败退出。
+const REQUIRED_COLUMNS = {
+  collection_jobs: ['collection_purpose', 'window_key'],
+  first_collection_items: ['in_scope', 'enqueue_generation', 'cancel_reason'],
+  monitoring_windows: ['events_pending', 'events_write_failed', 'events_duplicate'],
+};
 
 // ---------- 数据目录指纹（--check 专用）：递归全部文件 ----------
 // 记录 相对路径 → { size, mtimeMs, sha256 }；任一维度变化都算「目录被改动」。
@@ -104,8 +124,9 @@ function checkMode(dir) {
   }
   // 复制 *.db 连同 -wal/-shm 到临时目录（只读数据目录，副本上允许 SQLite 正常打开）
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'zhibi-migrate-check-'));
-  const dbs = {};
-  const colCache = {};
+  const dbs = {};      // 库文件 → 表名清单
+  const colCache = {}; // 表名 → 列名清单（**删除 scratch 之前一次性读入内存**）
+  let openError = null;
   try {
     const { DatabaseSync } = require('node:sqlite');
     for (const f of dbFiles) {
@@ -116,34 +137,43 @@ function checkMode(dir) {
       }
       // 副本以只读方式打开（双保险：即使代码写错也改不到数据目录）
       const h = new DatabaseSync(path.join(scratch, f), { readOnly: true });
-      dbs[f] = h.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
-      h.close();
-    }
-    // 列核验同样只读副本
-    const colOf = (t) => {
-      if (colCache[t]) return colCache[t];
-      for (const f of Object.keys(dbs)) {
-        if (!dbs[f].includes(t)) continue;
-        try {
-          const h = new DatabaseSync(path.join(scratch, f), { readOnly: true });
-          const cols = h.prepare('PRAGMA table_info(' + t + ')').all().map(r => r.name);
-          h.close();
-          colCache[t] = cols;
-          return cols;
-        } catch (e) { return []; }
+      try {
+        const tables = h.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+        dbs[f] = tables;
+        // 🔴 SC-10 r3 P0 修复：此刻 scratch 仍存在，一次性读入**全部表**的列集合。
+        // 此后报告与判定只读 colCache，绝不调用已删除的临时库。
+        for (const t of tables) {
+          if (colCache[t]) continue; // 同名表已在其他库读过（表不跨库重复）
+          colCache[t] = h.prepare('PRAGMA table_info("' + t.replace(/"/g, '""') + '")').all().map(r => r.name);
+        }
+      } finally {
+        h.close();
       }
-      return [];
-    };
-    var columnCheck = colOf; // 供下方报告使用
+    }
   } catch (e) {
-    console.error('[migrate] --check：副本打开失败 :: ' + String((e && e.message) || e).slice(0, 300));
-    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e2) {}
+    openError = e;
+  } finally {
+    // scratch 清理走可靠 finally：检查成功与失败都清理临时副本
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* 临时目录清理失败不影响结论 */ }
+  }
+  if (openError) {
+    console.error('[migrate] --check：副本打开失败 :: ' + String((openError && openError.message) || openError).slice(0, 300));
     process.exit(1);
   }
-  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) { /* 临时目录清理失败不影响结论 */ }
 
+  // ===== 以下判定只读内存缓存（dbs / colCache），禁止再打开任何数据库 =====
   const allTables = Array.from(new Set(Object.values(dbs).flat()));
   const missing = REQUIRED_TABLES.filter(t => !allTables.includes(t));
+  const missingColumns = [];
+  const sc10Columns = {};
+  for (const [t, cols] of Object.entries(REQUIRED_COLUMNS)) {
+    const have = colCache[t] || [];
+    sc10Columns[t] = cols.map(c => {
+      const present = have.includes(c);
+      if (!present) missingColumns.push(t + '.' + c);
+      return { column: c, present };
+    });
+  }
   const report = {
     dataDir: dir,
     mode: 'check',
@@ -151,19 +181,11 @@ function checkMode(dir) {
     dbFiles: Object.keys(dbs).sort(),
     tableCount: allTables.length,
     requiredMissing: missing,
-    sc10Columns: {},
+    requiredMissingColumns: missingColumns,
+    sc10Columns: sc10Columns,
   };
-  // SC-10 相关加法列核验（列集合已在只读副本上取回）
-  for (const [t, cols] of Object.entries({
-    collection_jobs: ['collection_purpose', 'window_key'],
-    first_collection_items: ['in_scope', 'enqueue_generation', 'cancel_reason'],
-    monitoring_windows: ['events_pending', 'events_write_failed', 'events_duplicate'],
-  })) {
-    const have = columnCheck(t);
-    report.sc10Columns[t] = cols.map(c => ({ column: c, present: have.includes(c) }));
-  }
 
-  // 前后指纹比对：数据目录必须逐字节不变
+  // 前后指纹比对：数据目录必须逐字节不变（失败检查同样遵守）
   const after = fingerprintDir(dir);
   const diffs = diffFingerprints(before, after);
   if (diffs.length) {
@@ -172,8 +194,9 @@ function checkMode(dir) {
     process.exit(1);
   }
 
-  if (missing.length) {
+  if (missing.length || missingColumns.length) {
     console.error('[migrate] 缺表: ' + JSON.stringify(missing));
+    console.error('[migrate] SC-10 必需字段缺失: ' + JSON.stringify(missingColumns));
     console.log(JSON.stringify(report, null, 2));
     process.exit(1);
   }
@@ -265,6 +288,7 @@ function applyMode(dir) {
     dbFiles: Object.keys(dbs).sort(),
     tableCount: allTables.length,
     requiredMissing: missing,
+    requiredMissingColumns: [],
     sc10Columns: {},
   };
   const colOf = (t) => {
@@ -272,23 +296,30 @@ function applyMode(dir) {
       if (!dbs[f].includes(t)) continue;
       try {
         const h = new DatabaseSync(path.join(dir, f));
-        const cols = h.prepare('PRAGMA table_info(' + t + ')').all().map(r => r.name);
+        const cols = h.prepare('PRAGMA table_info("' + t.replace(/"/g, '""') + '")').all().map(r => r.name);
         h.close();
         return cols;
       } catch (e) { return []; }
     }
     return [];
   };
-  for (const [t, cols] of Object.entries({
-    collection_jobs: ['collection_purpose', 'window_key'],
-    first_collection_items: ['in_scope', 'enqueue_generation', 'cancel_reason'],
-    monitoring_windows: ['events_pending', 'events_write_failed', 'events_duplicate'],
-  })) {
+  const missingColumns = [];
+  for (const [t, cols] of Object.entries(REQUIRED_COLUMNS)) {
     const have = colOf(t);
-    report.sc10Columns[t] = cols.map(c => ({ column: c, present: have.includes(c) }));
+    report.sc10Columns[t] = cols.map(c => {
+      const present = have.includes(c);
+      if (!present) missingColumns.push(t + '.' + c);
+      return { column: c, present };
+    });
   }
+  report.requiredMissingColumns = missingColumns;
   if (missing.length) {
     console.error('[migrate] 缺表: ' + JSON.stringify(missing));
+    console.log(JSON.stringify(report, null, 2));
+    process.exit(1);
+  }
+  if (missingColumns.length) {
+    console.error('[migrate] SC-10 必需字段缺失: ' + JSON.stringify(missingColumns));
     console.log(JSON.stringify(report, null, 2));
     process.exit(1);
   }
