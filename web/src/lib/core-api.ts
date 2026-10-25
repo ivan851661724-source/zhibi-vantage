@@ -99,6 +99,8 @@ export interface BrandCoverageDimension {
   evidenceCount: number;
   sourceCount: number;
   latestFailureText: string | null;
+  // SC-12 §三.3：用户级失败种类（非内部码）
+  failureKind?: string | null;
 }
 export interface BrandCoverageSummary {
   available: number;

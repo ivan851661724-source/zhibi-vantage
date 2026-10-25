@@ -383,10 +383,10 @@ function buildBrandCoverage(tenantId, projectId, competitor) {
       sourceCount: hosts.size,
       // 失败原因：维度真失败 或 旧数据可用但最新失败，都要如实可见
       latestFailureText: failedAtt && (state === 'failed' || usingPreviousData) ? (failedAtt.errorUserText || null) : null,
-      // SC-12 §三.3：失败分类（source_status / error_class）只在后台与诊断区使用；
-      // 用户卡片只展示由它派生出的短状态文案（禁止出现内部码）。
-      latestFailureStatus: failedAtt ? (failedAtt.sourceStatus || failedAtt.source_status || null) : null,
-      latestFailureClass: failedAtt ? (failedAtt.errorClass || failedAtt.error_class || null) : null,
+      // SC-12 §三.3：失败分类只以**用户级派生分类**暴露（failureKind）。
+      // 原始 source_status / error_class（internal_error、adapter_output_invalid 等）
+      // 属内部码，不得进入用户可见载荷（§三 红线：用户页面不得出现内部枚举）。
+      failureKind: failedAtt ? failureKindOf(failedAtt) : null,
       capabilities: caps.map(c => ({ code: c.code, label: c.displayName, displayName: c.displayName, maturity: c.maturity })),
     });
   }
@@ -999,6 +999,25 @@ function buildCollectionDigest(tenantId, projectId, comp) {
 
 // ---------- 品牌视图 ----------
 
+// SC-12 §三.3：把内部失败分类（source_status / error_class）映射为**用户级**失败种类。
+// 用户侧只允许出现下面这组 kind；internal_error / adapter_output_invalid 等内部枚举一律不出现在用户载荷。
+const FAILURE_KIND_BY_STATUS = Object.freeze({
+  blocked: 'source_blocked',
+  unavailable: 'source_unreachable',
+  timeout: 'source_unreachable',
+  rate_limited: 'source_rate_limited',
+  parse_failed: 'source_parse_failed',
+});
+function failureKindOf(failedAtt) {
+  const ss = failedAtt.sourceStatus || failedAtt.source_status || '';
+  const ec = failedAtt.errorClass || failedAtt.error_class || '';
+  if (ss && FAILURE_KIND_BY_STATUS[ss]) return FAILURE_KIND_BY_STATUS[ss];
+  if (ec === 'adapter_output_invalid') return 'source_output_incomplete';
+  if (ss === 'not_configured') return 'awaiting_config';
+  if (ss) return 'needs_attention';
+  return ec ? 'needs_attention' : null;
+}
+
 // SC-12 §三.3：品牌卡片短状态（用户可见的唯一真源）
 // 规则：
 //   · 当前状态由最新一次有效 attempt 决定（历史 internal_error 不得继续占据卡片主状态）；
@@ -1020,12 +1039,11 @@ function cardStatusOf(coverage) {
     };
   }
   if (failed.length) {
-    const d0 = failed[0];
-    const ss = d0.latestFailureStatus || '';
-    if (ss === 'unavailable' || ss === 'timeout') return { code: 'source_unreachable', text: '来源暂时不可达', detail: '可稍后重新检查' };
-    if (ss === 'blocked') return { code: 'source_blocked', text: '来源拒绝了本次访问', detail: '可在数据覆盖与来源查看' };
-    if (ss === 'rate_limited') return { code: 'source_rate_limited', text: '来源访问频率受限', detail: '可稍后重新检查' };
-    if (ss === 'parse_failed') return { code: 'source_parse_failed', text: '来源内容暂时无法解析', detail: '原始数据已保留' };
+    const kind = failed[0].failureKind || '';
+    if (kind === 'source_unreachable') return { code: 'source_unreachable', text: '来源暂时不可达', detail: '可稍后重新检查' };
+    if (kind === 'source_blocked') return { code: 'source_blocked', text: '来源拒绝了本次访问', detail: '可在数据覆盖与来源查看' };
+    if (kind === 'source_rate_limited') return { code: 'source_rate_limited', text: '来源访问频率受限', detail: '可稍后重新检查' };
+    if (kind === 'source_parse_failed') return { code: 'source_parse_failed', text: '来源内容暂时无法解析', detail: '原始数据已保留' };
     return { code: 'needs_attention', text: '采集未完成，需要重试', detail: '可在数据覆盖与来源查看原因' };
   }
   if (available.length) {

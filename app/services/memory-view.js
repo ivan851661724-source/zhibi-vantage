@@ -13,7 +13,7 @@ const SOURCE_KIND_TEXT = Object.freeze({
   live_observation: '直接观察',
   archived_observation: '历史存档观察',
   licensed_dataset: '授权数据服务',
-  derived_event: '系统推导事件',
+  derived_event: '基于已核验数据的变化',
 });
 const PRECISION_TEXT = Object.freeze({
   exact: '精确到时刻',

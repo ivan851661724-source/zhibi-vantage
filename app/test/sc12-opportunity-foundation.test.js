@@ -257,3 +257,23 @@ test('O6 失败分类映射到短状态（来源拒绝/限流/不可达/解析�
     assert.ok(v.status.text && v.status.text.length <= 24, '状态文案短: ' + v.status.text);
   }
 });
+
+// ---------- O7 用户可见载荷不含内部失败码（SC-12 §三 红线） ----------
+test('O7 品牌视图整份载荷不含 internal_error / adapter_output_invalid / source_status 等内部码', () => {
+  seedFailure('c-delta', 'official_site_profile', 'website_products', 'internal_error', 'adapter_output_invalid', 'real-fail');
+  seedFailure('c-epsilon', 'public_reviews', 'reviews_reputation', 'blocked', 'blocked', 'blocked-fail');
+  const all = views();
+  for (const v of all) {
+    const blob = JSON.stringify(v);
+    for (const w of ['internal_error', 'adapter_output_invalid', 'source_status', 'sourceStatus', 'error_class', 'errorClass', 'jobId', 'claimToken', 'attemptId']) {
+      assert.ok(!blob.includes(w), '载荷不得出现内部码 ' + w + '：' + blob.slice(0, 200));
+    }
+    // 用户级失败种类仍必须存在（诊断需要），且取值必须是白名单
+    for (const d of v.brandCoverage.dimensions) {
+      if (d.failureKind) {
+        assert.ok(['source_blocked', 'source_unreachable', 'source_rate_limited', 'source_parse_failed', 'source_output_incomplete', 'awaiting_config', 'needs_attention'].includes(d.failureKind),
+          'failureKind 必须在用户级白名单内：' + d.failureKind);
+      }
+    }
+  }
+});
