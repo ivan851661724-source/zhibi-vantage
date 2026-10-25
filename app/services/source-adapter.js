@@ -1603,6 +1603,33 @@ function classifyReviewPages(input) {
   return { kind: 'empty', emptyReason: unattributed > 0 ? 'no_attributable_pages' : 'no_candidate_pages' };
 }
 
+// 🔴 SC-11：评论「检查完成但零可归属结果」的统一终态（无候选 / 无可归属页同口径）：
+// 成功零观察（≠ 失败 ≠ 未接入）、无 Evidence、identity 保持 unresolved。
+// · suppress（provider 运行模式）：只产出结构化 empty 结果，终态写入权归执行器
+//   （commitProviderEmpty 落 success/零观察，与 shopify_catalog 空目录同款）；
+// · legacy（非 suppress）：本函数内落终态（fencing 贯穿）。
+// 绝不走 finalizeOutput/validateOutput——零快照的 success 输出过不了证据级可追溯
+// 校验，那正是把「检查完成但无结果」误判成内部错误的老路（测试服 37/37 全灭根因）。
+// out.summary 必须已含 emptyReason（normalize 从 res.emptyReason 带入）。
+async function reviewsEmptyResult(ctx, ident, out, suppress) {
+  if (suppress) return { providerOk: true, empty: true, ident, capability: 'public_reviews', summary: out.summary, snapshotIds: [], sourceUrl: null };
+  try {
+    assertFence(ctx);
+    const done = SurfaceStore.completeAttempt(ctx.tenantId, ctx.attemptId, {
+      status: 'success', sourceStatus: 'success', observations: [],
+      endedAt: ctx.nowMs ? new Date(ctx.nowMs).toISOString() : undefined,
+      snapshotIds: [], evidenceIds: [],
+      summary: out.summary,
+    }, ctx.fence);
+    try { recordIdentity(ctx, ident, 'empty_success', [], []); }
+    catch (e2) { if (!(e2 && e2.fenced)) throw e2; }
+    return Object.assign({ deduped: false, attempt: done }, { sourceUrl: null, entityKey: out.entityKey, emptyWindow: true });
+  } catch (e) {
+    if (e && e.fenced) return { deduped: false, fenced: true, attempt: null };
+    throw e;
+  }
+}
+
 const reviewsAdapter = {
   code: 'reviews',
   displayName: '口碑与评论（公开页面）',
@@ -1656,6 +1683,10 @@ const reviewsAdapter = {
         methodologyVersion: REV_ADAPTER_VERSION,
         sampleNote: '样本为本次采集窗口内通过校验的公开页面，不等于全网口碑',
         partialScan: partial, partialScanReason: partial ? (res.partialScanReason || null) : null,
+        // 零观察成因（05 §11/SC-05：「无记录」≠「没有变化」——成功零结果必须带成因）：
+        //   no_candidate_pages    搜索完成但没找到候选页
+        //   no_attributable_pages 抓到了页面但没有可归属本品牌的页面
+        emptyReason: res.emptyReason || null,
       },
       snapshotIds: (res.snapshotIds || []).slice(), evidenceSnapshotIds: (res.snapshotIds || []).slice(),
       currency: null, currencySnapshotId: null, currencyStatus: 'unknown',
@@ -1696,24 +1727,40 @@ const reviewsAdapter = {
     const domain = Net.domainOf(comp.url || '');
     let candidates = [];
     try {
-      const r = await Search.fanoutSearch(
+      // 🔴 SC-11 测试服真实复现 P0：fanoutSearch(queries, config, gl) 的返回契约是
+      // 「每查询一个 searchProvider 结果」的**数组**（app/research/discover.js 同款用法：
+      // fanout.length 与 fanout[i].results），不是单个 {results} 对象。旧代码按对象取
+      // .results 恒得 undefined → 候选恒为 0 → 每次评论采集都落入「无候选」分支，
+      // 产出 outcome=success 但零快照的输出，被 validateOutput 的
+      // 「evidence-grade provenance requires >=1 snapshot」拒绝（errorClass
+      // adapter_output_invalid），执行器链耗尽又把错误分类当 source_status 传入
+      // completeAttempt 直接抛错（collect-jobs.js 同轮修复）——37 个 job 全灭。
+      const fanoutRows = await Search.fanoutSearch(
         [brand + ' reviews', brand + ' customer reviews ratings', (domain ? domain + ' reviews' : brand + ' reviews site:trustpilot.com OR site:reddit.com')].filter(Boolean),
-        cfg, 'us', 'reviews'
+        cfg, 'us'
       );
-      candidates = (r && r.results || []).map(x => ({ url: x.url || x.link, title: x.title || null })).filter(c => c.url).slice(0, 5);
+      const seenUrl = new Set();
+      for (const row of (Array.isArray(fanoutRows) ? fanoutRows : [])) {
+        for (const x of (row && row.results) || []) {
+          const url = x.url || x.link;
+          if (!url || seenUrl.has(url)) continue; // 跨查询去重（同页命中多查询只采一次）
+          seenUrl.add(url);
+          candidates.push({ url, title: x.title || null });
+          if (candidates.length >= 5) break;
+        }
+        if (candidates.length >= 5) break;
+      }
     } catch (e) {
       return failAttempt(ctx, { ok: false, error: 'unavailable', errorUserText: '候选评论页发现失败，稍后可重试。' });
     }
     if (!candidates.length) {
-      // 采集窗口无可归属公开评论页：成功零观察（≠ 失败 ≠ 未接入）
-      const res = { ok: true, pages: [], snapshotIds: [], partialScan: false, periodStart: null, periodEnd: null, sourceUrl: null };
+      // 采集窗口无可归属公开评论页：成功零观察（≠ 失败 ≠ 未接入）。
+      // 🔴 SC-11：走统一 empty 终态（无 Evidence、identity 保持 unresolved）——
+      // 绝不走 finalizeOutput/validateOutput：零快照的 success 输出过不了证据级
+      // 可追溯校验，那正是把「检查完成但无结果」误判成内部错误的老路。
+      const res = { ok: true, pages: [], snapshotIds: [], partialScan: false, periodStart: null, periodEnd: null, sourceUrl: null, emptyReason: 'no_candidate_pages' };
       const out = this.normalize(res, ctx);
-      if (suppress) return { providerOk: true, ident, raw: res, out };
-      let fin;
-      try { fin = await finalizeOutput(ctx, res, out); }
-      catch (e) { if (e && e.fenced) return { deduped: false, fenced: true, attempt: null }; throw e; }
-      if (fin.invalid || fin.evidenceFailed) return fin;
-      return Object.assign(fin, { sourceUrl: out.sourceUrl, entityKey: out.entityKey, emptyWindow: true });
+      return reviewsEmptyResult(ctx, ident, out, suppress);
     }
     // 逐页抓取：FetchGate/robots/SSRF 全合规（Net.fetchPage）；品牌归属粗校验（标题/URL 含品牌名或域名）
     // 🔴 SC-07 §1：候选页「全部抓不到」与「检查完成但没有可归属页面」必须分开——
@@ -1728,12 +1775,16 @@ const reviewsAdapter = {
         if (fr && fr.status) lastFailStatus = fr.status;
         continue; // robots 禁止/失败页不入库（不伪装成功）
       }
-      if (fr.snapshotId) snapshotIds.push(fr.snapshotId);
       let text = '';
       try { text = Net.stripHtml(fr.html || '').slice(0, 800); } catch (e) { text = String(fr.html || '').slice(0, 800); }
       const urlL = String(c.url).toLowerCase(); const titleL = String(c.title || '').toLowerCase(); const brandL = brand.toLowerCase();
       const related = (domain && urlL.includes(domain)) || (brandL && (urlL.includes(brandL) || titleL.includes(brandL)));
       if (!related) { pageUnattributed += 1; continue; } // 归属校验不过 → 不入库（identity 保持 unresolved）
+      // 🔴 SC-11：快照引用放在归属校验**之后**——只有可归属页的快照才进入 attempt 的
+      // snapshotIds/evidenceSnapshotIds。不可归属页的抓取记录只留在 snapshot 存储审计层，
+      // 不被本次观察引用为证据（否则「检查完成但无可归属页」会产出以非本品牌页面为据的
+      // Evidence 并误升 identity，违背上一行的纪律）。
+      if (fr.snapshotId) snapshotIds.push(fr.snapshotId);
       // 评分抽取：schema.org aggregateRating（JSON-LD）→ meta → 评分模式（可信度递减）
       let rating = null, reviewCount = null;
       try {
@@ -1767,6 +1818,20 @@ const reviewsAdapter = {
           ? '对方站点拒绝了公开页面访问，稍后可重试。'
           : '候选公开页面暂不可读，稍后可重试。';
       return failAttempt(ctx, { ok: false, status: lastFailStatus || null, error: 'candidate_pages_unreadable', snapshotId: snapshotIds[snapshotIds.length - 1] || null }, { errorUserText: text });
+    }
+    if (verdict.kind === 'empty') {
+      // 检查完成但无可归属页面（no_attributable_pages）：与「无候选」同口径——
+      // 成功零观察（带成因）、无 Evidence、identity 保持 unresolved。
+      const res = {
+        ok: true, pages: [], snapshotIds: [], partialScan: false,
+        periodStart: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10),
+        periodEnd: new Date().toISOString().slice(0, 10),
+        sourceUrl: null,
+        emptyReason: verdict.emptyReason || 'no_attributable_pages',
+        pageAttempts, pageFetchFailed, pageUnattributed,
+      };
+      const out = this.normalize(res, ctx);
+      return reviewsEmptyResult(ctx, ident, out, suppress);
     }
     const res = {
       ok: true, pages, snapshotIds, partialScan: false,

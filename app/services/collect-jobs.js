@@ -416,12 +416,30 @@ async function executeJob(job) {
 
   // 链耗尽：唯一最终失败（§二.3——只产生一个可解释的最终失败）
   const firstFail = providerResults.find(p => p.failed);
-  const cls = (firstFail && firstFail.errorClass) || 'unavailable';
+  const errorClass = (firstFail && firstFail.errorClass) || 'unavailable';
+  // 🔴 SC-11 测试服真实复现 P0：errorClass（内部分类词表，含 adapter_output_invalid 等
+  // 非 05 §11 值）与 sourceStatus（05 §11 冻结八值）是两套词表。旧代码把 errorClass
+  // 直接当 sourceStatus 传入 → completeAttempt 抛 invalid source_status → 外层 catch
+  // 把真实失败分类抹成 internal_error（测试服 37 个 public_reviews job 全部中招，
+  // 用户看到「采集时发生内部问题」而不是真实成因）。
+  // 归一规则：errorClass 本身是合法 sourceStatus 时原样使用；否则归 internal_error
+  // （采集管线故障，不是来源侧故障，不冤枉来源）——与 source-adapter.js
+  // finalizeOutput 校验失败分支同口径（sourceStatus:'internal_error' +
+  // errorClass:'adapter_output_invalid'）。
+  const sourceStatus = SurfaceStore.SOURCE_STATUSES.has(errorClass) ? errorClass : 'internal_error';
   const done = SurfaceStore.completeAttempt(job.tenantId, job.attemptId, {
-    status: 'failed', sourceStatus: cls, errorClass: cls,
-    errorUserText: Adapters.FAILURE_TEXT[cls] || Adapters.FAILURE_TEXT.unavailable,
+    status: 'failed', sourceStatus, errorClass,
+    errorUserText: Adapters.FAILURE_TEXT[errorClass] || Adapters.FAILURE_TEXT.unavailable,
     observations: [], snapshotIds: [], evidenceIds: [],
   }, fence);
+  // 链耗尽可观测性：首个失败的精确分类 + 完整性校验错误（无内部细节外泄，仅运维日志）
+  try {
+    require('./logger.js').error('data_surface_chain_exhausted', {
+      jobId: job.jobId, capability: job.capability, competitorId: job.competitorId,
+      errorClass, sourceStatus,
+      invalidErrors: ((firstFail && firstFail.invalidErrors) || []).slice(0, 5),
+    });
+  } catch (e) { /* 日志失败不影响终态落账 */ }
   return { attempt: done, providerResults, externalCalls: executed.length, chainExhausted: true, strategy: chain.strategy };
 }
 

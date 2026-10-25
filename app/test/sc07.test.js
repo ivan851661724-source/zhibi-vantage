@@ -159,11 +159,18 @@ test('S4 公开评论：候选页全部受限 → failed；真正检查完但无
   // 搜索链可用（等价于部署只配了一个 provider）：采集才不会被 CONFIG_MISSING 挡在门外
   const prevKey = process.env.SERPER_API_KEY;
   process.env.SERPER_API_KEY = 'test-key-not-real';
-  // 搜索链「可用」：直接注入候选（不打真实搜索）
-  Search.fanoutSearch = async () => ({ results: [
-    { url: 'https://reviewbrand-s4.example.com/reviews', title: 'ReviewBrand reviews' },
-    { url: 'https://trustpilot.example.com/reviewbrand-s4', title: 'ReviewBrand reviews' },
-  ] });
+  // 搜索链「可用」：直接注入候选（不打真实搜索）。
+  // 🔴 SC-11：fanoutSearch 真实契约是「每查询一个 searchProvider 结果」的**数组**
+  // （discover.js 同款）；旧替身返回 {results} 单对象，恰好与 reviewsAdapter 的
+  // 错误消费方式互锁，测试永远绿而线上 37/37 全灭。替身必须对齐真实契约。
+  Search.fanoutSearch = async () => [
+    { results: [
+      { url: 'https://reviewbrand-s4.example.com/reviews', title: 'ReviewBrand reviews' },
+      { url: 'https://trustpilot.example.com/reviewbrand-s4', title: 'ReviewBrand reviews' },
+    ] },
+    { results: [] },
+    { results: [] },
+  ];
 
   try {
     // ① 全部限流 → failed / rate_limited，不得落成 success 0
