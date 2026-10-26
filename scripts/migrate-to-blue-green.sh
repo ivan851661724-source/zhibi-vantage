@@ -8,6 +8,8 @@
 set -euo pipefail
 cd /opt/zhibi-vantage
 
+# 实际运行版本（不是工作树 HEAD）：迁移时运行中的 web 镜像来自哪个 commit 必须显式传入
+DEPLOYED_SHA="${DEPLOYED_SHA:-}"
 WEB_PORT=3002
 BLUE=zhibi-web-blue
 BLUE_PORT=3102
@@ -92,11 +94,11 @@ if [ "$N" != "200" ] || [ "$H" != "200" ]; then
   exit 1
 fi
 
-log "7/7 初始化部署状态"
+log "7/7 初始化部署状态（deployed_sha=$SHA）"
 mkdir -p "$STATE_DIR"
 WEB_IMG=$(docker inspect -f '{{.Image}}' "$BLUE")
 API_IMG=$(docker inspect -f '{{.Image}}' zhibi-vantage)
-SHA=$(git rev-parse HEAD)
+SHA="${DEPLOYED_SHA:-$(git rev-parse HEAD)}"
 printf '{"deployed_sha":"%s","deployed_web_image_id":"%s","deployed_api_image_id":"%s","active_web_slot":"blue","failed_sha":"","deployed_at":"%s"}\n' \
   "$SHA" "$WEB_IMG" "$API_IMG" "$(date -u '+%FT%TZ')" > "$STATE"
 log "state: $STATE"
