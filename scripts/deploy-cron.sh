@@ -141,7 +141,8 @@ fi
 check_static_assets() { # 解析 /login HTML，校验全部 /_next/static 资源；返回非 0 即失败
   local html assets asset expect_ct got_ct code n_fail=0
   html=$(curl -s -m 5 "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null) || return 1
-  assets=$(printf '%s' "$html" | grep -oE '/_next/static/[^"]+' | sort -u)
+  # 排除反斜杠：RSC 内嵌数据中的路径带 \" 转义，避免提取出带尾部 \ 的假 URL（会命中 308）
+  assets=$(printf '%s' "$html" | grep -oE '/_next/static/[^"\\]+' | sort -u)
   [ -n "$assets" ] || return 1
   while IFS= read -r asset; do
     [ -n "$asset" ] || continue

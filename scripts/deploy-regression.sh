@@ -19,7 +19,8 @@ bad()  { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
 
 echo "== R3 页面/静态资源同 release =="
 html=$(curl -s -m 5 "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null)
-assets=$(printf '%s' "$html" | grep -oE '/_next/static/[^"]+' | sort -u)
+# 排除反斜杠：RSC 内嵌数据中的路径带 \" 转义，避免提取出带尾部 \ 的假 URL（会命中 308）
+assets=$(printf '%s' "$html" | grep -oE '/_next/static/[^"\\]+' | sort -u)
 if [ -z "$assets" ]; then
   bad "无法从 /login HTML 解析出静态资源"
 else
