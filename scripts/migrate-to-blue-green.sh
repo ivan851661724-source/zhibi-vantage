@@ -32,7 +32,7 @@ curl -sf -o /dev/null -m 5 "http://127.0.0.1:${WEB_PORT}/login" || { log "旧入
 log "1/7 安装 nginx 配置"
 install -D -m 644 "$SRC_CONF" /etc/nginx/conf.d/zhibi.conf
 install -D -m 644 "$SRC_MAINT" /etc/nginx/zhibi-maintenance.html
-printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\n' "$BLUE_PORT" > /etc/nginx/conf.d/zhibi-upstream.conf
+printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\nupstream zhibi_web_previous {\n    server 127.0.0.1:%s;\n    keepalive 8;\n}\n' "$BLUE_PORT" "$BLUE_PORT" > /etc/nginx/conf.d/zhibi-upstream.conf
 nginx -t >/dev/null 2>&1 || { log "nginx 配置语法错误，中止（未改动运行服务）"; exit 1; }
 
 log "2/7 从当前 web 容器克隆 blue 槽（3102）"
@@ -88,7 +88,7 @@ H=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${WEB_PORT}/he
 log "新入口 /login=$N /healthz=$H"
 if [ "$N" != "200" ] || [ "$H" != "200" ]; then
   log "新入口不可用，回退 compose 直连"
-  printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\n' "$BLUE_PORT" > /etc/nginx/conf.d/zhibi-upstream.conf
+  printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\nupstream zhibi_web_previous {\n    server 127.0.0.1:%s;\n    keepalive 8;\n}\n' "$BLUE_PORT" "$BLUE_PORT" > /etc/nginx/conf.d/zhibi-upstream.conf
   docker rm -f "$BLUE" >/dev/null 2>&1 || true
   docker start zhibi-web >/dev/null 2>&1 || true
   exit 1

@@ -81,7 +81,7 @@ rollback() {
   touch "$NGX_MAINT"; MAINT_ON=1
 
   if [ "$NGX_SWITCHED" = "1" ] && [ -n "$ACTIVE_PORT" ]; then
-    printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\n' "$ACTIVE_PORT" > "$NGX_UPSTREAM"
+    printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\nupstream zhibi_web_previous {\n    server 127.0.0.1:%s;\n    keepalive 8;\n}\n' "$ACTIVE_PORT" "$ACTIVE_PORT" > "$NGX_UPSTREAM"
     nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null && echo "  入口已切回旧槽 $ACTIVE_PORT" || echo "  警告：nginx 回切失败"
     NGX_SWITCHED=0
   fi
@@ -258,7 +258,11 @@ rm -f "$NGX_MAINT"; MAINT_ON=0
 echo "新后端 healthy，维护态关闭"
 
 STAGE="nginx 切换"
-printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\n' "$CAND_PORT" > "$NGX_UPSTREAM.new"
+# 同时登记上一槽：静态资源 404 时回退（排空期内旧页面仍能加载旧 chunk）
+write_upstream() { # $1=active_port $2=previous_port
+  printf 'upstream zhibi_web_active {\n    server 127.0.0.1:%s;\n    keepalive 32;\n}\nupstream zhibi_web_previous {\n    server 127.0.0.1:%s;\n    keepalive 8;\n}\n' "$1" "$2" > "$NGX_UPSTREAM.new"
+}
+write_upstream "$CAND_PORT" "$ACTIVE_PORT"
 nginx -t >/dev/null 2>&1 || { echo "nginx -t 失败，放弃切换"; rm -f "$NGX_UPSTREAM.new"; STAGE="nginx 校验"; exit 1; }
 mv "$NGX_UPSTREAM.new" "$NGX_UPSTREAM"
 nginx -s reload
@@ -309,6 +313,9 @@ STAGE="旧槽排空"
 echo "$(date '+%F %T') 旧槽 $ACTIVE_NAME 排空 120s 后停止"
 sleep 120
 docker stop "$ACTIVE_NAME" >/dev/null 2>&1 || true
+# 旧槽停止后把 previous 指向当前槽，避免静态回退命中已停容器
+write_upstream "$CAND_PORT" "$CAND_PORT"
+nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
 echo "旧槽已停止（zhibi-web:rollback 保留供回滚）"
 
 docker image prune -f --filter "until=48h" >/dev/null 2>&1 || true
