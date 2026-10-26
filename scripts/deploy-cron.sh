@@ -123,9 +123,12 @@ on_exit() {
   if [ "$rc" -ne 0 ] && [ "$SERVICE_TOUCHED" = "1" ] && [ "$ROLLBACK_DONE" = "0" ]; then
     echo "$(date '+%F %T') 非零退出（stage=$STAGE），开始回滚"
     rollback || true
-    # 回滚后记录失败 SHA（deployed_sha 保持旧版本不变）
-    [ -n "$NEW" ] && state_write "$(state_get deployed_sha)" "$(state_get deployed_web_image_id)" \
-      "$(state_get deployed_api_image_id)" "$(state_get active_web_slot)" "$NEW" "$(state_get deployed_at)"
+    # 回滚后记录失败 SHA（deployed_sha 保持旧版本不变）。
+    # 不得把"正在运行的版本"记为失败版本——两者相等属于语义矛盾。
+    if [ -n "$NEW" ] && [ "$NEW" != "$(state_get deployed_sha)" ]; then
+      state_write "$(state_get deployed_sha)" "$(state_get deployed_web_image_id)" \
+        "$(state_get deployed_api_image_id)" "$(state_get active_web_slot)" "$NEW" "$(state_get deployed_at)"
+    fi
   fi
   dur=$(( SECONDS - START_TS ))
   if [ "$NOTIFY" = "1" ]; then
