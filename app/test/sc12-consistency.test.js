@@ -81,7 +81,7 @@ function mkEvidence(snapshotId, hint) {
 function seedProducts(compId, items, opts) {
   const o = opts || {};
   const mk = SurfaceStore.createAttempt({
-    tenantId: TID, projectId: PID, competitorId: compId, capability: 'shopify_catalog',
+    tenantId: TID, projectId: o.projectId || PID, competitorId: compId, capability: 'shopify_catalog',
     dimension: 'website_products', trigger: 'manual',
     idempotencyKey: 'sc12c-' + compId + '-' + (o.key || 'k'), nowMs: o.nowMs || Date.now(),
   });
@@ -102,7 +102,7 @@ function seedProducts(compId, items, opts) {
 function seedAttempt(compId, capability, dimension, opts) {
   const o = opts || {};
   const mk = SurfaceStore.createAttempt({
-    tenantId: TID, projectId: PID, competitorId: compId, capability, dimension,
+    tenantId: TID, projectId: o.projectId || PID, competitorId: compId, capability, dimension,
     trigger: 'manual', idempotencyKey: 'sc12c-' + capability + '-' + compId + '-' + (o.key || 'k'),
     nowMs: o.nowMs || Date.now(),
   });
@@ -120,6 +120,60 @@ function seedAttempt(compId, capability, dimension, opts) {
 }
 
 function foundation() { return Foundation.buildOpportunityFoundation(TID, PID); }
+function foundationOf(pid, opts) { return Foundation.buildOpportunityFoundation(TID, pid, opts || {}); }
+
+// 新建独立项目（competitors 列表 + 状态落盘）——避免新夹具污染既有断言
+async function makeProject(pid, competitors) {
+  db.saveProject({ id: pid, tenantId: TID, track: 'SC12C', competitors: '[]', createdAt: new Date().toISOString(), discoveredAt: new Date().toISOString() });
+  const f = projFile(pid, TID);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  saveState({
+    projectId: pid, tenantId: TID, track: 'SC12C', discoveredAt: new Date().toISOString(),
+    intent: { regions: ['us'], category: 'pet' }, competitors,
+  });
+  for (let i = 0; i < 200 && !fs.existsSync(f); i++) await new Promise(r => setTimeout(r, 20));
+  assert.ok(fs.existsSync(f), '项目状态文件已落盘: ' + pid);
+}
+
+function brandIdOfProject(pid, competitorId) {
+  const v = BrandSvc.listBrandViews(TID, pid).find(x => x.competitorId === competitorId);
+  return v ? v.brandId : null;
+}
+
+// 目录级时序事实（catalog.*）——用于跨层币种一致性测试
+function seedCatalogFacts(compId, pid, opts) {
+  const o = opts || {};
+  const snap = mkSnapshot('https://' + compId + '-cat.example.com/products.json', '{"products":[]}');
+  const ev = mkEvidence(snap.snapshot_id, compId + '-cat');
+  const ent = MemStore.upsertEntity({
+    tenantId: TID, projectId: pid, competitorId: compId,
+    canonicalBrandKey: 'domain:' + compId + '.example.com',
+    entityType: 'brand_catalog', sourcePlatform: 'shopify', externalId: compId + '.example.com',
+    entityKey: compId + '.example.com|catalog', displayName: compId + ' 目录',
+  });
+  const at = o.observedAt || new Date().toISOString();
+  for (const [type, val] of [
+    ['catalog.product_count', o.productCount != null ? o.productCount : 3],
+    ['catalog.price_min', o.priceMin],
+    ['catalog.price_median', o.priceMedian],
+    ['catalog.price_max', o.priceMax],
+  ]) {
+    const ver = MemStore.insertVersion({
+      tenantId: TID, projectId: pid, competitorId: compId, entityId: ent.entityId,
+      versionKey: 'v-' + type + '-' + at, sourceKind: 'live_observation', timePrecision: 'captured_only',
+      parserVersion: 'sc12c-r3', observedAt: at, sourceSnapshotIds: [], evidenceIds: [],
+    });
+    MemStore.insertFact({
+      tenantId: TID, projectId: pid, competitorId: compId, entityId: ent.entityId,
+      entityVersionId: ver.versionId, entityType: 'brand_catalog', factType: type,
+      valueNum: val, unit: null, currency: o.currency || 'USD',
+      measurementMethod: 'direct_observation', sourceKind: 'live_observation', sourceStatus: 'success',
+      timePrecision: 'captured_only', observedAt: at,
+      evidenceIds: [ev.evidence_id], snapshotIds: [snap.snapshot_id],
+    });
+  }
+  return { snapshotId: snap.snapshot_id, evidenceId: ev.evidence_id };
+}
 
 test.before(async () => {
   db.createTenant({ name: 'sc12c', email: 'sc12c@example.com' });
@@ -325,40 +379,75 @@ test('C6 合法零结果 / 缺配置 / 权限失败 / 限流 / 不可达 / 市�
   assert.strictEqual(eur.stateText, '已检查，当前样本未观察到结果');
 });
 
-// ---------- C7 历史数据与最新失败 ----------
-test('C7 最新失败覆盖旧成功：保留历史数据并标记 usingPreviousData', () => {
-  const s = mkSnapshot('https://cny-sc12c.example.com/products2.json', '{"products":[]}');
-  const e = mkEvidence(s.snapshot_id, 'cny2');
-  // ① 先成功（较早）
-  seedProducts('c-cny', [{ price: 111, currency: 'CNY' }], {
-    key: 'cny-old', nowMs: Date.now() - 7200000, endedAt: new Date(Date.now() - 7200000).toISOString(),
-    evidenceIds: [e.evidence_id], snapshotIds: [s.snapshot_id],
+// ---------- C7 历史数据与当前比较彻底隔离（§一） ----------
+test('C7 三个 USD 品牌其中一个仅有历史成功 → 当前比较只剩两个，不得生成三品牌比较', async () => {
+  const PID_H = 'projSc12c-hist';
+  await makeProject(PID_H, [
+    { id: 'c-h1', name: 'HistOne', url: 'https://h1-sc12c.example.com', status: 'done', isShopify: true },
+    { id: 'c-h2', name: 'HistTwo', url: 'https://h2-sc12c.example.com', status: 'done', isShopify: true },
+    { id: 'c-h3', name: 'HistThree', url: 'https://h3-sc12c.example.com', status: 'done', isShopify: true },
+  ]);
+  const seedOne = (cid, prices, o) => {
+    const snap = mkSnapshot('https://' + cid + '-hist.example.com/products.json', '{"products":[]}');
+    const ev = mkEvidence(snap.snapshot_id, cid + '-hist');
+    return seedProducts(cid, prices.map(x => ({ price: x, currency: 'USD' })), Object.assign({
+      projectId: PID_H, evidenceIds: [ev.evidence_id], snapshotIds: [snap.snapshot_id],
+    }, o || {}));
+  };
+  // 两个新鲜品牌
+  seedOne('c-h1', [10, 20, 30], { key: 'h1-a' });
+  seedOne('c-h2', [40, 50, 60], { key: 'h2-a' });
+  // 第三个：先成功（旧）→ 再失败（最新，仅历史成功）
+  seedOne('c-h3', [70, 80, 90], { key: 'h3-old', nowMs: Date.now() - 7200000, endedAt: new Date(Date.now() - 7200000).toISOString() });
+  seedAttempt('c-h3', 'shopify_catalog', 'website_products', {
+    projectId: PID_H, key: 'h3-fail', nowMs: Date.now() + 60000, status: 'failed',
+    sourceStatus: 'unavailable', errorClass: 'unavailable', errorUserText: '对方官网暂时无法访问，稍后可重试。',
   });
-  // ② 再失败（最新，晚于所有既有成功 attempt）
-  seedAttempt('c-cny', 'shopify_catalog', 'website_products', {
-    key: 'cny-new-fail', nowMs: Date.now() + 60000, status: 'failed',
-    sourceStatus: 'unavailable', errorClass: 'unavailable',
-    errorUserText: '对方官网暂时无法访问，稍后可重试。',
-  });
-  const F = foundation();
-  const row = F.modules.priceBands.rows.find(r => r.competitorId === 'c-cny');
-  assert.ok(row, '历史数据保留（行仍在）');
-  assert.strictEqual(row.usingPreviousData, true, '显式标记 usingPreviousData');
-  assert.ok(row.lastSuccessAt, '返回最后成功时间');
-  assert.strictEqual(row.latestFailureText, '来源暂时不可达', '返回用户可读失败状态');
-  // 默认不得用这类旧数据生成「当前市场」比较线索：c-cny 不得参与任何非历史价格线索
-  const current = F.opportunities.filter(o => o.dimensionCode === 'price' && !o.historical
-    && (o.evidenceRefs || []).some(r => r.brandId === 'c-cny' || r.competitorId === 'c-cny'));
-  assert.strictEqual(current.length, 0, '不得用 c-cny 历史数据生成当前市场线索');
-  // 其他品牌（真实成功数据）的价格线索不受影响，仍可生成
-  const currentOthers = F.opportunities.filter(o => o.dimensionCode === 'price' && !o.historical
-    && !(o.evidenceRefs || []).some(r => r.brandId === 'c-cny' || r.competitorId === 'c-cny'));
-  // 若保留历史线索，标题与时间范围必须明确写成历史观察
-  const hist = F.opportunities.filter(o => o.historical);
-  for (const h of hist) {
-    assert.ok(/历史观察/.test(h.title), '历史线索标题必须写明历史观察: ' + h.title);
-    assert.ok(/历史/.test(h.fact), '历史线索事实必须写明历史');
+
+  const h3BrandId = brandIdOfProject(PID_H, 'c-h3');
+  assert.ok(h3BrandId && h3BrandId.startsWith('br_'), '使用真实品牌档案 ID（不是 competitorId）: ' + h3BrandId);
+
+  let F = foundationOf(PID_H);
+  const usd = F.modules.priceBands.groups.find(g => g.currency === 'USD');
+  assert.ok(usd, 'USD 组存在');
+  assert.strictEqual(usd.brandCount, 2, '当前比较只剩两个新鲜品牌: ' + usd.brandCount);
+  assert.strictEqual(usd.medianPrice, null, '不足三个新鲜品牌不得计算中位数');
+  assert.strictEqual(usd.positioningAvailable, false, '不得生成价格定位结论');
+  assert.ok(!usd.rows.some(r => r.brandId === h3BrandId), '历史品牌不得进入当前价格组');
+
+  // 矩阵比较需要 ≥3 个新鲜品牌 → 不得生成
+  const matrixOps = F.opportunities.filter(o => o.dimensionCode === 'catalog' && !o.historical);
+  assert.strictEqual(matrixOps.length, 0, '两个新鲜品牌不得生成矩阵比较');
+
+  // 任何当前线索的证据集都不得含历史品牌
+  for (const op of F.opportunities.filter(o => !o.historical)) {
+    assert.ok(!(op.evidenceRefs || []).some(r => r.brandId === h3BrandId),
+      op.id + ' 不得把历史品牌放进当前比较证据集');
   }
+
+  // 维度计数
+  assert.strictEqual(F.dimensions.price.freshBrandCount, 2, 'freshBrandCount=2');
+  assert.strictEqual(F.dimensions.price.historicalBrandCount, 1, 'historicalBrandCount=1');
+  assert.strictEqual(F.dimensions.price.usingPreviousData, true);
+  assert.ok(F.dimensions.price.lastSuccessAt, '返回最后成功时间');
+  assert.strictEqual(F.dimensions.catalog.historicalBrandCount, 1, 'catalog 同样标历史计数');
+
+  // 历史数据只出现在「历史观察」区域
+  assert.ok(F.modules.priceBands.historicalRows.some(r => r.brandId === h3BrandId), '历史行独立成集');
+  const histGroup = F.historicalObservations.find(g => g.dimensionCode === 'price');
+  assert.ok(histGroup && histGroup.rows.some(r => r.brandId === h3BrandId), '历史观察独立区域含该品牌');
+  const histLead = F.opportunities.find(o => o.historical);
+  assert.ok(histLead && /历史观察/.test(histLead.title), '历史线索标题写明历史观察');
+  assert.ok(histLead.historical === true);
+
+  // 重新成功采集 → 自动重新进入当前比较
+  seedOne('c-h3', [70, 80, 90], { key: 'h3-recover', nowMs: Date.now() + 180000, endedAt: new Date(Date.now() + 180000).toISOString() });
+  F = foundationOf(PID_H);
+  const usd2 = F.modules.priceBands.groups.find(g => g.currency === 'USD');
+  assert.strictEqual(usd2.brandCount, 3, '重新成功后回到 3 个品牌: ' + usd2.brandCount);
+  assert.ok(usd2.medianPrice != null, '三个新鲜品牌可算中位数');
+  assert.strictEqual(F.dimensions.price.historicalBrandCount, 0, '历史计数清零');
+  assert.strictEqual(F.modules.priceBands.historicalRows.length, 0, '历史行清空');
 });
 
 // ---------- C8 证据链 ----------
@@ -385,15 +474,17 @@ test('C8 比较结论引用全部参与样本的证据，且为结构化引用',
   }
 });
 
-// ---------- C9 满意度门槛 ----------
-test('C9 满意度门槛：两个完整对象不出图；三个只有评分不出图；三个完整才出图', () => {
+// ---------- C9 满意度门槛（字段 + scope/window + 依据分离） ----------
+test('C9 满意度门槛：字段/依据/scope/window 四类断言与坐标一致性', () => {
   const mkObj = (i, opts) => {
     const o = opts || {};
     return Object.assign({
       oid: 'o' + i, label: '主题' + i,
       satisfaction: 7.5, importance: 6.5,
-      satisfactionBasis: 'source_field', importanceBasis: 'source_field',
-      sampleScope: '3/3 家有用户声音的品牌提到',
+      satisfactionBasis: 'source_field',
+      // §五.3：重要性依据必须是「提及品牌广度的确定性计算」
+      importanceBasis: 'mention_breadth',
+      sampleScope: '项目公开评论语料：3/3 家品牌有合格用户声音（共 30 条合格提及）',
       window: { from: '2026-01-01', to: '2026-01-31' },
       evidenceRefs: [{ evidenceId: 'ev-x-' + i, snapshotId: 'sn-x-' + i, sourceUrl: 'https://x.example.com', observedAt: '2026-01-10' }],
     }, o);
@@ -402,35 +493,67 @@ test('C9 满意度门槛：两个完整对象不出图；三个只有评分不�
   // ① 两个完整对象 → 不出图
   let g = ScatterGate.evaluateScatterGate([mkObj(1), mkObj(2)], {});
   assert.strictEqual(g.available, false, '两个完整对象不出图');
-  assert.strictEqual(g.comparableObjects, 2);
   assert.strictEqual(g.reason, '当前评论样本不足，暂不生成满意度分布');
+  assert.strictEqual(g.objects.length, 0, '不出图时不得给坐标');
 
-  // ② 三个只有评分（无 importance / 无依据）→ 不出图
+  // ② 三个只有评分（无重要性）→ 不出图
   g = ScatterGate.evaluateScatterGate([
     mkObj(1, { importance: null, importanceBasis: null }),
     mkObj(2, { importance: null, importanceBasis: null }),
     mkObj(3, { importance: null, importanceBasis: null }),
   ], {});
   assert.strictEqual(g.available, false, '三个只有评分的对象不出图');
-  assert.strictEqual(g.comparableObjects, 0, '缺重要性的对象不得计入可比对象');
-  assert.ok(g.rejected.length === 3, '三个对象全部被拒');
+  assert.strictEqual(g.comparableObjects, 0);
   assert.ok(g.rejected[0].missing.some(m => /重要性/.test(m)), '拒绝原因点名缺重要性');
 
-  // ③ 三个同时具备满意度、重要性及证据 → 出图
-  g = ScatterGate.evaluateScatterGate([mkObj(1), mkObj(2), mkObj(3)], {});
-  assert.strictEqual(g.available, true, '三个完整对象出图');
+  // ②b 重要性依据复用情绪分类依据 → 不合格（依据不得混用）
+  g = ScatterGate.evaluateScatterGate([
+    mkObj(1, { importanceBasis: 'source_field' }),
+    mkObj(2, { importanceBasis: 'source_field' }),
+    mkObj(3, { importanceBasis: 'source_field' }),
+  ], {});
+  assert.strictEqual(g.available, false, '重要性依据不得复用情绪分类依据');
+  assert.ok(g.rejected[0].missing.some(m => /提及品牌广度/.test(m)));
+
+  // ③ 三个对象样本范围不同 → 不出图
+  g = ScatterGate.evaluateScatterGate([
+    mkObj(1, { sampleScope: 'A 语料' }), mkObj(2, { sampleScope: 'B 语料' }), mkObj(3, { sampleScope: 'C 语料' }),
+  ], {});
+  assert.strictEqual(g.available, false, '样本范围不同的对象不得合并出图');
+  assert.ok(g.groups.length >= 3, '按 scope 分组: ' + g.groups.length);
+
+  // ④ 三个对象时间窗口无交集 → 不出图
+  g = ScatterGate.evaluateScatterGate([
+    mkObj(1, { window: { from: '2026-01-01', to: '2026-01-05' }, evidenceRefs: [{ evidenceId: 'e1', observedAt: '2026-01-02' }] }),
+    mkObj(2, { window: { from: '2026-02-01', to: '2026-02-05' }, evidenceRefs: [{ evidenceId: 'e2', observedAt: '2026-02-02' }] }),
+    mkObj(3, { window: { from: '2026-03-01', to: '2026-03-05' }, evidenceRefs: [{ evidenceId: 'e3', observedAt: '2026-03-02' }] }),
+  ], {});
+  assert.strictEqual(g.available, false, '时间窗口无交集的三个对象不出图');
+  assert.ok(g.groups.every(x => x.count < 3), '每个分组都 <3');
+
+  // ⑤ 三个对象范围一致、时间可比 → 出图，坐标逐项等于服务端返回值
+  const objs = [mkObj(1), mkObj(2), mkObj(3)];
+  g = ScatterGate.evaluateScatterGate(objs, {});
+  assert.strictEqual(g.available, true, '三个可比对象出图');
   assert.strictEqual(g.comparableObjects, 3);
-  assert.ok(g.objects.length === 3);
-  // 坐标不得被修改（无 jitter）
-  for (const o of g.objects) {
-    assert.strictEqual(o.satisfaction, 7.5, '满意度坐标保持真实值');
-    assert.strictEqual(o.importance, 6.5, '重要性坐标保持真实值');
-    assert.ok(o.evidenceRefs.length >= 1 && o.evidenceRefs[0].evidenceId, '坐标带证据引用');
+  assert.strictEqual(g.objects.length, 3);
+  for (let i = 0; i < objs.length; i++) {
+    const src = objs[i], out = g.objects.find(x => x.oid === src.oid);
+    assert.ok(out, '对象存在: ' + src.oid);
+    assert.strictEqual(out.satisfaction, src.satisfaction, '坐标 satisfaction 与服务端一致');
+    assert.strictEqual(out.importance, src.importance, '坐标 importance 与服务端一致');
+    assert.strictEqual(out.sampleScope, src.sampleScope, '样本范围一致');
+    assert.ok(out.evidenceRefs.length >= 1 && out.evidenceRefs[0].evidenceId, '坐标带证据');
   }
-  // ④ 缺证据 → 不出图
-  g = ScatterGate.evaluateScatterGate([mkObj(1), mkObj(2), mkObj(3, { evidenceRefs: [] })], {});
-  assert.strictEqual(g.available, false, '缺证据的对象不计入');
+
+  // ⑥ 证据观察时间不在窗口内 → 该对象不合格
+  g = ScatterGate.evaluateScatterGate([
+    mkObj(1), mkObj(2),
+    mkObj(3, { evidenceRefs: [{ evidenceId: 'ev-out', observedAt: '2025-06-01' }] }),
+  ], {});
+  assert.strictEqual(g.available, false, '证据不在窗口内的对象不计入');
   assert.strictEqual(g.comparableObjects, 2);
+  assert.ok(g.rejected.some(x => (x.missing || []).some(m => /Evidence/.test(m))));
 });
 
 // ---------- C10 / C11 / C12：载荷纪律 ----------
@@ -509,4 +632,203 @@ test('C14 币种工具：ISO 校验、符号、价格带标题随币种变化', 
   assert.strictEqual(Foundation.currencyStatusOf(['USD', 'EUR']).status, 'mixed');
   assert.strictEqual(Foundation.currencyStatusOf([null, null]).status, 'unknown');
   assert.strictEqual(Foundation.currencyStatusOf(['usd']).status, 'mixed', '非法写法按 mixed 处理');
+});
+
+// ---------- C15 跨层币种冲突（§二） ----------
+test('C15 时序档案 USD + 最新商品观察 EUR → conflict，价格不可比较但商品数量仍展示', async () => {
+  const PID_X = 'projSc12c-ccy';
+  await makeProject(PID_X, [
+    { id: 'c-x', name: 'ConflictBrand', url: 'https://x-ccy.example.com', status: 'done', isShopify: true },
+    { id: 'c-y', name: 'SameCcyBrand', url: 'https://y-ccy.example.com', status: 'done', isShopify: true },
+    { id: 'c-z', name: 'CatalogNewer', url: 'https://z-ccy.example.com', status: 'done', isShopify: true },
+  ]);
+  // c-x：目录档案 USD（较旧），最新商品观察 EUR
+  seedCatalogFacts('c-x', PID_X, {
+    currency: 'USD', observedAt: new Date(Date.now() - 86400000).toISOString(),
+    productCount: 3, priceMin: 10, priceMedian: 20, priceMax: 30,
+  });
+  const sx = mkSnapshot('https://x-ccy.example.com/products.json', '{"products":[]}');
+  const ex = mkEvidence(sx.snapshot_id, 'x-ccy');
+  seedProducts('c-x', [{ price: 5, currency: 'EUR' }, { price: 15, currency: 'EUR' }], {
+    projectId: PID_X, key: 'x-eur', evidenceIds: [ex.evidence_id], snapshotIds: [sx.snapshot_id],
+  });
+
+  // c-y：两层同为 USD，观察更新 → 取观察层数值/时间/证据（同一套事实）
+  seedCatalogFacts('c-y', PID_X, {
+    currency: 'USD', observedAt: new Date(Date.now() - 86400000).toISOString(),
+    productCount: 9, priceMin: 100, priceMedian: 200, priceMax: 300,
+  });
+  const sy = mkSnapshot('https://y-ccy.example.com/products.json', '{"products":[]}');
+  const ey = mkEvidence(sy.snapshot_id, 'y-ccy');
+  seedProducts('c-y', [{ price: 41, currency: 'USD' }, { price: 59, currency: 'USD' }], {
+    projectId: PID_X, key: 'y-usd', evidenceIds: [ey.evidence_id], snapshotIds: [sy.snapshot_id],
+  });
+
+  // c-z：两层同为 USD，档案更新 → 取档案层数值/时间/证据（同一套事实）
+  seedCatalogFacts('c-z', PID_X, {
+    currency: 'USD', observedAt: new Date().toISOString(),
+    productCount: 7, priceMin: 11, priceMedian: 22, priceMax: 33,
+  });
+  seedProducts('c-z', [{ price: 5, currency: 'USD' }], {
+    projectId: PID_X, key: 'z-usd', nowMs: Date.now() - 172800000,
+    endedAt: new Date(Date.now() - 172800000).toISOString(),
+  });
+
+  const F = foundationOf(PID_X);
+  const rows = F.modules.priceBands.rows;
+  const x = rows.find(r => r.competitorId === 'c-x');
+  assert.ok(x, '冲突品牌仍在价格行（商品数量可展示）');
+  assert.strictEqual(x.currencyStatus, 'conflict', '币种状态为 conflict');
+  assert.strictEqual(x.priceComparable, false, '价格不可比较');
+  assert.strictEqual(x.priceMin, null, '冲突时不得采用任一层的价格数值');
+  assert.strictEqual(x.priceMedian, null);
+  assert.strictEqual(x.priceMax, null);
+  assert.ok(x.productCount != null, '商品数量仍可展示: ' + x.productCount);
+  assert.ok(!F.modules.priceBands.groups.some(g => g.rows.some(r => r.competitorId === 'c-x')),
+    '冲突品牌不得进入任何币种组');
+  const cf = (F.modules.priceBands.currencyConflicts || []).find(c => c.competitorId === 'c-x' || c.brandId === x.brandId);
+  assert.ok(cf, '冲突品牌进入 currencyConflicts 清单');
+  assert.strictEqual(cf.observationCurrency, 'EUR');
+  assert.strictEqual(cf.catalogCurrency, 'USD');
+
+  // 同币种：观察更新 → 用观察层，且时间/证据同源
+  const y = rows.find(r => r.competitorId === 'c-y');
+  assert.strictEqual(y.currencyStatus, 'confirmed');
+  assert.strictEqual(y.priceSource, 'observation', '新观察优先');
+  assert.strictEqual(y.priceMin, 41);
+  assert.strictEqual(y.priceMax, 59);
+  assert.ok(y.evidenceRefs.length >= 1 && y.evidenceRefs.every(r => r.brandId === y.brandId), '证据来自同一品牌同一套事实');
+
+  // 同币种：档案更新 → 用档案层数值与时间（不得用旧观察数值配新档案时间）
+  const z = rows.find(r => r.competitorId === 'c-z');
+  assert.strictEqual(z.priceSource, 'catalog', '更新的档案优先');
+  assert.strictEqual(z.priceMin, 11);
+  assert.strictEqual(z.priceMedian, 22);
+  assert.strictEqual(z.priceMax, 33);
+  assert.ok(z.observedAt, '时间来自档案层');
+});
+
+// ---------- C16 比较证据覆盖全部参与品牌（§三） ----------
+test('C16 18 品牌比较结论：证据覆盖 18 个不同 brandId；缺任一品牌证据则不生成', async () => {
+  const PID_E = 'projSc12c-18';
+  const comps = [];
+  for (let i = 1; i <= 18; i++) {
+    comps.push({ id: 'c-e' + i, name: 'Brand' + String(i).padStart(2, '0'), url: 'https://e' + i + '-18.example.com', status: 'done', isShopify: true });
+  }
+  await makeProject(PID_E, comps);
+  const seedOne = (i, skuCount) => {
+    const snap = mkSnapshot('https://e' + i + '-18.example.com/products.json', '{"products":[]}');
+    const ev = mkEvidence(snap.snapshot_id, 'e' + i);
+    const items = [];
+    for (let k = 0; k < skuCount; k++) items.push({ price: 10 + k, currency: 'USD' });
+    seedProducts('c-e' + i, items, {
+      projectId: PID_E, key: 'e' + i, evidenceIds: [ev.evidence_id], snapshotIds: [snap.snapshot_id],
+    });
+  };
+  // SKU 数：1..18 → 中位数 9.5，低于中位数的品牌可生成矩阵比较
+  for (let i = 1; i <= 18; i++) seedOne(i, i);
+
+  const F = foundationOf(PID_E);
+  const matrixOps = F.opportunities.filter(o => o.dimensionCode === 'catalog' && !o.historical);
+  assert.ok(matrixOps.length > 0, '18 品牌可生成矩阵比较');
+  const op = matrixOps[0];
+  assert.ok(/18 个品牌/.test(op.sampleSize), '样本量为 18 个品牌: ' + op.sampleSize);
+  const covered = new Set(op.evidenceRefs.map(r => r.brandId).filter(Boolean));
+  assert.strictEqual(covered.size, 18, '证据覆盖全部 18 个参与品牌: ' + covered.size);
+  assert.ok(op.evidenceRefs.length >= 18, '引用数量不少于品牌数: ' + op.evidenceRefs.length);
+  // 每个引用都是结构化对象且带齐字段
+  for (const r of op.evidenceRefs) {
+    assert.ok(r && typeof r === 'object');
+    assert.ok(r.evidenceId || r.snapshotId);
+    assert.ok('sourceUrl' in r && 'brandId' in r && 'observedAt' in r);
+  }
+
+  // 缺任一品牌证据 → 不得生成该比较结论
+  const PID_E2 = 'projSc12c-18b';
+  await makeProject(PID_E2, comps);
+  for (let i = 1; i <= 18; i++) {
+    const snap = mkSnapshot('https://e' + i + '-18b.example.com/products.json', '{"products":[]}');
+    const ev = mkEvidence(snap.snapshot_id, 'e' + i + 'b');
+    const items = [];
+    for (let k = 0; k < i; k++) items.push({ price: 10 + k, currency: 'USD' });
+    // 第 7 个品牌故意不带证据
+    seedProducts('c-e' + i, items, i === 7
+      ? { projectId: PID_E2, key: 'e' + i + 'b' }
+      : { projectId: PID_E2, key: 'e' + i + 'b', evidenceIds: [ev.evidence_id], snapshotIds: [snap.snapshot_id] });
+  }
+  const F2 = foundationOf(PID_E2);
+  const matrixOps2 = F2.opportunities.filter(o => o.dimensionCode === 'catalog' && !o.historical);
+  assert.strictEqual(matrixOps2.length, 0, '缺任一品牌证据时不得生成矩阵比较');
+});
+
+// ---------- C17 内容 / 热度 / 广告 用户可见模块（§四） ----------
+test('C17 modules.contentActivity / searchInterest / adActivity 结构完整且状态如实', () => {
+  const F = foundation();
+  for (const key of ['contentActivity', 'searchInterest', 'adActivity']) {
+    const m = F.modules[key];
+    assert.ok(m, '模块存在: ' + key);
+    assert.ok(typeof m.available === 'boolean', key + ' 有 available');
+    assert.ok(typeof m.status === 'string' && m.status, key + ' 有 status');
+    assert.ok('statusText' in m, key + ' 有 statusText');
+    assert.ok(typeof m.brandCount === 'number', key + ' 有品牌数');
+    assert.ok(typeof m.observationCount === 'number', key + ' 有观察数');
+    assert.ok(m.window && 'from' in m.window && 'to' in m.window, key + ' 有观察时间范围');
+    assert.ok(typeof m.measurementMethod === 'string', key + ' 有 measurementMethod');
+    assert.ok(Array.isArray(m.evidenceRefs), key + ' 有结构化证据引用');
+    assert.ok(Array.isArray(m.perBrand) && m.perBrand.length > 0, key + ' 有逐品牌覆盖状态');
+    assert.ok(typeof m.usingPreviousData === 'boolean', key + ' 有 usingPreviousData');
+    assert.ok(Array.isArray(m.limits) && m.limits.length > 0, key + ' 有限制说明');
+    assert.ok(Array.isArray(m.historicalRows), key + ' 有历史行');
+    for (const r of m.evidenceRefs) assert.ok(r && typeof r === 'object' && (r.evidenceId || r.snapshotId));
+    // 不允许「维度可用但页面没有内容」
+    if (m.available) assert.ok(m.rows.length > 0, key + ' 可用时必须有可展示内容');
+  }
+  // c-usd 在 C5 中已有真实 content/heat/ads 成功观察 → 三个模块均可用
+  assert.strictEqual(F.modules.contentActivity.available, true, 'content 有真实数据');
+  assert.strictEqual(F.modules.searchInterest.available, true, 'heat 有真实数据');
+  assert.strictEqual(F.modules.adActivity.available, true, 'ads 有真实数据');
+  assert.ok(F.modules.contentActivity.rows.some(r => r.items.length > 0), 'content 模块展示真实观察条目');
+  // 合法零结果（c-eur youtube 成功但 0 条）→ perBrand 标 checked_empty，不等于未配置
+  const eurContent = (F.modules.contentActivity.perBrand || []).find(p => p.name === 'EurBrand');
+  assert.ok(eurContent, 'EurBrand 在 content 模块逐品牌状态里');
+  assert.strictEqual(eurContent.state, 'checked_empty', '合法零结果标 checked_empty: ' + eurContent.state);
+  assert.strictEqual(eurContent.stateText, '已检查，当前样本未观察到结果');
+  // 尚未分析的维度不产出机会结论
+  assert.ok(/只陈述公开观察事实/.test(F.modules.contentActivity.analysisNote), '只陈述事实、不强行生成机会结论');
+});
+
+// ---------- C18 历史数据不参与当前机会判断（§四.4） ----------
+test('C18 维度历史数据只进历史行，不参与当前模块与机会判断', async () => {
+  const PID_G = 'projSc12c-g';
+  await makeProject(PID_G, [
+    { id: 'c-g1', name: 'GOne', url: 'https://g1.example.com', status: 'done', isShopify: true },
+  ]);
+  const s1 = mkSnapshot('https://g1.example.com/yt', '{"videos":[]}');
+  const e1 = mkEvidence(s1.snapshot_id, 'g1-yt');
+  // 先成功（旧），再失败（最新）→ 历史观察
+  seedAttempt('c-g1', 'youtube_content', 'social_content', {
+    projectId: PID_G, key: 'g1-yt-old', nowMs: Date.now() - 7200000,
+    observations: [{ id: 'v1', title: 'Old Video', videoUrl: 'https://youtu.be/old', publishedAt: new Date(Date.now() - 7200000).toISOString() }],
+    evidenceIds: [e1.evidence_id], snapshotIds: [s1.snapshot_id],
+    summary: { kind: 'social_videos', videoCount: 1 },
+  });
+  seedAttempt('c-g1', 'youtube_content', 'social_content', {
+    projectId: PID_G, key: 'g1-yt-fail', nowMs: Date.now() + 60000, status: 'failed',
+    sourceStatus: 'unavailable', errorClass: 'unavailable',
+  });
+
+  const F = foundationOf(PID_G);
+  const m = F.modules.contentActivity;
+  assert.strictEqual(m.available, false, '历史数据不算当前可用');
+  assert.strictEqual(m.brandCount, 0);
+  assert.strictEqual(m.historicalBrandCount, 1, '历史品牌计数=1');
+  assert.strictEqual(m.usingPreviousData, true);
+  assert.strictEqual(m.historicalRows.length, 1, '历史行独立成集');
+  assert.ok(m.historicalRows[0].items.length >= 1, '历史行展示原始观察');
+  assert.strictEqual(F.dimensions.content.freshBrandCount, 0);
+  assert.strictEqual(F.dimensions.content.historicalBrandCount, 1);
+  const g = F.historicalObservations.find(x => x.dimensionCode === 'content');
+  assert.ok(g && g.rows.length === 1, 'content 历史观察进入独立区域');
+  // 历史数据不得产生当前机会线索
+  assert.ok(!F.opportunities.some(o => !o.historical && o.dimensionCode === 'content'), '历史 content 不得生成当前线索');
 });

@@ -161,28 +161,129 @@ function attemptPair(tenantId, projectId, compId, caps) {
   };
 }
 
-// 结构化证据引用（§五.2）：{ evidenceId, snapshotId, sourceUrl, brandId, observedAt }
-function evidenceRefsOf(att, brandId, fallbackObservations) {
+// 结构化证据引用（§三.2）：{ evidenceId, snapshotId, sourceUrl, brandId, observedAt }
+// §三.4：**不得假定** evidenceIds / snapshotIds / observations 三个数组同下标属于同一记录。
+// 真值关系：Evidence.source_snapshot_ids → SourceSnapshot(source_url, observed_at)；
+// 解析不到快照的 Evidence 不产引用（断链不得产证）。快照-only 引用保留为可追溯兜底。
+const REF_CACHE = { ev: new Map(), sn: new Map() };
+
+function evMetaOf(tenantId, id) {
+  const key = tenantId + '|' + id;
+  if (REF_CACHE.ev.has(key)) return REF_CACHE.ev.get(key);
+  let meta = null;
+  try { meta = require('../research/evidence-store.js').getEvidenceById(tenantId, id); } catch (e) { meta = null; }
+  if (REF_CACHE.ev.size > 4000) REF_CACHE.ev.clear();
+  REF_CACHE.ev.set(key, meta);
+  return meta;
+}
+
+function snMetaOf(tenantId, id) {
+  const key = tenantId + '|' + id;
+  if (REF_CACHE.sn.has(key)) return REF_CACHE.sn.get(key);
+  let meta = null;
+  try { meta = require('../research/source-snapshot.js').getById(tenantId, id); } catch (e) { meta = null; }
+  if (REF_CACHE.sn.size > 4000) REF_CACHE.sn.clear();
+  REF_CACHE.sn.set(key, meta);
+  return meta;
+}
+
+function evidenceRefsOf(tenantId, att, brandId) {
   if (!att) return [];
-  const evIds = arr(att.evidenceIds);
-  const snIds = arr(att.snapshotIds || att.snapshot_ids);
-  const obs = Array.isArray(att.observations) ? att.observations : (fallbackObservations || []);
+  const evIds = uniq(arr(att.evidenceIds));
+  const snIds = uniq(arr(att.snapshotIds || att.snapshot_ids));
+  const attObservedAt = att.endedAt || att.ended_at || att.startedAt || att.started_at || null;
   const out = [];
-  const n = Math.max(evIds.length, snIds.length, obs.length);
-  for (let i = 0; i < n; i++) {
-    const evId = evIds[i] || null;
-    const snId = snIds[i] || null;
-    if (!evId && !snId) continue;
-    const o = obs[i] || null;
+  const seenSnap = new Set();
+  // ① 以 Evidence 为主：snapshot / source_url / observedAt 全部来自真值关系，不看下标
+  for (const evId of evIds) {
+    const ev = evMetaOf(tenantId, evId);
+    const evSnaps = arr(ev && ev.source_snapshot_ids);
+    const sid = evSnaps[0] || null;
+    if (!sid && !ev) continue;                 // 断链（既无证据记录也无快照）→ 不产引用
+    const sn = sid ? snMetaOf(tenantId, sid) : null;
+    if (sid && !sn) continue;                  // 快照跨租户/不存在 → 断链，不产引用
+    if (sid) seenSnap.add(sid);
     out.push({
       evidenceId: evId,
-      snapshotId: snId,
-      sourceUrl: (o && (o.sourceUrl || o.url || o.videoUrl)) ? String(o.sourceUrl || o.url || o.videoUrl) : null,
+      snapshotId: sid,
+      sourceUrl: (sn && sn.source_url) || null,
       brandId: brandId || null,
-      observedAt: (att.endedAt || att.ended_at || att.startedAt || att.started_at || (o && o.publishedAt) || null),
+      observedAt: (ev && ev.observed_at) || (sn && sn.observed_at) || attObservedAt,
+    });
+  }
+  // ② 只有 Snapshot、没有 Evidence 的引用（可追溯兜底；不参与「比较结论」的产证判定）
+  for (const sid of snIds) {
+    if (seenSnap.has(sid)) continue;
+    const sn = snMetaOf(tenantId, sid);
+    if (!sn) continue;
+    out.push({
+      evidenceId: null, snapshotId: sid,
+      sourceUrl: sn.source_url || null, brandId: brandId || null,
+      observedAt: sn.observed_at || attObservedAt,
     });
   }
   return out;
+}
+
+// §一/§二：跨层价格来源解析（观察层 vs 时序档案）
+// 规则：数值 / observedAt / Evidence 必须来自**同一套事实**；
+//       两层币种冲突 → currencyStatus='conflict'，价格不可比较（商品数量仍展示）。
+function tsOf(v) { if (!v) return null; const t = Date.parse(String(v)); return isFinite(t) ? t : null; }
+
+function resolvePriceSource(p, c) {
+  const prodOk = !!(p && p.currencyStatus === 'confirmed' && Array.isArray(p.prices) && p.prices.length);
+  const catOk = !!(c && c.priceComparable && c.priceMedian != null);
+  const empty = {
+    currencyStatus: 'unknown', currency: null, priceComparable: false,
+    priceMin: null, priceMedian: null, priceMax: null,
+    observedAt: (p && p.observedAt) || (c && c.observedAt) || null,
+    evidenceRefs: [], source: null, conflict: null,
+  };
+  if (prodOk && catOk) {
+    if (p.currency !== c.currency) {
+      // 两层币种冲突：不优先采用任意一套；数值一律 null，商品数量仍可展示
+      return Object.assign({}, empty, {
+        currencyStatus: 'conflict', observedAt: null, evidenceRefs: [],
+        conflict: {
+          observationCurrency: p.currency, catalogCurrency: c.currency,
+          observationAt: p.observedAt || null, catalogAt: c.observedAt || null,
+          note: '最新商品观察与历史目录档案的币种不一致，价格不可比较；请以重新采集后的同币种数据为准。',
+        },
+      });
+    }
+    const pAt = tsOf(p.observedAt), cAt = tsOf(c.observedAt);
+    const useObs = pAt != null && (cAt == null || pAt >= cAt);
+    if (useObs) {
+      const prices = p.prices.slice().sort((a, b) => a - b);
+      return {
+        currencyStatus: 'confirmed', currency: p.currency, priceComparable: true,
+        priceMin: prices[0], priceMedian: medianOfSorted(prices), priceMax: prices[prices.length - 1],
+        observedAt: p.observedAt || null, evidenceRefs: p.evidenceRefs || [], source: 'observation', conflict: null,
+      };
+    }
+    return {
+      currencyStatus: 'confirmed', currency: c.currency, priceComparable: true,
+      priceMin: c.priceMin, priceMedian: c.priceMedian, priceMax: c.priceMax,
+      observedAt: c.observedAt || null, evidenceRefs: c.evidenceRefs || [], source: 'catalog', conflict: null,
+    };
+  }
+  if (prodOk) {
+    const prices = p.prices.slice().sort((a, b) => a - b);
+    return {
+      currencyStatus: 'confirmed', currency: p.currency, priceComparable: true,
+      priceMin: prices[0], priceMedian: medianOfSorted(prices), priceMax: prices[prices.length - 1],
+      observedAt: p.observedAt || null, evidenceRefs: p.evidenceRefs || [], source: 'observation', conflict: null,
+    };
+  }
+  if (catOk) {
+    return {
+      currencyStatus: 'confirmed', currency: c.currency, priceComparable: true,
+      priceMin: c.priceMin, priceMedian: c.priceMedian, priceMax: c.priceMax,
+      observedAt: c.observedAt || null, evidenceRefs: c.evidenceRefs || [], source: 'catalog', conflict: null,
+    };
+  }
+  const mixed = (p && p.currencyStatus === 'mixed') || (c && c.currencyStatus === 'mixed');
+  return Object.assign({}, empty, { currencyStatus: mixed ? 'mixed' : 'unknown' });
 }
 
 // ---------------- 单品牌事实 ----------------
@@ -221,7 +322,9 @@ function collectBrandFacts(tenantId, projectId, compId, brandId) {
       currency: cs.currency,
       currencyStatus: cs.status,
       observedAt: pa.endedAt || pa.startedAt || null,
-      evidenceRefs: evidenceRefsOf(pa, brandId, obs),
+      evidenceRefs: evidenceRefsOf(tenantId, pa, brandId),
+      // §一.1：latest 失败但历史成功 → 历史数据，不参与任何「当前市场」计算
+      fresh: !pairP.usingPreviousData,
       usingPreviousData: pairP.usingPreviousData,
       lastSuccessAt: pairP.lastSuccessAt,
       latestFailureText: pairP.latestFailureText,
@@ -282,7 +385,7 @@ function collectBrandFacts(tenantId, projectId, compId, brandId) {
         observedAt: o && o.publishedAt ? o.publishedAt : null,
       })),
       observedAt: ra.endedAt || ra.startedAt || null,
-      evidenceRefs: evidenceRefsOf(ra, brandId, obs),
+      evidenceRefs: evidenceRefsOf(tenantId, ra, brandId),
       usingPreviousData: pairR.usingPreviousData,
       lastSuccessAt: pairR.lastSuccessAt,
       latestFailureText: pairR.latestFailureText,
@@ -361,7 +464,7 @@ function collectLiveDimensionFacts(tenantId, projectId, compId, brandId, capCode
     base.observations = obs.slice(0, 30);
     base.observationCount = obs.length;
     base.summary = usable.summary || jparse(usable.summary, null) || null;
-    base.evidenceRefs = evidenceRefsOf(usable, brandId, obs);
+    base.evidenceRefs = evidenceRefsOf(tenantId, usable, brandId);
     base.observedAt = usable.endedAt || usable.startedAt || null;
     base.checkedEmpty = obs.length === 0;
     base.hasData = obs.length > 0;
@@ -425,12 +528,17 @@ function dimensionBasis(opts) {
   }
   const times = brands.map(b => (o.observedAt ? o.observedAt(b) : null)).filter(Boolean).sort();
   const usable = o.status === 'complete' || o.status === 'partial';
+  const historicalCount = typeof o.historicalBrandCount === 'number' ? o.historicalBrandCount : 0;
   return {
     code: o.code,
     label: o.label,
     status: o.status,                 // complete | partial | missing | not_covered | not_configured | checked_empty
     statusText: o.statusText || (usable ? null : MISSING_STATUS_TEXT[o.code] || null),
+    // §一.3：当前参与比较的品牌数（新鲜）与历史品牌数（不参与当前比较）
     brandCount: brands.length,
+    freshBrandCount: brands.length,
+    historicalBrandCount: historicalCount,
+    totalBrandCount: brands.length + historicalCount,
     observationCount: obs,
     evidenceCount: ev.size,
     window: { from: times[0] || null, to: times[times.length - 1] || null },
@@ -470,41 +578,43 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     b.facts.ads = collectLiveDimensionFacts(tid, pid, b.competitorId, b.brandId, 'tiktok_commercial_content', b.market);
   }
 
-  // ---------------- 价格行（§一） ----------------
-  const priceRows = brands.map(b => {
+  // ---------------- 价格行（§一 / §二）：当前（新鲜）与历史严格分离 ----------------
+  const allRows = brands.map(b => {
     const p = b.facts.products || null;
     const c = b.facts.catalog || null;
-    // 币种以 catalog 优先（时序档案口径），其次观察层
-    let currency = null, currencyStatus = 'unknown';
-    if (c && c.currencyStatus === 'confirmed') { currency = c.currency; currencyStatus = 'confirmed'; }
-    else if (c && c.currencyStatus === 'mixed') { currencyStatus = 'mixed'; }
-    else if (p && p.currencyStatus) { currency = p.currency; currencyStatus = p.currencyStatus; }
-
-    const comparable = currencyStatus === 'confirmed' && isIsoCurrency(currency);
-    const prices = p && p.currencyStatus === 'confirmed' ? p.prices : [];
+    const src = resolvePriceSource(p, c);
+    const productCount = c && c.productCount != null ? c.productCount : (p ? p.count : null);
+    // 历史数据 = 该品牌商品维度 latest 失败但历史成功（不得进入当前比较）
+    const usingPrev = !!(p && p.usingPreviousData);
     return {
       brandId: b.brandId, name: b.name, competitorId: b.competitorId,
-      productCount: c && c.productCount != null ? c.productCount : (p ? p.count : null),
+      productCount: productCount,
       available: p ? p.available : null,
       soldOut: p ? p.soldOut : null,
-      // 币种不明确 → 价格三值一律 null（不猜测、不换算）
-      priceMin: comparable ? (c && c.priceMin != null ? c.priceMin : (prices.length ? Math.min(...prices) : null)) : null,
-      priceMedian: comparable ? (c && c.priceMedian != null ? c.priceMedian
-        : (prices.length ? medianOfSorted(prices.slice().sort((x, y) => x - y)) : null)) : null,
-      priceMax: comparable ? (c && c.priceMax != null ? c.priceMax : (prices.length ? Math.max(...prices) : null)) : null,
-      currency: comparable ? currency : null,
-      currencyStatus,
-      priceComparable: comparable,
-      observedAt: (p && p.observedAt) || (c && c.observedAt) || null,
-      evidenceRefs: [...(p ? p.evidenceRefs : []), ...(c ? c.evidenceRefs : [])],
+      priceMin: src.priceMin,
+      priceMedian: src.priceMedian,
+      priceMax: src.priceMax,
+      currency: src.currency,
+      currencyStatus: src.currencyStatus,
+      priceComparable: src.priceComparable,
+      priceSource: src.source,
+      currencyConflict: src.conflict,
+      observedAt: src.observedAt,
+      // §三：证据集只含本行（同一套事实）的引用
+      evidenceRefs: src.evidenceRefs,
       observationCount: p ? p.count : 0,
-      usingPreviousData: !!(p && p.usingPreviousData),
-      lastSuccessAt: (p && p.lastSuccessAt) || null,
+      usingPreviousData: usingPrev,
+      fresh: !usingPrev,
+      lastSuccessAt: (p && p.lastSuccessAt) || (c && c.observedAt) || null,
       latestFailureText: (p && p.latestFailureText) || null,
     };
   }).filter(r => r.productCount != null || r.priceMin != null || r.priceMax != null);
 
-  // ---------------- 按币种分组（§一.5） ----------------
+  // 当前比较只吃新鲜数据；历史数据单独成集（只在「历史观察」区域展示）
+  const priceRows = allRows.filter(r => r.fresh);
+  const historicalRows = allRows.filter(r => !r.fresh);
+
+  // ---------------- 按币种分组（§一.5，仅新鲜 + 币种一致） ----------------
   const groupsByCurrency = {};
   for (const r of priceRows) {
     if (!r.priceComparable || !r.currency) continue;
@@ -529,7 +639,7 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       };
     });
     const medians = rows.filter(r => r.priceMedian != null).map(r => r.priceMedian).sort((a, b) => a - b);
-    // §一：只有**同币种**且 ≥3 个品牌才允许计算项目中位数
+    // §一：只有**同币种新鲜**且 ≥3 个品牌才允许计算项目中位数
     const median = medians.length >= 3 ? medianOfSorted(medians) : null;
     return {
       currency, symbol: currencySymbol(currency),
@@ -537,29 +647,34 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       rows, bands,
       medianPrice: median,
       medianSampleSize: medians.length,
-      // 中位数不足 3 个品牌 → 不生成相对定位线索，只展示原始价格范围
       positioningAvailable: median != null,
       bandsAvailable: rows.length >= 2,
     };
   });
 
   const nonComparableRows = priceRows.filter(r => !r.priceComparable);
-  const anyPreviousData = priceRows.some(r => r.usingPreviousData);
+  const conflictRows = priceRows.filter(r => r.currencyStatus === 'conflict');
+  const anyPreviousData = historicalRows.length > 0;
 
   const priceDimension = dimensionBasis({
     code: 'price', label: '价格',
-    status: priceGroups.length ? 'partial' : (nonComparableRows.length ? 'missing' : 'missing'),
-    statusText: priceGroups.length ? '按币种分组展示' : '币种未确认，价格比较不可用',
+    status: priceGroups.length ? 'partial' : 'missing',
+    statusText: priceGroups.length
+      ? (conflictRows.length ? '按币种分组展示（' + conflictRows.length + ' 个品牌存在跨层币种冲突，价格不参与比较）' : '按币种分组展示')
+      : (conflictRows.length ? '跨层币种冲突，价格比较不可用' : '币种未确认，价格比较不可用'),
     brands: priceRows,
     observationCount: b => b.observationCount,
     evidenceRefs: b => b.evidenceRefs,
     observedAt: b => b.observedAt,
     measurementMethod: 'direct_observation',
+    historicalBrandCount: historicalRows.length,
     usingPreviousData: anyPreviousData,
+    lastSuccessAt: historicalRows.map(r => r.lastSuccessAt).filter(Boolean).sort().pop() || null,
     limits: [
       '价格为采集时点的公开标价，不等于成交价或 GMV。',
       '不同币种不合并计算价格带、中位数或百分比差异；没有带时间与来源的汇率事实时不做换算。',
-      '币种缺失或混合的品牌不参与价格比较（商品数量仍可用于产品矩阵）。',
+      '币种缺失、混合或跨层冲突的品牌不参与价格比较（商品数量仍可用于产品矩阵）。',
+      '历史观察数据（最近一次采集未成功）不参与任何当前比较的分子、分母或证据集合。',
     ],
   });
 
@@ -571,18 +686,26 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     evidenceRefs: b => b.evidenceRefs,
     observedAt: b => b.observedAt,
     measurementMethod: 'direct_observation',
+    historicalBrandCount: historicalRows.filter(r => r.productCount != null).length,
+    usingPreviousData: historicalRows.some(r => r.productCount != null),
     limits: [
       '在售 SKU 数是公开目录的截面，不等于真实经营规模。',
       '缺货状态来自采集时点的公开可购买性，非库存系统数据。',
       'SKU 数不受币种影响：币种未知的品牌仍计入产品矩阵。',
+      '历史观察数据不进入 SKU 中位数与产品矩阵比较。',
     ],
   });
 
-  const eventBrands = brands.filter(b => b.facts.events && b.facts.events.newItems > 0);
+  // 历史品牌的新鲜事件才算当前动态；历史数据只进「历史观察」
+  const freshBrandIds = new Set(priceRows.map(r => r.brandId));
+  const eventBrands = brands.filter(b => b.facts.events && b.facts.events.newItems > 0
+    && (!b.facts.products || b.facts.products.fresh !== false) && (freshBrandIds.size === 0 || freshBrandIds.has(b.brandId)));
+  const historicalEventBrands = brands.filter(b => b.facts.events && b.facts.events.newItems > 0 && !eventBrands.includes(b));
   const dynamicsDimension = dimensionBasis({
     code: 'dynamics', label: '上新与库存动态',
     status: eventBrands.length ? 'partial' : 'missing',
     brands: eventBrands,
+    historicalBrandCount: historicalEventBrands.length,
     observationCount: b => (b.facts.events ? b.facts.events.newItems : 0),
     evidenceRefs: b => (b.facts.events ? b.facts.events.evidenceIds.map(id => ({ evidenceId: id })) : []),
     observedAt: b => (b.facts.events ? b.facts.events.firstSeenAt : null),
@@ -592,7 +715,7 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     ],
   });
 
-  const reviewRows = brands.filter(b => b.facts.reviews).map(b => ({
+  const allReviewRows = brands.filter(b => b.facts.reviews).map(b => ({
     brandId: b.brandId, name: b.name,
     pageCount: b.facts.reviews.pageCount,
     ratedPages: b.facts.reviews.ratedPages,
@@ -602,19 +725,26 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     evidenceRefs: b.facts.reviews.evidenceRefs,
     pages: b.facts.reviews.pages,
     usingPreviousData: b.facts.reviews.usingPreviousData,
+    lastSuccessAt: b.facts.reviews.lastSuccessAt || null,
     latestFailureText: b.facts.reviews.latestFailureText,
   }));
+  // §一.1：只有新鲜评论进当前比较；历史评论单独成集
+  const reviewRows = allReviewRows.filter(r => !r.usingPreviousData);
+  const historicalReviewRows = allReviewRows.filter(r => r.usingPreviousData);
   const reviewDimension = dimensionBasis({
     code: 'reviews', label: '公开评论与用户声音',
     status: reviewRows.length ? 'partial' : 'missing',
     brands: reviewRows,
+    historicalBrandCount: historicalReviewRows.length,
     observationCount: b => b.pageCount,
     evidenceRefs: b => b.evidenceRefs,
     observedAt: b => b.observedAt,
     measurementMethod: 'public_source_observation',
-    usingPreviousData: reviewRows.some(r => r.usingPreviousData),
+    usingPreviousData: historicalReviewRows.length > 0,
+    lastSuccessAt: historicalReviewRows.map(r => r.lastSuccessAt).filter(Boolean).sort().pop() || null,
     limits: [
       '样本是本次采集窗口内通过校验的公开页面，不等于全网口碑。',
+      '历史评论观察不参与满意度门槛与当前机会判断。',
       '页面未发布可核验评分时，评分样本为 0（不是评分为 0）。',
     ],
   });
@@ -622,13 +752,14 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
   // ---------------- §二：content / heat / ads 真实维度 ----------------
   function liveDimension(code, label, caps, measurementMethod) {
     const dimBrands = [];
+    const histBrands = [];
     const stateCounts = {};
     let usingPrev = false, lastSuccess = null, failText = null;
     for (const b of brands) {
       const f = b.facts[code];
       if (!f) continue;
       if (f.hasData) {
-        dimBrands.push({
+        const row = {
           brandId: b.brandId, name: b.name, competitorId: b.competitorId,
           observationCount: f.observationCount,
           summary: f.summary,
@@ -637,7 +768,11 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
           observedAt: f.observedAt,
           outOfCoverage: f.outOfCoverage,
           coverageNote: f.coverageNote,
-        });
+          usingPreviousData: !!f.usingPreviousData,
+          lastSuccessAt: f.lastSuccessAt || null,
+        };
+        // §一.1：历史数据不进当前模块，单独成集
+        if (row.usingPreviousData) histBrands.push(row); else dimBrands.push(row);
       } else {
         const st = f.checkedEmpty ? 'checked_empty' : f.state;
         stateCounts[st] = (stateCounts[st] || 0) + 1;
@@ -646,11 +781,14 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       if (f.latestFailureText && !failText) failText = f.latestFailureText;
     }
 
-    // 状态判定优先级：有真实数据 → 优先展示数据（§二.6）
+    // 状态判定优先级：有真实数据 → 优先展示数据（§二.6）；历史数据也算「有数据」但不参与当前判断
     let status, statusText;
     if (dimBrands.length) {
       status = dimBrands.length === brands.length ? 'complete' : 'partial';
       statusText = null;
+    } else if (histBrands.length) {
+      status = 'partial';
+      statusText = '仅历史观察数据（最近一次采集未成功），不参与当前机会判断';
     } else {
       const keys = Object.keys(stateCounts);
       // 不得互相混用：若各品牌状态不一致，取「最具体」的一个并说明存在混合
@@ -670,11 +808,12 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     const perBrand = brands.map(b => {
       const f = b.facts[code];
       if (!f) return null;
-      const st = f.hasData ? 'has_data' : (f.checkedEmpty ? 'checked_empty' : f.state);
+      const st = f.usingPreviousData ? 'historical'
+        : (f.hasData ? 'has_data' : (f.checkedEmpty ? 'checked_empty' : f.state));
       return {
         brandId: b.brandId, name: b.name,
         state: st,
-        stateText: st === 'has_data' ? null : LIVE_STATE_TEXT[st],
+        stateText: st === 'has_data' ? null : (st === 'historical' ? '仅历史观察数据，不参与当前判断' : LIVE_STATE_TEXT[st]),
         observationCount: f.observationCount,
         observedAt: f.observedAt,
         outOfCoverage: f.outOfCoverage,
@@ -683,7 +822,7 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       };
     }).filter(Boolean);
 
-    return dimensionBasis({
+    const basis = dimensionBasis({
       code, label,
       status, statusText,
       brands: dimBrands,
@@ -691,6 +830,7 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       evidenceRefs: x => x.evidenceRefs,
       observedAt: x => x.observedAt,
       measurementMethod,
+      historicalBrandCount: histBrands.length,
       usingPreviousData: usingPrev,
       lastSuccessAt: lastSuccess,
       latestFailureText: failText,
@@ -698,6 +838,9 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       // 额外：逐品牌状态（UI 用来「每项只显示一次」+ 混合状态不混用）
       _perBrand: perBrand,
     });
+    basis._fresh = dimBrands;
+    basis._historical = histBrands;
+    return basis;
   }
 
   const contentDimension = liveDimension('content', '内容与互动', DIMENSION_CAPS.content, 'public_source_observation');
@@ -716,57 +859,120 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     '覆盖范围来自平台官方披露，未覆盖国家不代表该品牌没有投放广告。',
   ];
 
-  // ---------------- §四：满意度 × 重要性（唯一门槛） ----------------
-  // 对象 = 主题级（与旧 opportunity 同源：importance 提及广度 / satisfaction 正负提及比）
-  let scatterObjects = [];
+  // ---------------- §五：满意度 × 重要性（唯一输入 / 唯一输出） ----------------
+  // 结论只由 computeOpportunityMap()（或调用方传入的同一份 map）产出；
+  // Foundation **不再**从 themes 重组散点对象，直接复用 map.scatterGate。
+  let satisfactionScatter;
   try {
-    const VoiceUnified = require('./voice-unified.js');
-    const OppLib = require('../lib/opportunity.js');
-    const comps = brands.filter(b => b.competitorId).map(b => ({ id: b.competitorId, name: b.name, status: 'done' }));
-    const vi = VoiceUnified.buildOpportunityInputForComps({ tenantId: tid, projectId: pid, comps });
-    const map = OppLib.computeOpportunityMap(comps, {
-      voiceItems: vi.items, voiceCollected: vi.collected,
-    });
-    const themes = (map && Array.isArray(map.themes)) ? map.themes : [];
-    scatterObjects = themes.map(t => {
-      const stamps = (t.sources || []).map(x => x && x.observedAt).filter(Boolean).sort();
-      return {
-        oid: t.oid || null,
-        label: t.label || null,
-        satisfaction: num(t.satisfaction),
-        importance: num(t.importance),
-        // 计算依据：情绪分类依据种类（来源字段/确定性规则/模型提取）
-        satisfactionBasis: (t.sources || []).map(s => s && s.basis).filter(b => b)[0] || null,
-        importanceBasis: (t.sources || []).map(s => s && s.basis).filter(b => b)[0] || null,
-        satisfactionBasisText: t.denominatorText || null,
-        importanceBasisText: t.denominatorText || null,
-        sampleScope: vi.brandsWithVoice ? (t.brandsMentioned + '/' + vi.brandsWithVoice + ' 家有用户声音的品牌提到') : null,
-        window: { from: stamps[0] || null, to: stamps[stamps.length - 1] || null },
-        brandsMentioned: num(t.brandsMentioned),
-        brandsWithVoice: num(t.brandsWithVoice),
-        posMentions: num(t.posMentions),
-        negMentions: num(t.negMentions),
-        confidence: t.confidence || null,
-        evidenceRefs: (t.sources || []).map(s => ScatterGate.normalizeRef({
-          evidenceId: s.evidenceId, snapshotId: s.snapshotId, sourceUrl: s.url, observedAt: s.observedAt,
-        })).filter(Boolean),
+    let map = o.opportunityMap || null;
+    if (!map) {
+      const VoiceUnified = require('./voice-unified.js');
+      const OppLib = require('../lib/opportunity.js');
+      const comps = brands.filter(b => b.competitorId).map(b => ({ id: b.competitorId, name: b.name, status: 'done' }));
+      const brandIdOf = (c) => {
+        const hit = brands.find(b => b.competitorId === c.id);
+        return hit ? hit.brandId : null;
       };
-    });
-  } catch (e) { scatterObjects = []; }
+      const vi = VoiceUnified.buildOpportunityInputForComps({ tenantId: tid, projectId: pid, comps, brandIdOf });
+      map = OppLib.computeOpportunityMap(comps, { voiceItems: vi.items, voiceCollected: vi.collected });
+    }
+    satisfactionScatter = (map && map.scatterGate) ? map.scatterGate : ScatterGate.evaluateScatterGate([], {});
+  } catch (e) {
+    satisfactionScatter = ScatterGate.evaluateScatterGate([], {});
+  }
 
-  const satisfactionScatter = ScatterGate.evaluateScatterGate(scatterObjects, {});
-
-  // ---------------- 机会线索（§五：引用全部参与样本证据） ----------------
-  const opportunities = [];
+  // §三.1/§三.3：删除全局 slice；每个参与比较的品牌至少保留 1 条引用，
+  // 同品牌最多 2 条（多余的同品牌证据可限制，但绝不丢掉某个参与品牌）。
+  const PER_BRAND_REF_CAP = 2;
   const refsOf = (rows) => {
     const out = [];
-    for (const r of rows) for (const e of (r.evidenceRefs || [])) {
-      if (e && (e.evidenceId || e.snapshotId)) out.push(e);
+    for (const r of rows) {
+      let kept = 0;
+      for (const e of (r.evidenceRefs || [])) {
+        if (!e || !(e.evidenceId || e.snapshotId)) continue;
+        if (kept >= PER_BRAND_REF_CAP) break;
+        out.push(Object.assign({}, e, { brandId: r.brandId || e.brandId || null }));
+        kept++;
+      }
     }
-    return out.slice(0, 12);
+    return out;
   };
   // 参与样本证据必须齐全：每个参与品牌至少有一条可用引用，否则不生成比较结论
   const allBrandsHaveRefs = (rows) => rows.every(r => (r.evidenceRefs || []).some(e => e && (e.evidenceId || e.snapshotId)));
+
+  // ---------------- §四：内容 / 热度 / 广告的用户可见模块 ----------------
+  // 有真实数据 → 事实卡片 + 证据；合法零结果 / 未配置 / 等待授权 / 配额耗尽 / 不可达 / 市场不覆盖
+  // 分别显示；历史数据单独标记，不参与当前机会判断。
+  const SAFE_SUMMARY_KEYS = ['kind', 'count', 'market', 'range', 'avg', 'min', 'max', 'unit', 'note', 'limit', 'windowDays', 'coverageScope'];
+  function safeSummary(x) {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+    const out = {};
+    for (const k of Object.keys(x)) {
+      if (SAFE_SUMMARY_KEYS.indexOf(k) === -1) continue;
+      const v = x[k];
+      if (v == null || typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') out[k] = v;
+      else if (Array.isArray(v) && v.length && v.every(y => typeof y === 'number' || typeof y === 'string')) out[k] = v.slice(0, 12);
+    }
+    return Object.keys(out).length ? out : null;
+  }
+  function safeObservation(o) {
+    if (!o || typeof o !== 'object') return null;
+    return {
+      title: o.title != null ? String(o.title).slice(0, 120) : null,
+      url: o.sourceUrl || o.url || o.videoUrl || null,
+      publishedAt: o.publishedAt || null,
+      platform: o.platform || null,
+      metric: (typeof o.views === 'number' ? { views: o.views } : (typeof o.likes === 'number' ? { likes: o.likes } : null)),
+      market: o.market || null,
+      kind: o.kind || null,
+    };
+  }
+  function liveModule(code, dim) {
+    const fresh = dim._fresh || [];
+    const hist = dim._historical || [];
+    const times = fresh.map(r => r.observedAt).filter(Boolean).sort();
+    return {
+      available: fresh.length > 0,
+      status: dim.status,
+      statusText: dim.statusText,
+      brandCount: fresh.length,
+      historicalBrandCount: hist.length,
+      observationCount: fresh.reduce((a, r) => a + (r.observationCount || 0), 0),
+      window: { from: times[0] || null, to: times[times.length - 1] || null },
+      rows: fresh.map(r => ({
+        brandId: r.brandId, name: r.name,
+        observationCount: r.observationCount,
+        observedAt: r.observedAt,
+        summary: safeSummary(r.summary),
+        items: (r.observations || []).slice(0, 6).map(safeObservation).filter(Boolean),
+        coverageNote: r.coverageNote || null,
+      })),
+      historicalRows: hist.map(r => ({
+        brandId: r.brandId, name: r.name, observationCount: r.observationCount,
+        observedAt: r.observedAt, lastSuccessAt: r.lastSuccessAt || null,
+        items: (r.observations || []).slice(0, 3).map(safeObservation).filter(Boolean),
+      })),
+      measurementMethod: dim.measurementMethod,
+      evidenceRefs: refsOf(fresh),
+      perBrand: (dim.perBrand || []).map(p2 => ({
+        brandId: p2.brandId, name: p2.name, state: p2.state, stateText: p2.stateText,
+        outOfCoverage: !!p2.outOfCoverage, coverageNote: p2.coverageNote || null,
+        observationCount: p2.observationCount,
+      })),
+      usingPreviousData: hist.length > 0,
+      lastSuccessAt: dim.lastSuccessAt || null,
+      limits: dim.limits || [],
+      // §四.5：没有可靠分析算法时只展示事实模块，不生成机会结论
+      analysisNote: '本模块只陈述公开观察事实；尚未建立可核验的内容/热度/广告机会算法，因此不产出机会结论。',
+    };
+  }
+  const contentActivity = liveModule('content', contentDimension);
+  const searchInterest = liveModule('heat', heatDimension);
+  const adActivity = liveModule('ads', adsDimension);
+  const adDimension_hist = () => (adsDimension._historical || []);
+
+  // ---------------- 机会线索（§五：引用全部参与样本证据） ----------------
+  const opportunities = [];
 
   // ① 价格带（按币种分组；同币种 ≥2 个品牌才生成）
   for (const g of priceGroups) {
@@ -856,19 +1062,20 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     });
   }
 
-  // ⑤ 历史观察线索（§三.3）：最新失败但历史成功时，标题与窗口必须明确写「历史观察」
-  const historicalRows = priceRows.filter(r => r.usingPreviousData && r.priceComparable);
-  if (historicalRows.length) {
-    const g0 = historicalRows[0];
+  // ⑤ 历史观察（§一.2 / §三.3）：**独立区域**，标题与事实必须写明「历史观察」，
+  // 且这些数据不进入上面任何当前比较的分子、分母或证据集合。
+  const historicalComparable = historicalRows.filter(r => r.priceComparable);
+  if (historicalComparable.length) {
+    const g0 = historicalComparable[0];
     opportunities.push({
       id: 'historical-price-' + (g0.currency || 'unknown'),
-      title: '历史观察：' + historicalRows.length + ' 个品牌的价格数据来自上一次成功采集',
-      fact: '这是历史观察：' + historicalRows.map(r => r.name + '（最近成功 ' + String(r.lastSuccessAt || '').slice(0, 10) + '）').join('、') + ' 的最近一次采集未成功，页面展示的是上一次成功采集的历史价格；这些数据不作为「当前市场」比较结论。',
+      title: '历史观察：' + historicalComparable.length + ' 个品牌的价格数据来自上一次成功采集',
+      fact: '这是历史观察：' + historicalComparable.map(r => r.name + '（最近成功 ' + String(r.lastSuccessAt || '').slice(0, 10) + '）').join('、') + ' 的最近一次采集未成功，页面展示的是上一次成功采集的历史价格；这些数据不作为「当前市场」比较结论，也不进入当前比较的样本。',
       dimension: '价格',
       dimensionCode: 'price',
-      sampleSize: historicalRows.length + ' 个品牌的历史价格观察',
+      sampleSize: historicalComparable.length + ' 个品牌的历史价格观察',
       window: { from: null, to: null },
-      evidenceRefs: refsOf(historicalRows),
+      evidenceRefs: refsOf(historicalComparable),
       historical: true,
       limits: ['这是历史观察数据，不是当前市场截面；最近一次采集未成功后自动保留，不替代最新数据。',
         '不用于生成「当前市场」的价格定位或价格带结论。'],
@@ -902,7 +1109,8 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     // 每个维度只出现一次：不可用维度统一在此列出（§六.1）
     unavailableDimensions: missing.map(d => ({
       code: d.code, label: d.label, status: d.status, statusText: d.statusText,
-      brandCount: d.brandCount, window: d.window,
+      brandCount: d.brandCount, freshBrandCount: d.freshBrandCount,
+      historicalBrandCount: d.historicalBrandCount, window: d.window,
       perBrand: d.perBrand || null,
       latestFailureText: d.latestFailureText || null,
       usingPreviousData: d.usingPreviousData,
@@ -918,6 +1126,17 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
         currency: priceGroups.length === 1 ? priceGroups[0].currency : null,
         multiCurrency: priceGroups.length > 1,
         rows: priceRows,
+        // §一.2：历史数据独立区域，不参与任何当前比较
+        historicalRows,
+        // §二.3：跨层币种冲突的品牌（价格不可比较，商品数量仍展示）
+        currencyConflicts: priceRows.filter(r => r.currencyStatus === 'conflict').map(r => ({
+          brandId: r.brandId, name: r.name, productCount: r.productCount,
+          observationCurrency: r.currencyConflict ? r.currencyConflict.observationCurrency : null,
+          catalogCurrency: r.currencyConflict ? r.currencyConflict.catalogCurrency : null,
+          observationAt: r.currencyConflict ? r.currencyConflict.observationAt : null,
+          catalogAt: r.currencyConflict ? r.currencyConflict.catalogAt : null,
+          note: r.currencyConflict ? r.currencyConflict.note : null,
+        })),
         // 币种不可比较的品牌（仍保留原始价格范围展示，但不参与比较）
         nonComparableRows: nonComparableRows.map(r => ({
           brandId: r.brandId, competitorId: r.competitorId, name: r.name, productCount: r.productCount,
@@ -952,7 +1171,19 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
         limits: reviewDimension.limits,
       },
       satisfactionScatter,
+      // §四：内容 / 热度 / 广告的用户可见模块
+      contentActivity,
+      searchInterest,
+      adActivity,
     },
+    // §一.2：历史观察独立区域（不作为当前比较的分子/分母/证据集合）
+    historicalObservations: [
+      { dimensionCode: 'price', label: '价格与商品', rows: historicalRows },
+      { dimensionCode: 'reviews', label: '公开评论与用户声音', rows: historicalReviewRows },
+      { dimensionCode: 'content', label: '内容与互动', rows: contentDimension._historical || [] },
+      { dimensionCode: 'heat', label: '搜索热度', rows: heatDimension._historical || [] },
+      { dimensionCode: 'ads', label: '广告素材与市场覆盖', rows: adDimension_hist() },
+    ].filter(g => Array.isArray(g.rows) && g.rows.length),
     opportunities: opportunities.slice(0, 24),
     summary: {
       usableDimensionCodes: usable.map(d => d.code),
@@ -962,6 +1193,9 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       missingDimensionCount: missing.length,
       brandCount: brands.length,
       brandsWithData: brands.filter(b => b.facts.products || b.facts.catalog).length,
+      // §一.3：当前比较 vs 历史观察的品牌数
+      freshBrandCount: priceRows.length,
+      historicalBrandCount: historicalRows.length,
       opportunityCount: opportunities.length,
       // 前端据此判断是否有实质内容（避免笼统「暂无数据」）
       hasAnalysis: priceGroups.length > 0 || priceRows.some(r => r.productCount != null) || opportunities.length > 0,

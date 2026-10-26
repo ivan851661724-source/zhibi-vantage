@@ -257,14 +257,19 @@ async function opportunities(ctx, req, res, url) {
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
-  const view = ReportSvc.buildOpportunities(tid, rp.projectId);
+  // SC-12 r3 §五：机会图只计算一次——同一份 map（含唯一 scatterGate）同时供 view 与 foundation 使用
+  let oppMap = null;
+  const view = ReportSvc.buildOpportunities(tid, rp.projectId, undefined, { onMap: (m) => { oppMap = m; } });
   // SC-05：机会判断的数据基础补「可用历史跨度」与「本次使用的时间范围」
   let historyBasis = null;
   try { historyBasis = MemView.projectHistoryBasis(tid, rp.projectId); } catch (e) { historyBasis = null; }
   // SC-12 §六.1：机会数据基础——按可用维度独立工作（价格/商品/上新/评论独立成模块），
   // 缺失维度保持 null 并如实标注状态；不再因单个维度不可用而整页空白。
   let foundation = null;
-  try { foundation = require('../../services/opportunity-foundation.js').buildOpportunityFoundation(tid, rp.projectId); }
+  try {
+    foundation = require('../../services/opportunity-foundation.js')
+      .buildOpportunityFoundation(tid, rp.projectId, { opportunityMap: oppMap });
+  }
   catch (e) { foundation = null; }
   ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
   return true;

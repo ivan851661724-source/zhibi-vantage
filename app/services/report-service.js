@@ -336,6 +336,9 @@ function buildOpportunities(tenantId, projectId, stateArg, opts) {
       voiceCollected: vi.collected,
     });
   } catch (e) { map = null; }
+  // SC-12 r3 §五.2：将**同一份**机会图（含唯一 scatterGate）交给调用方复用，
+  // 供 opportunity-foundation 直接读取，不再另建一套散点对象。
+  if (map && typeof o.onMap === 'function') { try { o.onMap(map); } catch (e2) { /* 回调失败不影响主流程 */ } }
 
   const voiceBasis = {
     collected: vi.collected,

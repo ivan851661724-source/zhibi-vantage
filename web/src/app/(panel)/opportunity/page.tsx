@@ -8,7 +8,7 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import type { ZhibiState } from '@/types/state';
-import { fetchOpportunities, type OpportunityView, type OpportunityFoundation, type OpportunityDimensionBasis, type OpportunityEvidenceRef } from '@/lib/core-api';
+import { fetchOpportunities, type OpportunityView, type OpportunityFoundation, type OpportunityDimensionBasis, type OpportunityEvidenceRef, type OpportunityScatterObject, type OpportunityLiveModule } from '@/lib/core-api';
 import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 
 // 统一读模型机会基础（SC-04 UI 框架轮）：先展示「已具备什么数据」（品牌样本 + 维度构成），
@@ -23,6 +23,66 @@ import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 function DimStatusLine({ d }: { d: OpportunityDimensionBasis }) {
   const t = d.statusText || (d.status === 'missing' ? '暂无数据' : d.status);
   return <span className="core-opp-dim-state">{t}</span>;
+}
+
+// §四：内容 / 热度 / 广告 用户可见模块（事实卡片 + 证据 + 状态如实）
+function LiveFactModule({ title, m, testId, onEvidence }: {
+  title: string;
+  m: OpportunityLiveModule;
+  testId: string;
+  onEvidence: (refs: OpportunityEvidenceRef[]) => void;
+}) {
+  const refs = (m.evidenceRefs || []).filter(r => r && (r.evidenceId || r.snapshotId));
+  const win = m.window && m.window.from
+    ? `${String(m.window.from).slice(0, 10)} → ${String(m.window.to || '').slice(0, 10) || '至今'}`
+    : '—';
+  return (
+    <div className="core-opp-card" data-testid={testId}>
+      <h4>{title}</h4>
+      {m.available ? (
+        <>
+          <p className="core-brand-muted core-brand-mini">
+            {m.brandCount} 个品牌 · {m.observationCount} 条观察 · {win}
+          </p>
+          <ul className="core-opp-list">
+            {m.rows.map(r => (
+              <li key={r.brandId}>
+                <b>{r.name}</b>：{r.observationCount} 条观察
+                {r.items[0] && r.items[0].title ? <> · 「{r.items[0].title}」</> : null}
+                {r.items[0] && r.items[0].url
+                  ? <> · <a href={r.items[0].url} target="_blank" rel="noopener noreferrer nofollow">来源</a></>
+                  : null}
+              </li>
+            ))}
+          </ul>
+          <p className="core-brand-muted core-brand-mini">
+            测量方法：{m.measurementMethod || '—'}
+            {refs.length ? <> · <button type="button" className="btn-mini core-opp-ev-btn" onClick={() => onEvidence(refs)}>查看证据（{refs.length}）</button></> : null}
+          </p>
+        </>
+      ) : (
+        <>
+          <p className="core-opp-gate">{m.statusText || '当前无可用数据'}</p>
+          {(m.perBrand || []).length ? (
+            <ul className="core-opp-list">
+              {m.perBrand.map(p => (
+                <li key={p.brandId}>
+                  <b>{p.name}</b>：{p.stateText || p.state}
+                  {p.coverageNote ? `（${p.coverageNote}）` : ''}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
+      )}
+      {m.historicalBrandCount > 0 ? (
+        <p className="core-brand-muted core-brand-mini">
+          另有 {m.historicalBrandCount} 个品牌仅有历史观察（最近成功 {String(m.lastSuccessAt || '').slice(0, 10)}），不参与当前判断。
+        </p>
+      ) : null}
+      <p className="core-brand-muted core-brand-mini">{m.analysisNote}</p>
+    </div>
+  );
 }
 
 function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
@@ -56,7 +116,9 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
         <span>可用维度 <b>{f.summary.usableDimensionCount}</b> 个</span>
         <span>缺失维度 <b>{f.summary.missingDimensionCount}</b> 个</span>
         <span>机会线索 <b>{f.summary.opportunityCount}</b> 条</span>
-        <span className="core-brand-muted">缺失维度不填 0，也不参与统计</span>
+        <span>当前比较 <b>{f.summary.freshBrandCount != null ? f.summary.freshBrandCount : 0}</b> 个品牌</span>
+        <span>历史观察 <b>{f.summary.historicalBrandCount != null ? f.summary.historicalBrandCount : 0}</b> 个品牌</span>
+        <span className="core-brand-muted">历史数据不进入当前比较；缺失维度不填 0</span>
       </div>
 
       {/* ② 模块网格 */}
@@ -88,6 +150,18 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
               <p className="core-brand-muted core-brand-mini">
                 口径：各组币种内公开标价截面；仅在同一币种内比较，不做汇率换算；未采集品牌不计入。
               </p>
+              {(price.currencyConflicts || []).length ? (
+                <p className="core-brand-muted core-brand-mini" data-testid="opp-currency-conflict">
+                  跨层币种冲突：{price.currencyConflicts.map(c =>
+                    `${c.name}（最新观察 ${c.observationCurrency || '—'} / 目录档案 ${c.catalogCurrency || '—'}）`).join('、')}；
+                  价格不参与比较，商品数量照常展示。
+                </p>
+              ) : null}
+              {(price.historicalRows || []).length ? (
+                <p className="core-brand-muted core-brand-mini">
+                  {price.historicalRows.length} 个品牌仅有历史价格（详见下方「历史观察」），不参与价格带与中位数。
+                </p>
+              ) : null}
             </>
           ) : <p className="core-brand-muted">暂无可用价格数据（未采集，不按 0 计入）。</p>}
         </div>
@@ -214,7 +288,33 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
             </>
           )}
         </div>
+
+        {/* §四：内容 / 热度 / 广告 真实事实模块 */}
+        <LiveFactModule title="内容与互动" m={f.modules.contentActivity} testId="opp-content" onEvidence={(refs) => setEvRefs(refs)} />
+        <LiveFactModule title="搜索热度" m={f.modules.searchInterest} testId="opp-heat" onEvidence={(refs) => setEvRefs(refs)} />
+        <LiveFactModule title="广告素材与市场覆盖" m={f.modules.adActivity} testId="opp-ads" onEvidence={(refs) => setEvRefs(refs)} />
       </div>
+
+      {/* §一.2：历史观察独立区域（不参与任何当前比较） */}
+      {(f.historicalObservations || []).length ? (
+        <div className="core-building core-opp-building" data-testid="opp-historical">
+          <div className="core-building-head">历史观察（不参与当前比较）</div>
+          <ul className="core-building-list">
+            {(f.historicalObservations || []).map(g => (
+              <li key={g.dimensionCode}>
+                <span className="core-building-name">{g.label}</span>
+                <span className="core-building-state">{g.rows.length} 个品牌仅有历史数据</span>
+                <span className="core-building-meta">
+                  {g.rows.map(r => r.name + '（最近成功 ' + String(r.lastSuccessAt || '').slice(0, 10) + '）').join('、')}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="core-brand-muted core-brand-mini">
+            历史观察只在重新采集成功后进入当前比较；在此之前不参与价格带、中位数、矩阵比较与机会线索。
+          </p>
+        </div>
+      ) : null}
 
       {/* ④ 机会线索（只陈述事实 + 限制 + 建议验证的问题） */}
       {f.opportunities.length ? (
@@ -542,7 +642,7 @@ function MarketGapSection({ state }: { state: ZhibiState }) {
 }
 
 // ---------- 散点图（复刻 oppScatterSvg L1115-1168；点点击 → 高亮滚动 L1292-1299） ----------
-function OppScatter({ op, hl, onPick }: { op: Opportunity; hl: string | null; onPick: (oid: string) => void }) {
+function OppScatter({ objects, hl, onPick }: { objects: OpportunityScatterObject[]; hl: string | null; onPick: (oid: string) => void }) {
   // 扩大画布宽度以容纳更长的中文图例（避免「蓝海 · 重点机会（机会分≥15）」在窄屏被裁切），
   // 同时增加右侧留白给「已被满足」标签。
   const W = 700, H = 400, padL = 60, padR = 60, padT = 26, padB = 54;
@@ -553,7 +653,22 @@ function OppScatter({ op, hl, onPick }: { op: Opportunity; hl: string | null; on
   // 同坐标去重叠：确定性螺旋偏移，不改变数值，只避免遮挡
   const used: Record<string, number> = {};
   let best: { x: number; y: number; r: number; t: OppTheme } | null = null;
-  const themes = op.themes || [];
+  // §五.6：散点坐标/样本范围**只来自服务端 scatterGate.objects**，不再读取 op.themes 的另一份坐标。
+  // 机会分与分区由同一坐标按公示公式派生（opp = I + max(I−S,0)），不改变任何数值。
+  const themes: OppTheme[] = (objects || []).map((o) => {
+    const sat = Number(o.satisfaction);
+    const imp = Number(o.importance);
+    const opportunity = Math.round((imp + Math.max(imp - sat, 0)) * 10) / 10;
+    return {
+      oid: o.oid || '', label: o.label || '',
+      satisfaction: sat, importance: imp, opportunity,
+      zone: opportunity >= 15 ? 'underserved' : opportunity >= 10 ? 'moderate' : 'served',
+      brandsMentioned: o.brandsMentioned || 0,
+      brandsWithVoice: o.brandsWithVoice || 1,
+      denominatorText: o.sampleScope || '',
+      coverageInsufficient: false,
+    };
+  });
   const dots = themes.map((t, idx) => {
     const sat = Number(t.satisfaction) || 1;
     const imp = Number(t.importance) || 1;
@@ -880,9 +995,21 @@ function OpportunityInner() {
             </p>
           </div>
         ) : (
-          <OppScatter op={op} hl={hl} onPick={onPick} />
+          <OppScatter objects={(satGate && satGate.objects) ? (satGate.objects as OpportunityScatterObject[]) : []} hl={hl} onPick={onPick} />
         )}
         <p className="pano-tip">点的大小＝提及广度（多少家竞争品牌的用户声音提到）。空心点＝覆盖率不足、仅供参考。左上角＝需求呼声较高、负面反馈集中，是建议优先验证的机会区域；右侧＝需求已被较好满足，该区域竞争较为充分。</p>
+        {/* §五.6：图下坐标清单与服务端 gate.objects 一一对应（同一份数据，不另取 op.themes） */}
+        {!satBlocked && satGate && (satGate.objects || []).length ? (
+          <ul className="core-opp-list" data-testid="opp-scatter-objects">
+            {((satGate.objects || []) as OpportunityScatterObject[]).map(o => (
+              <li key={o.oid || o.label}>
+                <b>{o.label || '未命名主题'}</b>：满意度 {o.satisfaction} · 重要性 {o.importance}
+                {o.sampleScope ? `（样本范围：${o.sampleScope}）` : ''}
+                {o.window && o.window.from ? ` · 窗口 ${String(o.window.from).slice(0, 10)} → ${String(o.window.to || '').slice(0, 10)}` : ''}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         <p className="pano-tip">分母：{op.brandsWithVoice} / {op.doneBrands} 家已就绪竞争品牌采到了用户声音（覆盖率 {op.coveragePct}%），共 {op.mentionsTotal} 条提及。</p>
         <p className="pano-tip">推理：{op.method}</p>
         {(op.caveats || []).length ? (

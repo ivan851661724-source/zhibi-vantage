@@ -198,7 +198,8 @@ function scoreCluster(cl, brandsWithVoice) {
     method: METHOD_LABEL,
     denominatorText: `${brandSet.size}/${denom} 家有用户声音的竞争品牌提到（正面 ${pos} · 负面 ${neg}）`,
     sources: cl.mentions.slice(0, 12).map(m => ({
-      name: m.brand, competitorId: itemCompetitorId(m) || null, field: m.field, polarity: m.polarity,
+      name: m.brand, brandId: (m && m.brandId) || null, competitorId: itemCompetitorId(m) || null,
+      field: m.field, polarity: m.polarity,
       basis: m.basis || 'unverified', basisNote: m.basisNote || null,
       detail: m.text, url: m.url || null, observedAt: m.observedAt || null,
       evidenceId: m.evidenceId || null, snapshotId: m.snapshotId || null,
@@ -309,35 +310,48 @@ function computeOpportunityMap(competitors, opts) {
   const relativeBands = !lowCoverage;          // 覆盖率不足时不制造排名
   if (relativeBands) applyRelativeZones(themes);
 
-  // SC-12 §四.5：旧机会图的散点与新 foundation 使用同一个门槛（lib/satisfaction-gate.js），
-  // 不得由两套逻辑分别决定是否画图。坐标、依据、证据全部由服务端给出，前端只消费结论。
+  // SC-12 r3 §五：**唯一的 scatterGate 出口**。
+  // computeOpportunityMap 负责生成结论；Foundation 只复用 map.scatterGate，不得再从 themes 重组一套对象。
+  // 门槛：满意度依据=情绪分类依据；重要性依据=提及品牌广度（二者不得混用）；
+  //       样本范围=本语料统一 scope；时间窗口=语料采集窗口（逐主题窗口作为 themeWindow 附带说明）；
+  //       Evidence 的观察时间必须落在同一窗口内，否则不计入该对象。
   const ScatterGate = require('./satisfaction-gate.js');
   const times = [];
-  for (const t of themes) for (const s of t.sources) if (s.observedAt) times.push(s.observedAt);
+  for (const it of items) if (it && it.observedAt) times.push(it.observedAt);
   times.sort();
-  const scatterGate = ScatterGate.evaluateScatterGate(themes.map(t => ({
-    oid: t.oid,
-    label: t.label,
-    satisfaction: t.satisfaction,
-    // 满意度 = 正面/(正面+负面) 的确定性规则，分母只含已分类提及（可核验依据）
-    satisfactionBasis: 'deterministic_rule',
-    satisfactionBasisText: '正面提及 / (正面提及 + 负面提及)，中性或未分类评论不计入',
-    importance: t.importance,
-    // 重要性 = 提及广度的确定性规则（提到该主题的品牌数 / 有声音品牌数）
-    importanceBasis: 'deterministic_rule',
-    importanceBasisText: '提到该主题的品牌数 / 有用户声音的品牌数（广度）',
-    sampleScope: t.denominatorText || (t.brandsMentioned + '/' + t.brandsWithVoice + ' 家有用户声音的品牌提到'),
-    window: { from: times[0] || null, to: times[times.length - 1] || null },
-    brandsMentioned: t.brandsMentioned,
-    brandsWithVoice: t.brandsWithVoice,
-    posMentions: t.posMentions,
-    negMentions: t.negMentions,
-    confidence: t.confidence,
-    evidenceRefs: (t.sources || []).map(s => ({
-      evidenceId: s.evidenceId, snapshotId: s.snapshotId,
-      sourceUrl: s.url || null, brandId: s.competitorId || null, observedAt: s.observedAt || null,
-    })),
-  })), {});
+  const corpusWindow = { from: times[0] || null, to: times[times.length - 1] || null };
+  // 样本范围：同一语料（同项目、同合格输入口径）→ 全部主题共享同一可比分组
+  const corpusScope = '项目公开评论语料：' + brandsWithVoice + '/' + doneBrands + ' 家品牌有合格用户声音（共 ' + items.length + ' 条合格提及）';
+  const scatterGate = ScatterGate.evaluateScatterGate(themes.map(t => {
+    const srcs = Array.isArray(t.sources) ? t.sources : [];
+    // 满意度依据：取该主题实际用到的情绪分类依据（来源字段 / 确定性规则 / 模型提取）
+    const bases = srcs.map(x => x && x.basis).filter(b => ScatterGate.SATISFACTION_BASES.indexOf(b) !== -1);
+    const stampList = srcs.map(x => x && x.observedAt).filter(Boolean).sort();
+    return {
+      oid: t.oid,
+      label: t.label,
+      satisfaction: t.satisfaction,
+      satisfactionBasis: bases[0] || 'deterministic_rule',
+      satisfactionBasisText: '正面提及 / (正面提及 + 负面提及)，中性或未分类评论不计入分子或分母',
+      importance: t.importance,
+      // 重要性依据：明确为「提及品牌广度的确定性计算」，不复用情绪分类依据
+      importanceBasis: 'mention_breadth',
+      importanceBasisText: '提到该主题的品牌数 / 有用户声音的品牌数（品牌广度，确定性计算）',
+      sampleScope: corpusScope,
+      window: corpusWindow,
+      themeWindow: { from: stampList[0] || null, to: stampList[stampList.length - 1] || null },
+      brandsMentioned: t.brandsMentioned,
+      brandsWithVoice: t.brandsWithVoice,
+      posMentions: t.posMentions,
+      negMentions: t.negMentions,
+      confidence: t.confidence,
+      // 结构化引用：brandId 用品牌档案 ID（不是 competitorId）
+      evidenceRefs: srcs.map(x => ({
+        evidenceId: x.evidenceId || null, snapshotId: x.snapshotId || null,
+        sourceUrl: x.url || null, brandId: x.brandId || null, observedAt: x.observedAt || null,
+      })),
+    };
+  }), { corpusWindow });
 
   return {
     hidden: false,

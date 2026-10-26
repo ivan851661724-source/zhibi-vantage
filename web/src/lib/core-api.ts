@@ -379,7 +379,11 @@ export interface OpportunityDimensionBasis {
   code: string; label: string;
   status: 'complete' | 'partial' | 'missing' | 'not_covered' | 'not_configured' | 'checked_empty';
   statusText: string | null;
-  brandCount: number;        // 参与品牌数
+  brandCount: number;        // 参与品牌数（当前比较，仅新鲜数据）
+  // §一.3：新鲜 / 历史品牌数（历史不参与当前比较）
+  freshBrandCount?: number;
+  historicalBrandCount?: number;
+  totalBrandCount?: number;
   observationCount: number;  // 观察数量
   evidenceCount: number;     // Evidence 数量
   window: { from: string | null; to: string | null };
@@ -405,8 +409,12 @@ export interface OpportunityPriceRow {
   brandId: string; name: string; competitorId: string | null;
   productCount: number | null; available: number | null; soldOut: number | null;
   priceMin: number | null; priceMedian: number | null; priceMax: number | null;
-  currency: string | null; currencyStatus?: 'confirmed' | 'mixed' | 'unknown';
+  currency: string | null; currencyStatus?: 'confirmed' | 'mixed' | 'unknown' | 'conflict';
   priceComparable?: boolean;
+  // §二：数值/时间/证据来自同一套事实（observation|catalog）；冲突时全为 null
+  priceSource?: 'observation' | 'catalog' | null;
+  currencyConflict?: { observationCurrency: string | null; catalogCurrency: string | null; observationAt: string | null; catalogAt: string | null; note?: string } | null;
+  fresh?: boolean;
   observedAt: string | null; evidenceIds: string[];
   usingPreviousData?: boolean; lastSuccessAt?: string | null; latestFailureText?: string | null;
   evidenceRefs?: OpportunityEvidenceRef[];
@@ -418,6 +426,59 @@ export interface OpportunityLead {
   evidenceRefs: OpportunityEvidenceRef[];
   limits: string[]; question: string;
   historical?: boolean;
+}
+
+export interface OpportunityScatterObject {
+  oid: string | null; label: string | null;
+  satisfaction: number | null; importance: number | null;
+  satisfactionBasis?: string | null; importanceBasis?: string | null;
+  satisfactionBasisText?: string | null; importanceBasisText?: string | null;
+  sampleScope: string | null;
+  window: { from: string | null; to: string | null };
+  themeWindow?: { from: string | null; to: string | null } | null;
+  brandsMentioned?: number | null; brandsWithVoice?: number | null;
+  posMentions?: number | null; negMentions?: number | null;
+  confidence?: string | null;
+  evidenceRefs: OpportunityEvidenceRef[];
+}
+
+export interface OpportunityScatterGate {
+  available: boolean; minObjects: number; evaluatedObjects?: number; comparableObjects: number;
+  objects: OpportunityScatterObject[];
+  groups?: { scope: string; window: { from: string | null; to: string | null }; count: number; eligible: boolean; labels: (string | null)[] }[];
+  chosenGroup?: { scope: string; window: { from: string | null; to: string | null }; count: number } | null;
+  rejected?: { label: string | null; missing: string[] }[];
+  reason: string | null; detail?: string | null; coordsBasis?: string; limits: string[];
+}
+
+export interface OpportunityLiveModule {
+  available: boolean;
+  status: string;
+  statusText: string | null;
+  brandCount: number;
+  historicalBrandCount: number;
+  observationCount: number;
+  window: { from: string | null; to: string | null };
+  rows: {
+    brandId: string; name: string; observationCount: number; observedAt: string | null;
+    summary: Record<string, unknown> | null;
+    items: { title: string | null; url: string | null; publishedAt: string | null; platform: string | null; metric: Record<string, number> | null; market: string | null; kind: string | null }[];
+    coverageNote: string | null;
+  }[];
+  historicalRows: { brandId: string; name: string; observationCount: number; observedAt: string | null; lastSuccessAt: string | null; items: { title: string | null; url: string | null }[] }[];
+  measurementMethod: string | null;
+  evidenceRefs: OpportunityEvidenceRef[];
+  perBrand: { brandId: string; name: string; state: string; stateText: string | null; outOfCoverage: boolean; coverageNote: string | null; observationCount: number }[];
+  usingPreviousData: boolean;
+  lastSuccessAt: string | null;
+  limits: string[];
+  analysisNote: string;
+}
+
+export interface HistoricalObservationGroup {
+  dimensionCode: string;
+  label: string;
+  rows: { brandId: string; name: string; productCount?: number | null; priceMin?: number | null; priceMax?: number | null; pageCount?: number; observationCount?: number; observedAt: string | null; lastSuccessAt?: string | null; currency?: string | null }[];
 }
 
 export interface OpportunityFoundation {
@@ -439,6 +500,10 @@ export interface OpportunityFoundation {
       currency: string | null;
       multiCurrency: boolean;
       rows: OpportunityPriceRow[];
+      // §一.2：历史数据独立区域（不参与当前比较）
+      historicalRows: OpportunityPriceRow[];
+      // §二.3：跨层币种冲突
+      currencyConflicts: { brandId: string; name: string; productCount: number | null; observationCurrency: string | null; catalogCurrency: string | null; observationAt: string | null; catalogAt: string | null; note: string | null }[];
       nonComparableRows: { brandId: string; competitorId: string | null; name: string; productCount: number | null; currencyStatus: string; note: string }[];
       limits: string[];
     };
@@ -455,22 +520,21 @@ export interface OpportunityFoundation {
       ratedObjects: number;
       limits: string[];
     };
-    // §四：散点门槛结论由服务端给出（前端只消费，不自行判定；无 jitter）
-    satisfactionScatter: {
-      available: boolean; minObjects: number; evaluatedObjects?: number; comparableObjects: number;
-      objects: { oid: string | null; label: string | null; satisfaction: number | null; importance: number | null; sampleScope: string | null; window: { from: string | null; to: string | null }; evidenceRefs: OpportunityEvidenceRef[] }[];
-      rejected?: { label: string | null; missing: string[] }[];
-      reason: string | null;
-      detail?: string | null;
-      coordsBasis?: string;
-      limits: string[];
-    };
+    // §五：散点门槛结论由服务端唯一给出（前端只消费，无 jitter）
+    satisfactionScatter: OpportunityScatterGate;
+    // §四：内容 / 热度 / 广告用户可见模块
+    contentActivity: OpportunityLiveModule;
+    searchInterest: OpportunityLiveModule;
+    adActivity: OpportunityLiveModule;
   };
+  // §一.2：历史观察独立区域
+  historicalObservations: HistoricalObservationGroup[];
   opportunities: OpportunityLead[];
   summary: {
     usableDimensionCodes: string[]; unavailableDimensionCodes?: string[]; missingDimensionCodes: string[];
     usableDimensionCount: number; missingDimensionCount: number;
     brandCount: number; brandsWithData: number; opportunityCount: number;
+    freshBrandCount?: number; historicalBrandCount?: number;
     hasAnalysis?: boolean;
   };
 }
