@@ -236,6 +236,9 @@ STAGE="后端替换（维护窗口）"
 touch "$NGX_MAINT"; MAINT_ON=1
 echo "$(date '+%F %T') 进入维护态"
 MAINT_T0=$(date +%s)
+# 在途请求宽限：维护标记生效后先等 2s，让已经越过入口的请求在旧后端上跑完，
+# 否则替换瞬间它们会被打断成连接重置（外网 100ms 探测实测出现过 1/1573）。
+sleep 2
 docker compose up -d --no-deps zhibi-vantage 2>&1 | tail -3
 # 就绪探测用容器内直探 HTTP（与 healthcheck 同命令），0.5s 间隔——不依赖
 # docker healthcheck 的 30s 周期，把维护窗口从数十秒压到数秒
