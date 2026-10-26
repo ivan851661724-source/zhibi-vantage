@@ -34,6 +34,9 @@ probe_loop() { # $1=label $2=outfile $3=seconds
   done
 }
 
+maint_window() { # 输出 503 连续窗口时长（秒，保留 1 位）
+  awk '$3=="503"{split($1,t,":"); s=t[1]*3600+t[2]*60+t[3]; if(min==""||s<min)min=s; if(s>max)max=s; n++} END{if(n>0)printf "%.1f", max-min; else printf "0"}' "$1"
+}
 summarize() { # $1=label $2=file
   local total fails
   total=$(wc -l < "$2" 2>/dev/null || echo 0)
@@ -92,7 +95,11 @@ wait $PROBE 2>/dev/null
 echo "$out" | grep -E "deploy done|candidate images|入口已切|健康门基线|RC=" | sed 's/^/    | /'
 case "$out" in *RC=0*) ok "真实部署成功完成" ;; *) bad "真实部署失败" ;; esac
 read -r TOTAL NON200 <<< "$(summarize '成功部署全过程' /tmp/p0-probe-success.txt)"
-[ "$NON200" -eq 0 ] && ok "全过程 0 次非 200（无 502/连接拒绝）" || bad "全过程 $NON200 次非 200（$TOTAL 次中）"
+P502=$(awk '$3=="502"||$3=="000"' /tmp/p0-probe-success.txt | wc -l)
+P503=$(awk '$3=="503"' /tmp/p0-probe-success.txt | wc -l)
+MW=$(maint_window /tmp/p0-probe-success.txt)
+[ "$P502" -eq 0 ] && ok "全过程 0 次 502/连接拒绝（$TOTAL 次请求，503 维护态 $P503 次）" || bad "全过程出现 $P502 次 502/连接拒绝"
+awk "BEGIN{exit !($MW<=15)}" && ok "后端维护窗口 ${MW}s（明确 503，≤15s）" || bad "后端维护窗口 ${MW}s 超过 15s"
 SLOT_AFTER=$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)
 IMG_AFTER=$(docker inspect -f '{{.Image}}' "$SLOT_AFTER" 2>/dev/null || echo none)
 [ "$IMG_BEFORE" != "$IMG_AFTER" ] && ok "镜像 ID 已变化（$IMG_BEFORE -> $IMG_AFTER）" || bad "镜像 ID 未变化（$IMG_BEFORE）"

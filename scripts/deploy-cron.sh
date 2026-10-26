@@ -230,16 +230,23 @@ echo "候选静态资源全部 200"
 STAGE="后端替换（维护窗口）"
 touch "$NGX_MAINT"; MAINT_ON=1
 echo "$(date '+%F %T') 进入维护态"
+MAINT_T0=$(date +%s)
 docker compose up -d --no-deps zhibi-vantage 2>&1 | tail -3
-BH=starting
-for i in $(seq 1 45); do
-  BH=$(docker inspect -f '{{.State.Health.Status}}' zhibi-vantage 2>/dev/null || echo none)
-  [ "$BH" = "healthy" ] && break
-  sleep 2
+# 就绪探测用容器内直探 HTTP（与 healthcheck 同命令），0.5s 间隔——不依赖
+# docker healthcheck 的 30s 周期，把维护窗口从数十秒压到数秒
+api_ready() {
+  docker exec zhibi-vantage node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3300)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1
+}
+BH=not-ready
+for i in $(seq 1 120); do
+  if api_ready; then BH=ready; break; fi
+  sleep 0.5
 done
-if [ "$BH" != "healthy" ]; then
-  echo "$(date '+%F %T') 新后端未 healthy（$BH）"; STAGE="后端健康检查"; exit 1
+MAINT_WINDOW=$(( $(date +%s) - MAINT_T0 ))
+if [ "$BH" != "ready" ]; then
+  echo "$(date '+%F %T') 新后端 60s 内未就绪（$BH）"; STAGE="后端就绪探测"; exit 1
 fi
+echo "新后端就绪耗时 ${MAINT_WINDOW}s"
 CH=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$CAND_PORT/healthz" 2>/dev/null || echo 000)
 [ "$CH" = "200" ] || { echo "$(date '+%F %T') 候选 /healthz=$CH"; STAGE="候选后端联通"; exit 1; }
 rm -f "$NGX_MAINT"; MAINT_ON=0
