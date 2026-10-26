@@ -3280,6 +3280,12 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-opp-table td{color:var(--ink2)}
 .core-opp-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--ink2)}
 .core-opp-list b{color:var(--ink)}
+/* SC-12 r2 §六：币种分组 / 证据按钮 / 不可比较行 */
+.core-opp-cur-group{margin:6px 0}
+.core-opp-cur-title{font-weight:600;font-size:12px;margin:4px 0}
+.core-opp-ev-btn{border:1px solid var(--border,#d0d0d0);background:transparent;border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer}
+.core-opp-ev-btn:hover{background:rgba(0,0,0,0.04)}
+.core-opp-nc-row td{color:var(--muted,#888)}
 .core-opp-gate{font-size:13px;color:var(--ink);font-weight:600;margin:0 0 6px}
 .core-opp-gate-block{border:1px dashed var(--line1);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.015)}
 .core-opp-dim-state{color:var(--ink3)}

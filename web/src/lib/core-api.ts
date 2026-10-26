@@ -377,7 +377,7 @@ export interface OpportunityView {
 // ---------- SC-12 §六：机会数据基础（服务端按可用维度独立产出） ----------
 export interface OpportunityDimensionBasis {
   code: string; label: string;
-  status: 'complete' | 'partial' | 'missing' | 'not_covered' | 'not_configured';
+  status: 'complete' | 'partial' | 'missing' | 'not_covered' | 'not_configured' | 'checked_empty';
   statusText: string | null;
   brandCount: number;        // 参与品牌数
   observationCount: number;  // 观察数量
@@ -385,13 +385,39 @@ export interface OpportunityDimensionBasis {
   window: { from: string | null; to: string | null };
   measurementMethod: string | null;
   limits: string[];
+  // §三：历史数据与最新失败
+  usingPreviousData?: boolean;
+  lastSuccessAt?: string | null;
+  latestFailureText?: string | null;
+  // §二：逐品牌状态（UI 用于「每项只显示一次」+ 混合状态不混用）
+  perBrand?: { brandId: string; name: string; state: string; stateText: string | null; observationCount: number; observedAt: string | null; outOfCoverage?: boolean; coverageNote?: string | null }[] | null;
+}
+
+export interface OpportunityEvidenceRef {
+  evidenceId: string | null;
+  snapshotId: string | null;
+  sourceUrl: string | null;
+  brandId?: string | null;
+  observedAt?: string | null;
 }
 
 export interface OpportunityPriceRow {
   brandId: string; name: string; competitorId: string | null;
   productCount: number | null; available: number | null; soldOut: number | null;
   priceMin: number | null; priceMedian: number | null; priceMax: number | null;
-  currency: string | null; observedAt: string | null; evidenceIds: string[];
+  currency: string | null; currencyStatus?: 'confirmed' | 'mixed' | 'unknown';
+  priceComparable?: boolean;
+  observedAt: string | null; evidenceIds: string[];
+  usingPreviousData?: boolean; lastSuccessAt?: string | null; latestFailureText?: string | null;
+  evidenceRefs?: OpportunityEvidenceRef[];
+}
+
+export interface OpportunityLead {
+  id: string; title: string; fact: string; dimension: string; dimensionCode?: string; sampleSize: string;
+  window: { from: string | null; to: string | null };
+  evidenceRefs: OpportunityEvidenceRef[];
+  limits: string[]; question: string;
+  historical?: boolean;
 }
 
 export interface OpportunityFoundation {
@@ -402,12 +428,18 @@ export interface OpportunityFoundation {
     list: { brandId: string; competitorId: string | null; name: string; domain: string | null; relation: string | null; market: string | null; category: string | null; hasPrice: boolean; hasReviews: boolean }[];
   };
   dimensions: Record<string, OpportunityDimensionBasis>;
+  // §六.1：不可用维度统一在此列出（每个维度只出现一次）
+  unavailableDimensions: OpportunityDimensionBasis[];
   modules: {
     priceBands: {
       available: boolean;
+      // §一.5：按币种分组
+      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
       bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[];
-      rows: OpportunityPriceRow[];
       currency: string | null;
+      multiCurrency: boolean;
+      rows: OpportunityPriceRow[];
+      nonComparableRows: { brandId: string; competitorId: string | null; name: string; productCount: number | null; currencyStatus: string; note: string }[];
       limits: string[];
     };
     matrixDensity: { available: boolean; rows: OpportunityPriceRow[]; medianProductCount: number | null; limits: string[] };
@@ -419,26 +451,27 @@ export interface OpportunityFoundation {
     };
     reviewInsights: {
       available: boolean;
-      rows: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; sourceCount: number | null; observedAt: string | null; evidenceIds: string[]; pages: { url: string | null; title: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null }[] }[];
+      rows: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; sourceCount: number | null; observedAt: string | null; evidenceIds: string[]; usingPreviousData?: boolean; latestFailureText?: string | null; pages: { url: string | null; title: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null }[] }[];
       ratedObjects: number;
       limits: string[];
     };
+    // §四：散点门槛结论由服务端给出（前端只消费，不自行判定；无 jitter）
     satisfactionScatter: {
-      available: boolean; minObjects: number; comparableObjects: number;
-      objects: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; observedAt: string | null; evidenceIds: string[] }[];
+      available: boolean; minObjects: number; evaluatedObjects?: number; comparableObjects: number;
+      objects: { oid: string | null; label: string | null; satisfaction: number | null; importance: number | null; sampleScope: string | null; window: { from: string | null; to: string | null }; evidenceRefs: OpportunityEvidenceRef[] }[];
+      rejected?: { label: string | null; missing: string[] }[];
       reason: string | null;
+      detail?: string | null;
+      coordsBasis?: string;
       limits: string[];
     };
   };
-  opportunities: {
-    id: string; title: string; fact: string; dimension: string; sampleSize: string;
-    window: { from: string | null; to: string | null };
-    evidenceRefs: string[]; limits: string[]; question: string;
-  }[];
+  opportunities: OpportunityLead[];
   summary: {
-    usableDimensionCodes: string[]; missingDimensionCodes: string[];
+    usableDimensionCodes: string[]; unavailableDimensionCodes?: string[]; missingDimensionCodes: string[];
     usableDimensionCount: number; missingDimensionCount: number;
     brandCount: number; brandsWithData: number; opportunityCount: number;
+    hasAnalysis?: boolean;
   };
 }
 

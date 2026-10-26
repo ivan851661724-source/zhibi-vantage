@@ -198,7 +198,7 @@ function scoreCluster(cl, brandsWithVoice) {
     method: METHOD_LABEL,
     denominatorText: `${brandSet.size}/${denom} 家有用户声音的竞争品牌提到（正面 ${pos} · 负面 ${neg}）`,
     sources: cl.mentions.slice(0, 12).map(m => ({
-      name: m.brand, field: m.field, polarity: m.polarity,
+      name: m.brand, competitorId: itemCompetitorId(m) || null, field: m.field, polarity: m.polarity,
       basis: m.basis || 'unverified', basisNote: m.basisNote || null,
       detail: m.text, url: m.url || null, observedAt: m.observedAt || null,
       evidenceId: m.evidenceId || null, snapshotId: m.snapshotId || null,
@@ -309,6 +309,36 @@ function computeOpportunityMap(competitors, opts) {
   const relativeBands = !lowCoverage;          // 覆盖率不足时不制造排名
   if (relativeBands) applyRelativeZones(themes);
 
+  // SC-12 §四.5：旧机会图的散点与新 foundation 使用同一个门槛（lib/satisfaction-gate.js），
+  // 不得由两套逻辑分别决定是否画图。坐标、依据、证据全部由服务端给出，前端只消费结论。
+  const ScatterGate = require('./satisfaction-gate.js');
+  const times = [];
+  for (const t of themes) for (const s of t.sources) if (s.observedAt) times.push(s.observedAt);
+  times.sort();
+  const scatterGate = ScatterGate.evaluateScatterGate(themes.map(t => ({
+    oid: t.oid,
+    label: t.label,
+    satisfaction: t.satisfaction,
+    // 满意度 = 正面/(正面+负面) 的确定性规则，分母只含已分类提及（可核验依据）
+    satisfactionBasis: 'deterministic_rule',
+    satisfactionBasisText: '正面提及 / (正面提及 + 负面提及)，中性或未分类评论不计入',
+    importance: t.importance,
+    // 重要性 = 提及广度的确定性规则（提到该主题的品牌数 / 有声音品牌数）
+    importanceBasis: 'deterministic_rule',
+    importanceBasisText: '提到该主题的品牌数 / 有用户声音的品牌数（广度）',
+    sampleScope: t.denominatorText || (t.brandsMentioned + '/' + t.brandsWithVoice + ' 家有用户声音的品牌提到'),
+    window: { from: times[0] || null, to: times[times.length - 1] || null },
+    brandsMentioned: t.brandsMentioned,
+    brandsWithVoice: t.brandsWithVoice,
+    posMentions: t.posMentions,
+    negMentions: t.negMentions,
+    confidence: t.confidence,
+    evidenceRefs: (t.sources || []).map(s => ({
+      evidenceId: s.evidenceId, snapshotId: s.snapshotId,
+      sourceUrl: s.url || null, brandId: s.competitorId || null, observedAt: s.observedAt || null,
+    })),
+  })), {});
+
   return {
     hidden: false,
     ranked: !lowCoverage,
@@ -337,6 +367,8 @@ function computeOpportunityMap(competitors, opts) {
     method: METHOD_LABEL,
     caveats: CAVEATS,
     voiceBasis,
+    // §四.5：与新 foundation 共用的散点门槛结论（前端只消费，不自行判定）
+    scatterGate,
     themes
   };
 }

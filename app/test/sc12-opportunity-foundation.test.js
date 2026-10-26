@@ -37,6 +37,8 @@ const COMPETITORS = [
   { id: 'c-alpha', name: 'Alpha', url: 'https://alpha-sc12.example.com', status: 'done', isShopify: true },
   { id: 'c-beta', name: 'Beta', url: 'https://beta-sc12.example.com', status: 'done', isShopify: true },
   { id: 'c-gamma', name: 'Gamma', url: 'https://gamma-sc12.example.com', status: 'done', isShopify: false },
+  // c-delta：带价品牌（与 alpha/beta 同币种 USD）——「同币种 ≥3 品牌才允许计算中位数」
+  { id: 'c-delta', name: 'Delta', url: 'https://delta-sc12.example.com', status: 'done', isShopify: true },
 ];
 
 function seedCatalog(compId, prices, opts) {
@@ -129,6 +131,9 @@ test.before(async () => {
   const snapB = mkSnapshot('https://beta-sc12.example.com/products.json', JSON.stringify({ products: [{ id: 1, price: '89' }] }));
   const evB = mkEvidence(snapB.snapshot_id, 'beta');
   seedCatalog('c-beta', [89, 99, 109, 119], { key: 'b1', evidenceIds: [evB.evidence_id] });
+  const snapD = mkSnapshot('https://delta-sc12.example.com/products.json', JSON.stringify({ products: [{ id: 1, price: '25' }] }));
+  const evD = mkEvidence(snapD.snapshot_id, 'delta');
+  seedCatalog('c-delta', [15, 25, 35], { key: 'd1', evidenceIds: [evD.evidence_id] });
   // c-gamma 无价格数据（缺失不得填 0）
   seedReviews('c-alpha', { key: 'r1', observations: [{ id: 'p1', title: 'Alpha review page', price: null, currency: null, available: true, publishedAt: null, rating: null, reviewCount: null, sourceUrl: 'https://alpha-sc12.example.com/reviews' }], evidenceIds: ['ev-alpha-rev-1'] });
   // 记忆事实：目录级聚合（price_min/median/max、product_count）
@@ -188,8 +193,9 @@ test('O2 缺失保持 null：无价格品牌不进价格分布；未接通维度
     assert.strictEqual(F.dimensions[key].observationCount, 0);
     assert.ok(F.dimensions[key].statusText, key + ' 有用户可读状态文案');
   }
-  assert.strictEqual(F.dimensions.price.brandCount, 2, '参与品牌数只算真有数据的品牌');
-  assert.strictEqual(F.brandScope.total, 3, '品牌总数含无数据品牌');
+  // 参与价格比较的品牌只含「币种已确认」的：alpha / beta / delta（gamma 无价格不进）
+  assert.strictEqual(F.dimensions.price.brandCount, 3, '参与品牌数只算真有数据且币种已确认的品牌');
+  assert.strictEqual(F.brandScope.total, 4, '品牌总数含无数据品牌');
 });
 
 // ---------- O3 满意度门槛 ----------
