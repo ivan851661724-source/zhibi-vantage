@@ -3286,6 +3286,8 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-opp-ev-btn{border:1px solid var(--border,#d0d0d0);background:transparent;border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer}
 .core-opp-ev-btn:hover{background:rgba(0,0,0,0.04)}
 .core-opp-nc-row td{color:var(--muted,#888)}
+.core-opp-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.core-opp-table-wrap .core-opp-table{min-width:520px}
 .core-opp-gate{font-size:13px;color:var(--ink);font-weight:600;margin:0 0 6px}
 .core-opp-gate-block{border:1px dashed var(--line1);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.015)}
 .core-opp-dim-state{color:var(--ink3)}

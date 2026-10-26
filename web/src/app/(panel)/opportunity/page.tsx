@@ -96,6 +96,7 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
         <div className="core-opp-card" data-testid="opp-price-position">
           <h4>品牌价格定位{price.multiCurrency ? '（按币种分组）' : ''}</h4>
           {(price.rows.length || price.nonComparableRows.length) ? (
+            <div className="core-opp-table-wrap">
             <table className="core-opp-table">
               <thead><tr><th>品牌</th><th>币种</th><th>中位价</th><th>价格区间</th><th>在售 SKU</th><th>证据</th></tr></thead>
               <tbody>
@@ -122,6 +123,7 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : <p className="core-brand-muted">暂无可用价格数据。</p>}
         </div>
 
