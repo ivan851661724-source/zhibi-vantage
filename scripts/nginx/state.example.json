@@ -1,0 +1,9 @@
+{
+  "deployed_sha": null,
+  "deployed_web_image_id": null,
+  "deployed_api_image_id": null,
+  "active_web_slot": "blue",
+  "failed_sha": null,
+  "deployed_at": null,
+  "_comment": "部署状态（仓库外 /var/lib/zhibi-deploy/state.json，原子写入）。只有完整健康门通过后才更新 deployed_sha；回滚后保持旧值；不含任何密钥。"
+}
