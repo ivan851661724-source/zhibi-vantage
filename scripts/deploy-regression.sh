@@ -94,11 +94,11 @@ out=$(FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 wait $PROBE 2>/dev/null
 echo "$out" | grep -E "deploy done|candidate images|入口已切|健康门基线|RC=" | sed 's/^/    | /'
 case "$out" in *RC=0*) ok "真实部署成功完成" ;; *) bad "真实部署失败" ;; esac
-read -r TOTAL NON200 <<< "$(summarize '成功部署全过程' /tmp/p0-probe-success.txt)"
+read -r TOTAL NON200 <<< "$(summarize '成功部署全过程' /tmp/p0-probe-success.txt | tail -1)"
 P502=$(awk '$3=="502"||$3=="000"' /tmp/p0-probe-success.txt | wc -l)
 P503=$(awk '$3=="503"' /tmp/p0-probe-success.txt | wc -l)
 MW=$(maint_window /tmp/p0-probe-success.txt)
-[ "$P502" -eq 0 ] && ok "全过程 0 次 502/连接拒绝（$TOTAL 次请求，503 维护态 $P503 次）" || bad "全过程出现 $P502 次 502/连接拒绝"
+[ "$P502" -eq 0 ] && ok "全过程 0 次 502/连接拒绝（$TOTAL 次请求，503 维护态 $P503 次）" || bad "全过程出现 $P502 次 502/连接拒绝（$TOTAL 次请求）"
 awk "BEGIN{exit !($MW<=15)}" && ok "后端维护窗口 ${MW}s（明确 503，≤15s）" || bad "后端维护窗口 ${MW}s 超过 15s"
 SLOT_AFTER=$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)
 IMG_AFTER=$(docker inspect -f '{{.Image}}' "$SLOT_AFTER" 2>/dev/null || echo none)
@@ -130,11 +130,13 @@ out=$(ZB_DRILL_HEALTH_FAIL=1 FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron
 wait $PROBE 2>/dev/null
 echo "$out" | grep -E "健康门未通过|回滚完成|回滚失败|RC=" | head -5 | sed 's/^/    | /'
 case "$out" in *RC=1*) ok "失败部署非零退出" ;; *) bad "失败部署退出码异常" ;; esac
-read -r TOTAL NON200 <<< "$(summarize '失败回滚全过程' /tmp/p0-probe-rollback.txt)"
+read -r TOTAL NON200 <<< "$(summarize '失败回滚全过程' /tmp/p0-probe-rollback.txt | tail -1)"
 PERM=$(awk '$3=="502" || $3=="000"' /tmp/p0-probe-rollback.txt | wc -l)
 MAINT=$(awk '$3=="503"' /tmp/p0-probe-rollback.txt | wc -l)
 [ "$PERM" -eq 0 ] && ok "回滚全过程无 502/连接拒绝（维护态 503 共 $MAINT 次，属明确维护响应）" || bad "回滚全过程出现 $PERM 次 502/000"
 printf '%s' "$out" | grep -q "回滚完成" && ok "回滚完成并严格核对镜像" || bad "回滚未完成"
+RB_SEC=$(printf '%s' "$out" | grep -oE "回滚耗时 [0-9]+s" | head -1 | grep -oE "[0-9]+" || echo 999)
+[ "${RB_SEC:-999}" -le 30 ] && ok "回滚耗时 ${RB_SEC}s（≤30s）" || bad "回滚耗时 ${RB_SEC}s 超过 30s"
 FAILED_STATE=$(state_field failed_sha)
 [ "$FAILED_STATE" = "$REMOTE_SHA" ] && ok "failed_sha 记录为候选提交（${REMOTE_SHA:0:12}）" || bad "failed_sha 异常：$FAILED_STATE"
 out2=$(timeout 60 bash scripts/deploy-cron.sh 2>&1)

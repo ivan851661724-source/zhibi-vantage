@@ -75,6 +75,7 @@ rollback() {
   [ "$ROLLBACK_DONE" = "1" ] && return 0
   ROLLBACK_DONE=1
   local ok=0
+  local rb_t0; rb_t0=$(date +%s)
   echo "$(date '+%F %T') 触发回滚（stage=$STAGE switched=$NGX_SWITCHED）"
   STAGE="回滚"
   touch "$NGX_MAINT"; MAINT_ON=1
@@ -111,6 +112,7 @@ rollback() {
   if [ "$LOGIN" = "200" ] && [ "$HEALTHZ" = "200" ] && [ "$BAD" = "0" ] \
      && [ "$IMG_API" = "$OLD_API_IMG" ] && [ "$IMG_WEB" = "$OLD_WEB_RB_IMG" ]; then
     echo "$(date '+%F %T') 回滚完成：旧版本已恢复（镜像与锚点严格一致）"
+    echo "  回滚耗时 $(( $(date +%s) - rb_t0 ))s"
     ok=1
   else
     echo "$(date '+%F %T') 回滚失败或不完整：需要人工介入"
