@@ -110,6 +110,20 @@ STATE_IMG=$(grep -o '"deployed_web_image_id":"[^"]*"' "$STATE" | sed 's/.*:"//; 
 [ "$STATE_IMG" = "$IMG_AFTER" ] && ok "state 镜像 == 实际运行镜像（$IMG_AFTER）" || bad "state 镜像($STATE_IMG) != 运行($IMG_AFTER)"
 
 echo "== R5+R6 失败回滚全过程 + failed_sha 隔离 =="
+# 真实语义：这次部署的是「新提交」，已部署的是旧版本——failed_sha 才有记录空间。
+# 若用「已部署的同一个 SHA」演练，按设计不得记录 failed_sha（见 R6b）。
+STATE_SAVE=/tmp/p0-state-save.json
+cp "$STATE" "$STATE_SAVE"
+PREV_SHA=$(git rev-parse HEAD~1)
+REMOTE_SHA=$(git rev-parse "origin/${DEPLOY_REF:-main}")
+state_field() { grep -o "\"$1\":\"[^\"]*\"" "$STATE" | sed 's/.*:"//; s/"$//'; }
+state_force() { # $1=deployed_sha $2=failed_sha
+  printf '{"deployed_sha":"%s","deployed_web_image_id":"%s","deployed_api_image_id":"%s","active_web_slot":"%s","failed_sha":"%s","deployed_at":"%s"}\n' \
+    "$1" "$(state_field deployed_web_image_id)" "$(state_field deployed_api_image_id)" \
+    "$(state_field active_web_slot)" "$2" "$(date -u '+%FT%TZ')" > "$STATE"
+}
+state_force "$PREV_SHA" ""
+echo "  演练前置：deployed_sha=$PREV_SHA（旧版本） 候选=$REMOTE_SHA"
 ( probe_loop rollback /tmp/p0-probe-rollback.txt 200 ) &
 PROBE=$!
 out=$(ZB_DRILL_HEALTH_FAIL=1 FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
@@ -121,14 +135,25 @@ PERM=$(awk '$3=="502" || $3=="000"' /tmp/p0-probe-rollback.txt | wc -l)
 MAINT=$(awk '$3=="503"' /tmp/p0-probe-rollback.txt | wc -l)
 [ "$PERM" -eq 0 ] && ok "回滚全过程无 502/连接拒绝（维护态 503 共 $MAINT 次，属明确维护响应）" || bad "回滚全过程出现 $PERM 次 502/000"
 printf '%s' "$out" | grep -q "回滚完成" && ok "回滚完成并严格核对镜像" || bad "回滚未完成"
-FAILED_STATE=$(grep -o '"failed_sha":"[^"]*"' "$STATE" | sed 's/.*:"//; s/"$//')
-[ -n "$FAILED_STATE" ] && ok "failed_sha 已记录（$FAILED_STATE）" || bad "failed_sha 未记录"
+FAILED_STATE=$(state_field failed_sha)
+[ "$FAILED_STATE" = "$REMOTE_SHA" ] && ok "failed_sha 记录为候选提交（${REMOTE_SHA:0:12}）" || bad "failed_sha 异常：$FAILED_STATE"
 out2=$(timeout 60 bash scripts/deploy-cron.sh 2>&1)
-case "$out2" in *"已隔离"*|*"无需部署"*) ok "再次调用不重复部署：$(echo "$out2" | tail -1)" ;; *) bad "失败 SHA 被重复部署" ;; esac
+case "$out2" in *"已隔离"*) ok "再次调用被隔离：$(echo "$out2" | tail -1)" ;; *) bad "失败 SHA 被重复部署：$(echo "$out2" | tail -1)" ;; esac
 IMG_AFTER_ROLLBACK=$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)" 2>/dev/null || echo none)
 [ "$IMG_AFTER_ROLLBACK" = "$IMG_AFTER" ] && ok "回滚后运行镜像 == 上一成功版本（$IMG_AFTER_ROLLBACK）" || bad "回滚镜像不一致（$IMG_AFTER_ROLLBACK vs $IMG_AFTER）"
-DEPLOYED_AFTER=$(grep -o '"deployed_sha":"[^"]*"' "$STATE" | sed 's/.*:"//; s/"$//')
-[ "$DEPLOYED_AFTER" = "$DEPLOYED_SHA" ] && ok "回滚后 deployed_sha 保持上一成功版本（$DEPLOYED_AFTER）" || bad "deployed_sha 被失败版本覆盖（$DEPLOYED_AFTER）"
+DEPLOYED_AFTER=$(state_field deployed_sha)
+[ "$DEPLOYED_AFTER" = "$PREV_SHA" ] && ok "回滚后 deployed_sha 保持旧版本（${DEPLOYED_AFTER:0:12}）" || bad "deployed_sha 被失败版本覆盖（$DEPLOYED_AFTER）"
+
+echo "== R6b 已部署版本不会被记为失败版本（护栏）=="
+state_force "$REMOTE_SHA" ""
+out3=$(ZB_DRILL_HEALTH_FAIL=1 FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+case "$out3" in *RC=1*) ok "演练部署按预期失败" ;; *) bad "演练部署退出码异常" ;; esac
+FAILED_AFTER3=$(state_field failed_sha)
+[ -z "$FAILED_AFTER3" ] && ok "failed_sha 保持为空（运行中的版本不会自相矛盾）" || bad "failed_sha 被写入正在运行的版本：$FAILED_AFTER3"
+out4=$(timeout 60 bash scripts/deploy-cron.sh 2>&1)
+case "$out4" in *"无需部署"*) ok "再次调用判定无需部署：$(echo "$out4" | tail -1)" ;; *) bad "状态判定异常：$(echo "$out4" | tail -1)" ;; esac
+state_force "$REMOTE_SHA" ""
+echo "  状态已复原：deployed_sha=${REMOTE_SHA:0:12} failed_sha=空"
 
 echo ""
 echo "== 回归结果: PASS=$PASS FAIL=$FAIL =="
