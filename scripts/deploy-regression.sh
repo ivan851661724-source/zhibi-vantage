@@ -153,7 +153,7 @@ RB_SEC=$(printf '%s' "$out" | grep -oE "回滚耗时 [0-9]+s" | head -1 | grep -
 [ "${RB_SEC:-999}" -le 30 ] && ok "回滚耗时 ${RB_SEC}s（≤30s）" || bad "回滚耗时 ${RB_SEC}s 超过 30s"
 FAILED_STATE=$(state_field failed_sha)
 [ "$FAILED_STATE" = "$REMOTE_SHA" ] && ok "failed_sha 记录为候选提交（${REMOTE_SHA:0:12}）" || bad "failed_sha 异常：$FAILED_STATE"
-out2=$(timeout 60 bash scripts/deploy-cron.sh 2>&1)
+out2=$(ZB_IGNORE_PAUSE=1 timeout 60 bash scripts/deploy-cron.sh 2>&1)
 case "$out2" in *"已隔离"*) ok "再次调用被隔离：$(echo "$out2" | tail -1)" ;; *) bad "失败 SHA 被重复部署：$(echo "$out2" | tail -1)" ;; esac
 IMG_AFTER_ROLLBACK=$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)" 2>/dev/null || echo none)
 [ "$IMG_AFTER_ROLLBACK" = "$IMG_AFTER" ] && ok "回滚后运行镜像 == 上一成功版本（$IMG_AFTER_ROLLBACK）" || bad "回滚镜像不一致（$IMG_AFTER_ROLLBACK vs $IMG_AFTER）"
@@ -166,7 +166,7 @@ out3=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$IMG_BEFORE"
 case "$out3" in *RC=1*) ok "演练部署按预期失败" ;; *) bad "演练部署退出码异常" ;; esac
 FAILED_AFTER3=$(state_field failed_sha)
 [ -z "$FAILED_AFTER3" ] && ok "failed_sha 保持为空（运行中的版本不会自相矛盾）" || bad "failed_sha 被写入正在运行的版本：$FAILED_AFTER3"
-out4=$(timeout 60 bash scripts/deploy-cron.sh 2>&1)
+out4=$(ZB_IGNORE_PAUSE=1 timeout 60 bash scripts/deploy-cron.sh 2>&1)
 case "$out4" in *"无需部署"*) ok "再次调用判定无需部署：$(echo "$out4" | tail -1)" ;; *) bad "状态判定异常：$(echo "$out4" | tail -1)" ;; esac
 state_force "$REMOTE_SHA" ""
 echo "  状态已复原：deployed_sha=${REMOTE_SHA:0:12} failed_sha=空"

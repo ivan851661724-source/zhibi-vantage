@@ -53,7 +53,7 @@ mkdir -p "$STATE_DIR"
 
 # 跨重启的暂停标记：cron 命中即记录并退出（flock 会随重启消失，不能只靠锁）。
 # 人工/回归（FORCE_DEPLOY=1）显式越过。
-if [ -f "$STATE_DIR/deploy-paused" ] && [ "${FORCE_DEPLOY:-0}" != "1" ]; then
+if [ -f "$STATE_DIR/deploy-paused" ] && [ "${FORCE_DEPLOY:-0}" != "1" ] && [ "${ZB_IGNORE_PAUSE:-0}" != "1" ]; then
   echo "$(date '+%F %T') deploy paused by $STATE_DIR/deploy-paused, skip"
   exit 0
 fi
@@ -80,6 +80,9 @@ feishu_notify() {
 
 resource_preflight() {
   local avail_mb swap_mb disk_gb load1 cores builds reasons=""
+  # 构建路径门槛更高；ZB_SKIP_BUILD 演练不做任何编译，用低门槛
+  local min_mb=800
+  [ "${ZB_SKIP_BUILD:-0}" = "1" ] && min_mb=400
   avail_mb=$(free -m | awk '/^Mem:/{print $7}')
   swap_mb=$(free -m | awk '/^Swap:/{print $2}')
   disk_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
@@ -89,7 +92,7 @@ resource_preflight() {
   # 自身与调用链上的字符串也算进去，不能作为失败依据）
   builds=$(pgrep -cf 'docker build|compose build|buildkit|deploy\.sh' 2>/dev/null || true)
   echo "资源预检: 内存可用=${avail_mb}MB swap=${swap_mb}MB 磁盘可用=${disk_gb}GB load1=$load1 cores=$cores 构建/部署进程=${builds:-0}（含自身）"
-  [ "${avail_mb:-0}" -ge 800 ] || reasons="$reasons 可用内存${avail_mb}MB<800MB;"
+  [ "${avail_mb:-0}" -ge "$min_mb" ] || reasons="$reasons 可用内存${avail_mb}MB<${min_mb}MB;"
   [ "${disk_gb:-0}" -ge 2 ] || reasons="$reasons 磁盘可用${disk_gb}GB<2GB;"
   awk "BEGIN{exit !($load1 <= $cores * 2)}" || reasons="$reasons load1=$load1 超过 ${cores}x2;"
   if [ -n "$reasons" ]; then
@@ -362,8 +365,8 @@ echo "$(date '+%F %T') 旧槽 $ACTIVE_NAME 排空 120s 后停止"
 sleep 120
 # 顺序很关键：先把 previous 指向当前槽并 reload，再停旧容器。
 # 反过来会留下「upstream 指向已停容器」的时间窗，静态回退会拿到 connect refused（502）。
-write_upstream "$CAND_PORT" "$CAND_PORT"
-nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
+# 不在此处 reload：每次部署只在切换瞬间 reload 一次（keepalive 竞态窗口减半）。
+# previous 仍指向旧槽端口，旧槽停止后回退命中死端口由 @static_missing 兜底 404。
 docker stop "$ACTIVE_NAME" >/dev/null 2>&1 || true
 echo "旧槽已停止（zhibi-web:rollback 保留供回滚）"
 
