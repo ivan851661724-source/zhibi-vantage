@@ -186,8 +186,10 @@ out=$(cat /tmp/p0-reg-r3.log)
 echo "$out" | grep -E "deploy done|candidate images|入口已切|部署状态已提交|旧槽已停止|候选静态已归档" | sed 's/^/    | /'
 [ "$DRILL_RC" = "0" ] && ok "真实部署成功完成" || bad "真实部署失败 rc=$DRILL_RC"
 assert_probe_clean "成功部署全过程（含退出后60s）" "$PROBE_FILE"
-MW=$(maint_window "$PROBE_FILE")
-awk "BEGIN{exit !($MW<=15)}" && ok "后端维护窗口 ${MW}s（明确 503，≤15s）" || bad "后端维护窗口 ${MW}s 超过 15s"
+if [ "$DRILL_RC" = "0" ]; then
+  MW=$(maint_window "$PROBE_FILE")
+  awk "BEGIN{exit !($MW<=15)}" && ok "后端维护窗口 ${MW}s（明确 503，≤15s）" || bad "后端维护窗口 ${MW}s 超过 15s"
+fi
 SLOT_AFTER=$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)
 IMG_AFTER=$(docker inspect -f '{{.Image}}' "$SLOT_AFTER" 2>/dev/null || echo none)
 [ "$IMG_BEFORE" != "$IMG_AFTER" ] && ok "镜像 ID 已变化" || bad "镜像 ID 未变化"
@@ -253,10 +255,14 @@ assert_probe_clean "失败回滚全过程（含退出后60s）" "$PROBE_FILE"
 printf '%s' "$out" | grep -q "回滚完成" && ok "回滚完成并严格核对镜像" || bad "回滚未完成"
 RB_SEC=$(printf '%s' "$out" | grep -oE "回滚耗时 [0-9]+s" | head -1 | grep -oE "[0-9]+" || echo 999)
 [ "${RB_SEC:-999}" -le 30 ] && ok "回滚耗时 ${RB_SEC}s（≤30s）" || bad "回滚耗时 ${RB_SEC}s 超过 30s"
+# 演练钩子（ZB_DRILL_HEALTH_FAIL）按设计不污染 failed_sha（r2 定版护栏：演练失败
+# 不代表该提交真的坏）。真实失败 SHA 的隔离语义用确定性状态注入验证：
 FAILED_STATE=$(state_field failed_sha)
-[ "$FAILED_STATE" = "$REMOTE_SHA" ] && ok "failed_sha 记录为候选提交（${REMOTE_SHA:0:12}）" || bad "failed_sha 异常：$FAILED_STATE"
+[ -z "$FAILED_STATE" ] && ok "演练失败未污染 failed_sha（护栏生效）" || bad "演练失败被记入 failed_sha：$FAILED_STATE"
+state_force "$PREV_SHA" "$REMOTE_SHA"
 out2=$(ZB_IGNORE_PAUSE=1 timeout 60 bash scripts/deploy-cron.sh 2>&1 || true)
-case "$out2" in *"已隔离"*) ok "再次调用被隔离：$(echo "$out2" | tail -1)" ;; *) bad "失败 SHA 被重复部署：$(echo "$out2" | tail -1)" ;; esac
+case "$out2" in *"已隔离"*) ok "失败 SHA 隔离生效：$(echo "$out2" | tail -1)" ;; *) bad "失败 SHA 未被隔离：$(echo "$out2" | tail -1)" ;; esac
+state_force "$PREV_SHA" ""
 IMG_AFTER_ROLLBACK=$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)" 2>/dev/null || echo none)
 [ "$IMG_AFTER_ROLLBACK" = "$IMG_AFTER" ] && ok "回滚后运行镜像 == 上一成功版本" || bad "回滚镜像不一致"
 DEPLOYED_AFTER=$(state_field deployed_sha)

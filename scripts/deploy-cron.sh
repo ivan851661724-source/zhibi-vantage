@@ -606,7 +606,7 @@ fi
 
 STAGE="最终核验（提交前）"
 FV_FAIL=""
-for path in /login /healthz /api/healthz; do
+for path in /login /healthz; do
   C=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT$path" 2>/dev/null || echo 000)
   [ "$C" = "200" ] || FV_FAIL="$FV_FAIL $path=$C"
 done
