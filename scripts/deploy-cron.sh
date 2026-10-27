@@ -122,6 +122,13 @@ rollback() {
   fi
 
   [ -n "$CAND_NAME" ] && docker rm -f "$CAND_NAME" >/dev/null 2>&1 || true
+  # 后端就绪后再撤维护态：否则恢复窗口内的请求会穿透到启动中的后端拿 500
+  # （12:40:30 外网实测 1/1704）
+  local ri
+  for ri in $(seq 1 60); do
+    if docker exec zhibi-vantage node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3300)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then break; fi
+    sleep 0.5
+  done
   rm -f "$NGX_MAINT"; MAINT_ON=0
 
   sleep 3
