@@ -8,8 +8,9 @@
 #   R6  failed_sha 不重复部署
 #   R7  缓存头实测（HTML no-store、static immutable、API 不可共享缓存、404 不长期缓存）
 #   R8  锁在成功与失败路径均释放
-# 用法：bash scripts/deploy-regression.sh [--skip-rebuild]
-# 会真实执行部署与回滚，耗时约 15–25 分钟。
+# 用法：bash scripts/deploy-regression.sh
+# 全程不执行 --no-cache 重建（机制演练用 ZB_SKIP_BUILD 显式候选镜像）。
+# 会真实执行部署与回滚，耗时约 10–15 分钟。
 set -uo pipefail
 cd /opt/zhibi-vantage
 
@@ -83,14 +84,27 @@ AFTER_LOGIN=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB
 echo "== R3+R4 真实替换 + 成功部署全过程探测 =="
 IMG_BEFORE=$(docker inspect -f '{{.Image}}' "$ACTIVE_NAME" 2>/dev/null || echo none)
 SLOT_BEFORE="$ACTIVE_NAME"
-if [ "$SKIP_REBUILD" = "0" ]; then
-  echo "  （--no-cache 重建，确保镜像 ID 必变，约 3-5 分钟）"
-  docker compose build --no-cache >/tmp/p0-rebuild.log 2>&1
-  tail -2 /tmp/p0-rebuild.log | sed 's/^/    | /'
+RUN_API_IMG=$(docker inspect -f '{{.Image}}' zhibi-vantage 2>/dev/null || echo none)
+# 本机禁止 --no-cache 全量重建（曾两次压垮宿主机）。真实替换改用"显式提供的
+# 历史镜像"证明：镜像 ID 必不同、容器必替换、chunk 必跨 release。
+pick_diff() { # $1=运行镜像ID $2=仓库前缀 → 输出第一个与运行不同的 tag
+  for t in $(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^$2:"); do
+    id=$(docker inspect -f '{{.Id}}' "$t" 2>/dev/null || true)
+    [ -n "$id" ] && [ "$id" != "$1" ] && { echo "$t"; return; }
+  done
+}
+CAND_WEB=$(pick_diff "$IMG_BEFORE" zhibi-web)
+CAND_API=$(pick_diff "$RUN_API_IMG" zhibi-vantage)
+if [ -n "$CAND_WEB" ] && [ -n "$CAND_API" ]; then
+  echo "  替换演练候选：web=$CAND_WEB api=$CAND_API（显式提供，均非当前运行镜像）"
+  DEPLOY_ENVS=(ZB_SKIP_BUILD=1 "ZB_CANDIDATE_WEB_IMG=$CAND_WEB" "ZB_CANDIDATE_API_IMG=$CAND_API" FORCE_DEPLOY=1)
+else
+  echo "  无可用历史镜像，回退为缓存构建（仍禁止 --no-cache）"
+  DEPLOY_ENVS=(FORCE_DEPLOY=1)
 fi
 ( probe_loop success /tmp/p0-probe-success.txt 300 ) &
 PROBE=$!
-out=$(FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+out=$(env "${DEPLOY_ENVS[@]}" timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 wait $PROBE 2>/dev/null
 echo "$out" | grep -E "deploy done|candidate images|入口已切|健康门基线|RC=" | sed 's/^/    | /'
 case "$out" in *RC=0*) ok "真实部署成功完成" ;; *) bad "真实部署失败" ;; esac
@@ -126,7 +140,7 @@ state_force "$PREV_SHA" ""
 echo "  演练前置：deployed_sha=$PREV_SHA（旧版本） 候选=$REMOTE_SHA"
 ( probe_loop rollback /tmp/p0-probe-rollback.txt 200 ) &
 PROBE=$!
-out=$(ZB_DRILL_HEALTH_FAIL=1 FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+out=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$IMG_BEFORE" ZB_CANDIDATE_API_IMG="$RUN_API_IMG" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 wait $PROBE 2>/dev/null
 echo "$out" | grep -E "健康门未通过|回滚完成|回滚失败|RC=" | head -5 | sed 's/^/    | /'
 case "$out" in *RC=1*) ok "失败部署非零退出" ;; *) bad "失败部署退出码异常" ;; esac
@@ -148,7 +162,7 @@ DEPLOYED_AFTER=$(state_field deployed_sha)
 
 echo "== R6b 已部署版本不会被记为失败版本（护栏）=="
 state_force "$REMOTE_SHA" ""
-out3=$(ZB_DRILL_HEALTH_FAIL=1 FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+out3=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$IMG_BEFORE" ZB_CANDIDATE_API_IMG="$RUN_API_IMG" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 case "$out3" in *RC=1*) ok "演练部署按预期失败" ;; *) bad "演练部署退出码异常" ;; esac
 FAILED_AFTER3=$(state_field failed_sha)
 [ -z "$FAILED_AFTER3" ] && ok "failed_sha 保持为空（运行中的版本不会自相矛盾）" || bad "failed_sha 被写入正在运行的版本：$FAILED_AFTER3"

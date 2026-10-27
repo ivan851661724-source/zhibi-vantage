@@ -51,6 +51,13 @@ BASE_WEB_ID=""; BASE_API_ID=""
 mkdir -p "$STATE_DIR"
 [ -f "$STATE" ] || printf '{"deployed_sha":"","deployed_web_image_id":"","deployed_api_image_id":"","active_web_slot":"blue","failed_sha":"","deployed_at":""}\n' > "$STATE"
 
+# 跨重启的暂停标记：cron 命中即记录并退出（flock 会随重启消失，不能只靠锁）。
+# 人工/回归（FORCE_DEPLOY=1）显式越过。
+if [ -f "$STATE_DIR/deploy-paused" ] && [ "${FORCE_DEPLOY:-0}" != "1" ]; then
+  echo "$(date '+%F %T') deploy paused by $STATE_DIR/deploy-paused, skip"
+  exit 0
+fi
+
 state_get() {
   grep -o "\"$1\":\"[^\"]*\"" "$STATE" 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//' || true
 }
@@ -69,6 +76,25 @@ feishu_notify() {
     "$1" "$(json_esc "$2")" "$(json_esc "$3")" "$(json_esc "$(hostname)")" "$(json_esc "$(date '+%F %T %Z')")")
   resp=$(curl -fsS -m 10 -H 'Content-Type: application/json' -d "$payload" "$FEISHU_WEBHOOK" 2>/dev/null || true)
   case "$resp" in *'"code":0'*|*'"StatusCode":0'*) : ;; *) echo "$(date '+%F %T') 警告：飞书通知失败" ;; esac
+}
+
+resource_preflight() {
+  local avail_mb swap_mb disk_gb load1 cores builds reasons=""
+  avail_mb=$(free -m | awk '/^Mem:/{print $7}')
+  swap_mb=$(free -m | awk '/^Swap:/{print $2}')
+  disk_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+  load1=$(cut -d' ' -f1 /proc/loadavg)
+  cores=$(nproc)
+  builds=$(pgrep -cf 'docker build|compose build|buildkit|deploy\.sh' 2>/dev/null || true)
+  echo "资源预检: 内存可用=${avail_mb}MB swap=${swap_mb}MB 磁盘可用=${disk_gb}GB load1=$load1 cores=$cores 并发构建/部署=${builds:-0}"
+  [ "${avail_mb:-0}" -ge 800 ] || reasons="$reasons 可用内存${avail_mb}MB<800MB;"
+  [ "${disk_gb:-0}" -ge 2 ] || reasons="$reasons 磁盘可用${disk_gb}GB<2GB;"
+  awk "BEGIN{exit !($load1 <= $cores * 2)}" || reasons="$reasons load1=$load1 超过 ${cores}x2;"
+  [ "${builds:-0}" -le 1 ] || reasons="$reasons 已有 ${builds} 个构建/部署进程在跑"
+  if [ -n "$reasons" ]; then
+    echo "资源预检未通过：$reasons —— 在修改运行服务前退出"
+    return 1
+  fi
 }
 
 rollback() {
@@ -178,6 +204,9 @@ echo "$(date '+%F %T') deploy v3: deployed=${DEPLOYED:-none} -> $REMOTE (ref=$DE
 git reset --hard "origin/${DEPLOY_REF}" --quiet
 SHORT=$(git rev-parse --short=7 HEAD)
 
+STAGE="资源预检"
+resource_preflight || exit 1
+
 STAGE="回滚锚点"
 OLD_WEB_RB_IMG=$(docker inspect -f '{{.Image}}' "$ACTIVE_NAME" 2>/dev/null || true)
 OLD_API_IMG=$(docker inspect -f '{{.Image}}' zhibi-vantage 2>/dev/null || true)
@@ -186,11 +215,26 @@ OLD_API_IMG=$(docker inspect -f '{{.Image}}' zhibi-vantage 2>/dev/null || true)
 echo "anchor: web=${OLD_WEB_RB_IMG:-none} api=${OLD_API_IMG:-none} active=$ACTIVE_NAME:$ACTIVE_PORT"
 
 STAGE="docker compose build"
-docker compose build
-NEW_WEB_IMG=$(docker inspect -f '{{.Id}}' zhibi-web:0.2.0)
-NEW_API_IMG=$(docker inspect -f '{{.Id}}' zhibi-vantage:1.5.0)
-docker tag zhibi-web:0.2.0 "zhibi-web:cand-$SHORT"
-docker tag zhibi-vantage:1.5.0 "zhibi-vantage:cand-$SHORT"
+if [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then
+  # 机制回归专用：本机禁止 --no-cache 全量重建。候选镜像必须由调用方显式提供，
+  # 且与当前运行镜像不同——禁止默默复用当前镜像伪造"替换"。
+  [ -n "${ZB_CANDIDATE_WEB_IMG:-}" ] || { echo "ZB_SKIP_BUILD 需要 ZB_CANDIDATE_WEB_IMG"; exit 1; }
+  [ -n "${ZB_CANDIDATE_API_IMG:-}" ] || { echo "ZB_SKIP_BUILD 需要 ZB_CANDIDATE_API_IMG"; exit 1; }
+  docker image inspect "$ZB_CANDIDATE_WEB_IMG" >/dev/null 2>&1 || { echo "候选 web 镜像不存在: $ZB_CANDIDATE_WEB_IMG"; exit 1; }
+  docker image inspect "$ZB_CANDIDATE_API_IMG" >/dev/null 2>&1 || { echo "候选 api 镜像不存在: $ZB_CANDIDATE_API_IMG"; exit 1; }
+  NEW_WEB_IMG=$(docker inspect -f '{{.Id}}' "$ZB_CANDIDATE_WEB_IMG")
+  NEW_API_IMG=$(docker inspect -f '{{.Id}}' "$ZB_CANDIDATE_API_IMG")
+  [ "$NEW_WEB_IMG" != "$OLD_WEB_RB_IMG" ] || { echo "候选 web 镜像与运行镜像相同，拒绝"; exit 1; }
+  [ "$NEW_API_IMG" != "$OLD_API_IMG" ] || { echo "候选 api 镜像与运行镜像相同，拒绝"; exit 1; }
+  echo "ZB_SKIP_BUILD：候选镜像由调用方显式提供 web=$NEW_WEB_IMG api=$NEW_API_IMG"
+else
+  resource_preflight || exit 1
+  docker compose build
+  NEW_WEB_IMG=$(docker inspect -f '{{.Id}}' zhibi-web:0.2.0)
+  NEW_API_IMG=$(docker inspect -f '{{.Id}}' zhibi-vantage:1.5.0)
+fi
+docker tag "$NEW_WEB_IMG" "zhibi-web:cand-$SHORT"
+docker tag "$NEW_API_IMG" "zhibi-vantage:cand-$SHORT"
 echo "candidate images: web=$NEW_WEB_IMG api=$NEW_API_IMG (cand-$SHORT)"
 
 if [ "${ZB_DRILL_FAIL_STAGE:-}" = "build" ]; then
