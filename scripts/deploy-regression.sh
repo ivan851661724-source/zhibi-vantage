@@ -127,11 +127,12 @@ assert_consistent() { # $1=标签
   fi
 }
 
-pick_diff() { # $1=运行镜像ID $2=仓库前缀 → 第一个与运行不同的 tag
-  local t id
-  for t in $(docker images --format '{{.Repository}}:{{.Tag}}' | grep "^$2:"); do
-    id=$(docker inspect -f '{{.Id}}' "$t" 2>/dev/null || true)
-    [ -n "$id" ] && [ "$id" != "$1" ] && { echo "$t"; return; }
+pick_diff() { # $1=运行镜像ID $2=仓库前缀 → 第一个与运行不同的【镜像 ID】
+  # r4：按 ID 而非 tag 选取——tag 是可变引用，会被后续演练 re-tag 撞车；
+  # 镜像 ID 不可变，候选与运行镜像的比较在任何时刻都成立。
+  local id
+  for id in $(docker images --format '{{.ID}}' "$2" 2>/dev/null); do
+    [ -n "$id" ] && [ "$id" != "$1" ] && { echo "$id"; return; }
   done
 }
 drill_envs() { # 演练时刻现选候选（运行镜像随演练变化）
@@ -150,16 +151,17 @@ run_drill() { # $1=log 前缀 + 其余 env 已在调用方给出 → 执行并�
   # cron 每分钟的 deploy.sh 会在 inner lock 内做 git fetch（1-3s），偶发锁冲突使
   # 演练空转退出；检测到即重试（最多 5 次）。
   local log="$1"; shift
-  local attempt
+  local attempt rc=1
   for attempt in 1 2 3 4 5; do
     env ZB_TEST_SECRET_MARKER="$MARKER" ZB_HEALTH_ROUNDS=$HEALTH_ROUNDS_DRILL \
         DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 "$@" \
         bash scripts/deploy-cron.sh > "$log" 2>&1
-    grep -q "inner lock held" "$log" 2>/dev/null || return $?
+    rc=$?
+    grep -q "inner lock held" "$log" 2>/dev/null || break
     echo "    | 演练遇到 inner lock 冲突（cron 巡检），5s 后重试（$attempt/5）"
     sleep 5
   done
-  return $?
+  return $rc
 }
 
 echo "== R7 缓存头实测 =="

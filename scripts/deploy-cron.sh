@@ -319,10 +319,9 @@ reconcile() {
       rf=1
       echo "reconcile: phase=health_verified 且入口/静态/双容器/镜像复验通过 → 滚动提交 $if_target (slot=$if_slot)"
       state_write "$if_target" "$if_web" "$if_api" "$if_slot" "" "$(date -u '+%FT%TZ')"
-      if [ "${ZB_DRILL_MODE:-0}" != "1" ]; then
-        docker tag "$if_web" "zhibi-web:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
-        docker tag "$if_api" "zhibi-vantage:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
-      fi
+      # 注意：滚动提交不打 deployed-<sha> 标签（reconcile 无从得知被打断部署是否
+      # 为 drill，打标可能把演练镜像登记为正式产物）；正式溯源以 release manifest
+      # 与真实部署提交路径为准。
       rm -f "$INFLIGHT"
       # 滚动提交 = 无 trap 硬中断后的收尾：清理遗留登记临时文件
       cleanup_registered_tmp
@@ -356,9 +355,16 @@ reconcile() {
     return 0
   fi
 
-  echo "reconcile: 不一致（nginx=$ngx_port state_slot=$s_port 容器在跑=$actual_up web镜像=${actual_img:7:12} 状态web=${s_web:7:12} api镜像=${b_img:7:12} 状态api=${s_api:7:12}）→ 以状态文件恢复"
-  # B1. 恢复状态槽容器
+      echo "reconcile: 不一致（nginx=$ngx_port state_slot=$s_port 容器在跑=$actual_up web镜像=${actual_img:7:12} 状态web=${s_web:7:12} api镜像=${b_img:7:12} 状态api=${s_api:7:12}）→ 以状态文件恢复"
+  touch "$NGX_MAINT" 2>/dev/null || true
+  # B1. 恢复状态槽容器：镜像必须与状态锚点一致——槽容器可能被历史演练复用残留
+  # 旧镜像，凡不一致（无论运行与否）一律以状态镜像重建。
   local sname; sname=$(name_of_slot "$s_slot")
+  local cur_img; cur_img=$(docker inspect -f '{{.Image}}' "$sname" 2>/dev/null || echo none)
+  if [ "$cur_img" != "$s_web" ]; then
+    echo "reconcile: 槽容器 $sname 镜像(${cur_img:7:12}) != 状态锚点(${s_web:7:12}) → 以状态镜像重建"
+    docker rm -f "$sname" >/dev/null 2>&1 || true
+  fi
   if ! container_running "$sname"; then
     if docker inspect "$sname" >/dev/null 2>&1; then
       docker start "$sname" >/dev/null 2>&1 || true
@@ -368,6 +374,12 @@ reconcile() {
       docker run -d --name "$sname" --network "$net" --restart unless-stopped \
         -p "127.0.0.1:${s_port}:3000" "$s_web" >/dev/null 2>&1 || true
     fi
+    # 槽容器就绪等待（重建后首次启动）
+    local wi
+    for wi in $(seq 1 30); do
+      [ "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$s_port/login" 2>/dev/null || echo 000)" = "200" ] && break
+      sleep 1
+    done
   fi
   # B2. 回切 nginx
   write_upstream_file "$s_port" "$s_port"
@@ -390,8 +402,8 @@ reconcile() {
       if api_ready; then break; fi
       sleep 0.5
     done
-    rm -f "$NGX_MAINT" 2>/dev/null || true
   fi
+  rm -f "$NGX_MAINT" 2>/dev/null || true
   # B4. 移除候选/残留槽容器
   local other
   for other in zhibi-web-blue zhibi-web-green; do
