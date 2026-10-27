@@ -140,7 +140,13 @@ state_force "$PREV_SHA" ""
 echo "  演练前置：deployed_sha=$PREV_SHA（旧版本） 候选=$REMOTE_SHA"
 ( probe_loop rollback /tmp/p0-probe-rollback.txt 200 ) &
 PROBE=$!
-out=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$IMG_BEFORE" ZB_CANDIDATE_API_IMG="$RUN_API_IMG" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+# 候选在演练时刻现选：R3 之后运行镜像已变，脚本启动时捕获的 IMG_BEFORE 可能
+# 恰好等于当前运行镜像而被 skip-build 拒绝
+NOW_WEB=$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)")
+NOW_API=$(docker inspect -f '{{.Image}}' zhibi-vantage)
+DRILL_WEB=$(pick_diff "$NOW_WEB" zhibi-web)
+DRILL_API=$(pick_diff "$NOW_API" zhibi-vantage)
+out=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$DRILL_WEB" ZB_CANDIDATE_API_IMG="$DRILL_API" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 wait $PROBE 2>/dev/null
 echo "$out" | grep -E "健康门未通过|回滚完成|回滚失败|RC=" | head -5 | sed 's/^/    | /'
 case "$out" in *RC=1*) ok "失败部署非零退出" ;; *) bad "失败部署退出码异常" ;; esac
@@ -162,7 +168,7 @@ DEPLOYED_AFTER=$(state_field deployed_sha)
 
 echo "== R6b 已部署版本不会被记为失败版本（护栏）=="
 state_force "$REMOTE_SHA" ""
-out3=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$IMG_BEFORE" ZB_CANDIDATE_API_IMG="$RUN_API_IMG" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
+out3=$(ZB_DRILL_HEALTH_FAIL=1 ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$DRILL_WEB" ZB_CANDIDATE_API_IMG="$DRILL_API" FORCE_DEPLOY=1 timeout 900 bash scripts/deploy-cron.sh 2>&1; echo "RC=$?")
 case "$out3" in *RC=1*) ok "演练部署按预期失败" ;; *) bad "演练部署退出码异常" ;; esac
 FAILED_AFTER3=$(state_field failed_sha)
 [ -z "$FAILED_AFTER3" ] && ok "failed_sha 保持为空（运行中的版本不会自相矛盾）" || bad "failed_sha 被写入正在运行的版本：$FAILED_AFTER3"

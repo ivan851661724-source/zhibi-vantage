@@ -231,6 +231,10 @@ if [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then
   [ "$NEW_WEB_IMG" != "$OLD_WEB_RB_IMG" ] || { echo "候选 web 镜像与运行镜像相同，拒绝"; exit 1; }
   [ "$NEW_API_IMG" != "$OLD_API_IMG" ] || { echo "候选 api 镜像与运行镜像相同，拒绝"; exit 1; }
   echo "ZB_SKIP_BUILD：候选镜像由调用方显式提供 web=$NEW_WEB_IMG api=$NEW_API_IMG"
+  # 同步打 compose 标签：compose up 用的是 zhibi-web:0.2.0 / zhibi-vantage:1.5.0，
+  # 不打标签的话后端"替换"会因镜像未变而静默跳过
+  docker tag "$NEW_WEB_IMG" zhibi-web:0.2.0
+  docker tag "$NEW_API_IMG" zhibi-vantage:1.5.0
 else
   resource_preflight || exit 1
   docker compose build
