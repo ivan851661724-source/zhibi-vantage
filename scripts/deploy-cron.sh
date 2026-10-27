@@ -181,6 +181,7 @@ rollback() {
 
   if [ "$NGX_SWITCHED" = "1" ] && [ -n "$ACTIVE_PORT" ]; then
     write_upstream_file "$ACTIVE_PORT" "$ACTIVE_PORT"
+    mv "$NGX_UPSTREAM.new" "$NGX_UPSTREAM"
     nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null && echo "  入口已切回旧槽 $ACTIVE_PORT" || echo "  警告：nginx 回切失败"
     NGX_SWITCHED=0
   fi
@@ -325,6 +326,7 @@ reconcile() {
   fi
   # B2. 回切 nginx
   write_upstream_file "$s_port" "$s_port"
+  mv "$NGX_UPSTREAM.new" "$NGX_UPSTREAM"
   nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || echo "reconcile: 警告 nginx 回切失败"
   # B3. 后端镜像与状态一致
   if [ -n "$s_api" ] && [ "$b_img" != "$s_api" ]; then
