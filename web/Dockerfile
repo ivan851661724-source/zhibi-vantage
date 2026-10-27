@@ -39,6 +39,12 @@ COPY --from=builder /app/public ./public
 # 非 root 运行
 USER node
 
+# 构建溯源标签：部署脚本按 zb.commit/zb.tree 校验镜像来源与目标提交一致（P0 r3）。
+# compose build 通过 args 注入；预构建镜像缺 label 或错位会被部署门拒绝。
+ARG ZB_COMMIT=""
+ARG ZB_TREE=""
+LABEL zb.commit=$ZB_COMMIT zb.tree=$ZB_TREE
+
 EXPOSE 3000
 
 # 健康检查：探 /login（Next 渲染页 200 即活）

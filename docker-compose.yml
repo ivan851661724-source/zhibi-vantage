@@ -7,6 +7,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        ZB_COMMIT: ${ZB_COMMIT:-}     # 构建溯源：zb.commit label（部署门校验）
+        ZB_TREE: ${ZB_TREE:-}         # 构建溯源：zb.tree label（部署门校验）
     image: zhibi-vantage:1.5.0
     container_name: zhibi-vantage
     restart: always                      # 崩溃/重启自动拉起
@@ -47,6 +50,9 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      args:
+        ZB_COMMIT: ${ZB_COMMIT:-}     # 构建溯源：zb.commit label（部署门校验）
+        ZB_TREE: ${ZB_TREE:-}         # 构建溯源：zb.tree label（部署门校验）
     image: zhibi-web:0.2.0
     container_name: zhibi-web
     restart: always
