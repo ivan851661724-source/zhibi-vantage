@@ -188,7 +188,13 @@ rollback() {
 
   if [ -n "$OLD_API_IMG" ]; then
     docker tag "$OLD_API_IMG" "zhibi-vantage:1.5.0" 2>/dev/null || true
-    ( cd /opt/zhibi-vantage && docker compose up -d --no-deps zhibi-vantage 2>&1 | tail -2 ) || echo "  警告：后端回滚启动失败"
+    local rb_ok=0
+    for rb_i in 1 2; do
+      if ( cd /opt/zhibi-vantage && docker compose up -d --no-deps zhibi-vantage ); then rb_ok=1; break; fi
+      echo "  compose 回滚第 ${rb_i} 次失败，3s 后重试"
+      sleep 3
+    done
+    [ "$rb_ok" = "1" ] || echo "  警告：后端回滚启动失败"
   fi
 
   [ -n "$CAND_NAME" ] && docker rm -f "$CAND_NAME" >/dev/null 2>&1 || true
@@ -545,7 +551,19 @@ touch "$NGX_MAINT"; MAINT_ON=1
 echo "$(date '+%F %T') 进入维护态"
 MAINT_T0=$(date +%s)
 sleep 2
-docker compose up -d --no-deps zhibi-vantage 2>&1 | tail -3
+# compose up 偶发 daemon 瞬时冲突（实测一次：重建第 5 次时失败，3s 后手动重跑即成功）。
+# 重试一次；完整输出经 tee 进部署日志，不再截断，保证可确诊。
+COMPOSE_OK=0
+for ATTEMPT in 1 2; do
+  if docker compose up -d --no-deps zhibi-vantage; then COMPOSE_OK=1; break; fi
+  echo "$(date '+%F %T') compose up 第 ${ATTEMPT} 次失败，3s 后重试"
+  sleep 3
+done
+if [ "$COMPOSE_OK" != "1" ]; then
+  echo "$(date '+%F %T') 后端替换连续失败"
+  STAGE="后端替换"
+  exit 1
+fi
 BH=not-ready
 for i in $(seq 1 120); do
   if api_ready; then BH=ready; break; fi
