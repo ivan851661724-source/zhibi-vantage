@@ -58,6 +58,14 @@ export function MemoryTimelineList({
             <div className="mem-tl-top">
               <TimeText at={it.at} basis={it.atBasis} precisionText={it.timePrecisionText} />
               {it.sourceKind ? <SourceBadge kind={it.sourceKind} text={it.sourceKindText} /> : <span className="mem-badge mem-badge-gap">覆盖缺口</span>}
+              {/* 核验状态：有证据 / 推导待核验 / 无证据 —— 每条都必须让用户能判断可信度 */}
+              {it.type !== 'coverage_gap' ? (
+                it.evidenceIds && it.evidenceIds.length
+                  ? <span className="core-badge core-badge-ok">有证据</span>
+                  : <span className="core-badge core-badge-warn">{it.type === 'derived_event' ? '推导·待核验' : '无证据'}</span>
+              ) : null}
+              {/* 首次观察是档案起点，不是「变化」——绝不伪装成变化 */}
+              {it.eventType === 'product_first_observed' ? <span className="core-badge core-badge-neutral">首次观察 · 档案起点</span> : null}
             </div>
             <div className="mem-tl-title">{it.title}</div>
             {it.detail ? <div className="mem-tl-detail">{it.detail}</div> : null}

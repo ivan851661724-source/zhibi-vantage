@@ -197,8 +197,9 @@ test('R4-2 前端 nextStep：staleDims 优先失败提示，不再与「正常�
   assert.ok(staleIdx !== -1 && failIdx !== -1, '存在 staleDims 优先分支');
   const normalIdx = body.indexOf('数据正在按计划积累');
   assert.ok(staleIdx < normalIdx && body.indexOf('return', staleIdx) < normalIdx, 'staleDims 分支先于「正常积累」返回');
-  // 确认 staleDims 分支的文案不含「正常积累」且引导到来源与采集记录
+  // 确认 staleDims 分支的文案不含「正常积累」且引导到覆盖明细页
+  // （核心产品体验收敛 r1：该 Tab 已改名为「数据覆盖与来源」，引导目标未变）
   const branch = body.slice(staleIdx, body.indexOf(';', staleIdx));
-  assert.ok(/来源与采集记录/.test(branch), '失败提示引导查看来源与采集记录: ' + branch.trim());
+  assert.ok(/数据覆盖与来源/.test(branch), '失败提示引导查看数据覆盖与来源: ' + branch.trim());
   assert.ok(!/正常积累|照常积累/.test(branch), '失败提示不得同时说积累正常');
 });

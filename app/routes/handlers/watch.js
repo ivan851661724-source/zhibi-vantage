@@ -273,4 +273,35 @@ async function deleteIntent(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { createTarget, listTargets, patchTarget, deleteTarget, deleteIntent, dailyDigest, coverageDay };
+// ---------- POST /api/watch-targets/:id/inspect（立即巡检，真实执行一次窗口） ----------
+// 202 + 后台执行：采集历时可能十几秒，同步等待会超时。
+// 只受理 active/degraded target；同一 target 在飞或 20s 内重复点击 → 409（不重复采集）。
+async function inspectTarget(ctx, req, res, url, p) {
+  const m = /^\/api\/watch-targets\/([^/]+)\/inspect$/.exec(p);
+  if (!m || req.method !== 'POST') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可发起巡检。' }); return true; }
+  const id = decodeURIComponent(m[1]).slice(0, 90);
+  const Manual = require('../../services/watch-manual.js');
+  const r = Manual.startInspect({ tenantId: tid, watchTargetId: id });
+  if (!r.accepted) {
+    if (r.reason === 'NOT_MONITORING') {
+      ctx.sendJSON(res, 409, { error: 'NOT_MONITORING', message: '该品牌尚未加入正式监控（或已暂停），请先加入监控再巡检。' });
+      return true;
+    }
+    if (r.reason === 'IN_PROGRESS') {
+      ctx.sendJSON(res, 409, { error: 'IN_PROGRESS', message: '本次巡检正在执行，请稍候再试。', windowKey: r.windowKey });
+      return true;
+    }
+    ctx.sendJSON(res, 400, { error: r.reason || 'INSPECT_REJECTED', message: '巡检请求未受理，请稍后重试。' });
+    return true;
+  }
+  ctx.sendJSON(res, 202, {
+    accepted: true,
+    windowKey: r.windowKey,
+    message: '已开始巡检，完成后这里会自动更新。',
+  });
+  return true;
+}
+
+module.exports = { createTarget, listTargets, patchTarget, deleteTarget, deleteIntent, dailyDigest, coverageDay, inspectTarget };

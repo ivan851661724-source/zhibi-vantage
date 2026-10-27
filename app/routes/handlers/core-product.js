@@ -210,6 +210,32 @@ async function intelInbox(ctx, req, res, url) {
   return true;
 }
 
+// ---------------- 事件级纠错（收件箱「反馈有误」） ----------------
+// 不改写已记录的观察事实，只登记质疑并进入复核队列（忠实助理红线）。
+async function intelEventCorrection(ctx, req, res, url) {
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' }); return true; }
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const rp = resolveProject(ctx, tid, body.projectId || q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const Inbox = require('../../services/intel-inbox.js');
+  const r = Inbox.submitCorrection({
+    tenantId: tid, projectId: rp.projectId,
+    eventId: body.eventId, reason: body.reason, note: body.note,
+  });
+  if (!r.ok) {
+    if (r.reason === 'EVENT_NOT_FOUND') {
+      ctx.sendJSON(res, 404, { error: 'EVENT_NOT_FOUND', message: '这条变化记录不存在或不属于当前项目。' });
+      return true;
+    }
+    ctx.sendJSON(res, 400, { error: r.reason || 'CORRECTION_REJECTED', message: '反馈未提交，请稍后重试。' });
+    return true;
+  }
+  ctx.sendJSON(res, 200, { ok: true, duplicate: !!r.duplicate, message: r.duplicate ? (r.message || '这条反馈已记录，我们在复核中。') : '已收到反馈，我们会复核这条记录。' });
+  return true;
+}
+
 async function intelligence(ctx, req, res, url) {
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
@@ -261,7 +287,12 @@ async function opportunities(ctx, req, res, url) {
   // SC-05：机会判断的数据基础补「可用历史跨度」与「本次使用的时间范围」
   let historyBasis = null;
   try { historyBasis = MemView.projectHistoryBasis(tid, rp.projectId); } catch (e) { historyBasis = null; }
-  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis }, view));
+  // SC-12 §六.1：机会数据基础——按可用维度独立工作（价格/商品/上新/评论独立成模块），
+  // 缺失维度保持 null 并如实标注状态；不再因单个维度不可用而整页空白。
+  let foundation = null;
+  try { foundation = require('../../services/opportunity-foundation.js').buildOpportunityFoundation(tid, rp.projectId); }
+  catch (e) { foundation = null; }
+  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
   return true;
 }
 
@@ -324,6 +355,6 @@ async function reportDetail(ctx, req, res, url, p) {
 module.exports = {
   brandsList, brandDetail, brandCoverage,
   firstCollectionStatus, firstCollectionRetry,
-  intelInbox, intelligence, opportunities,
+  intelInbox, intelEventCorrection, intelligence, opportunities,
   reportsList, reportsCreate, reportDetail,
 };

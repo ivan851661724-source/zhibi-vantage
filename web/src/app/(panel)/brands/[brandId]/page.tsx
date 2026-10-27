@@ -1,23 +1,28 @@
 'use client';
 // ============================================================
-// 品牌详情（SC-08 r2 §五）——「竞品数据 + 时间轴」主体页面
+// 品牌档案（核心产品体验收敛 r1 重做）
 // ------------------------------------------------------------
-// 顶部品牌总览卡：品牌名称 / 官网 / 市场与品类 / 关系 / 官网确认状态 /
-//                正式监控状态 / 数据积累起点 / 最近一次成功观察 / 已接入维度数量
-// 分区（收敛为七段，顺序固定）：
-//   ① 概览  ② 时间线  ③ 官网与商品  ④ 用户声音与公开评论
-//   ⑤ 内容与广告  ⑥ 来源与采集记录  ⑦ 相关报告
+// 职责——只回答六个问题：
+//   ① 这是谁 ② 现在卖什么、价格如何 ③ 最近发生了什么
+//   ④ 我们从什么时候开始积累 ⑤ 哪些内容有证据 ⑥ 哪些维度仍缺资料
+//
+// 结构（固定）：
+//   · 顶部品牌头部：品牌名 / 官网 / 关系 / 主要市场 / 官网确认 / 最近成功更新 /
+//     正式监控 + 「立即更新」「加入·管理监控」；不出现内部码、字段名、英文枚举。
+//   · 第一屏摘要：**最多四张**卡（已积累时长 / 可核验变化数 / 商品与价格 / 数据覆盖）。
+//   · Tab：概览 · 时间线 · 官网与商品 · 用户声音与公开评论 · 内容与广告 ·
+//     数据覆盖与来源 · 相关报告。
+//
 // 纪律：
-//   · 覆盖信息只在一处出现：顶部总览卡给一句摘要，明细只放在「来源与采集记录」；
-//     不再挂 DataSurfaceOverview / 旧 CoveragePanel 等重复组件；
-//   · 概览不复制各 Tab 的正文（只给结论 + 下一步）；
-//   · 没有数据的 Tab 只显示一个简洁空态 + 下一步，不重复多段说明；
-//   · 用户可理解的内容优先，内部实现说明（能力码/attempt/provider）不出现在页面上。
+//   · 覆盖信息只出现两处：第一屏第 4 张卡（一句话摘要）+ 最后一个 Tab（明细）；
+//     概览里不再重复「数据覆盖」「数据完整度」「分维度覆盖面板」等模块；
+//   · 没有数据时给原因 + 下一步，不显示假 0、空图或大段技术说明；
+//   · 首次观察（基线）不得伪装成「变化」——时间线与摘要都按真实语义标注。
 // ============================================================
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { fetchBrand, priceText, type BrandDetail } from '@/lib/core-api';
+import { fetchBrand, priceText, refreshBrandSource, type BrandDetail } from '@/lib/core-api';
 import { ReportPanel } from '@/components/brand/report-panel';
 import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 import {
@@ -36,10 +41,10 @@ import type { DimensionObservation } from '@/lib/core-api';
 
 // 公开商品的发现路径（只描述「怎么找到的」，不暗示覆盖率更高）
 function discoveryPathText(p: string): string {
-  if (p === 'jsonld') return '商品页 JSON-LD';
-  if (p === 'sitemap') return 'robots 声明的 sitemap';
+  if (p === 'jsonld') return '商品页结构化数据';
+  if (p === 'sitemap') return '站点地图';
   if (p === 'homepage_links') return '首页内链商品页';
-  return p;
+  return '公开商品页';
 }
 
 const TABS: { key: string; label: string }[] = [
@@ -48,7 +53,7 @@ const TABS: { key: string; label: string }[] = [
   { key: 'products', label: '官网与商品' },
   { key: 'voice', label: '用户声音与公开评论' },
   { key: 'ads', label: '内容与广告' },
-  { key: 'sources', label: '来源与采集记录' },
+  { key: 'sources', label: '数据覆盖与来源' },
   { key: 'reports', label: '相关报告' },
 ];
 
@@ -57,7 +62,16 @@ const DIM_TEXT: Record<string, string> = {
   review: '评论', social: '社媒', ads: '广告', search: '搜索热度',
 };
 
-// 时间只精确到分钟（机器口径的秒不展示给用户）
+// 价格区间文案（真实观察值；无价格时返回 null，不补 0）
+function productPriceText(obs: { price?: number | null; currency?: string | null }[]): string | null {
+  const ps = obs.map(o => (o && typeof o.price === 'number' ? o.price : null)).filter(v => v != null) as number[];
+  if (!ps.length) return null;
+  const cur = (obs.map(o => (o && o.currency) || null).filter(Boolean)[0] as string) || '';
+  const lo = Math.min(...ps); const hi = Math.max(...ps);
+  const money = (n: number) => (cur ? cur + ' ' : '') + n.toFixed(2);
+  return lo === hi ? money(lo) : money(lo) + '–' + money(hi);
+}
+
 function fmt(iso: string | null | undefined, withTime?: boolean): string {
   if (!iso) return '—';
   try {
@@ -68,7 +82,18 @@ function fmt(iso: string | null | undefined, withTime?: boolean): string {
   } catch (e) { return '—'; }
 }
 
-// SC-09 §四：详情 Tab 的真实观察列表（只渲染后端返回的 observations；无数据不渲染）
+// 已积累时长：从可核验起点算到今天（不足一天显示「不到 1 天」，绝不显示 0 天）
+function accumulatedText(startIso: string | null): { main: string; sub: string } {
+  if (!startIso) return { main: '尚未开始积累', sub: '首次成功采集后开始计算' };
+  const start = new Date(startIso);
+  const days = Math.floor((Date.now() - start.getTime()) / 86400000);
+  if (!isFinite(days) || days < 0) return { main: '—', sub: '' };
+  return {
+    main: days < 1 ? '不到 1 天' : `${days} 天`,
+    sub: `自 ${fmt(startIso)} 起`,
+  };
+}
+
 function ObsList({ items, evidenceRefs, onEvidence }: {
   items: DimensionObservation[];
   evidenceRefs?: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label?: string | null }[];
@@ -126,6 +151,8 @@ function BrandDetailInner() {
   const [err, setErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [evRefs, setEvRefs] = useState<EvidenceRef[] | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!brandId || !projectId) return;
@@ -138,7 +165,6 @@ function BrandDetailInner() {
     return () => { alive = false; ctrl.abort(); };
   }, [brandId, projectId]);
 
-  // 「全部可用历史」的起点来自后端投影（不在前端猜）
   const effectiveRange = useMemo(() => {
     if (preset === 'custom') return range;
     if (preset === 'all') {
@@ -188,17 +214,40 @@ function BrandDetailInner() {
   const keep = `projectId=${encodeURIComponent(projectId)}`;
   const earliest = cov?.summary?.earliestAvailableAt || null;
   const accumulatedStart = b.dataAccumulationStart || earliest || null;
-  // 「已接入维度数量」按 Registry 总数减去未配置数得出（不硬编码 5）
-  const configuredDims = sum.total - (sum.notConfigured || 0);
-  // SC-08 r3 §三：有历史数据但最近一次更新失败的维度数（旧数据保留，不冒充正常）
   const staleDims = (bc.dimensions || []).filter(x => x.usingPreviousData).length;
-  // SC-09 §四：评论/社媒/热度/广告的真实 observations（后端只读派生）
   const dd = (d.dimensionDetails || {}) as Record<string, { observations: DimensionObservation[]; summary: Record<string, unknown> | null; collectedAt: string | null; evidenceRefs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label?: string | null }[] }>;
   const reviewsDet = dd.reviews_reputation || null;
   const socialDet = dd.social_content || null;
   const searchDet = dd.search_interest || null;
   const adsDet = dd.ad_campaigns || null;
-  const products = d.products || { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  const products = d.products || { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
+
+  // 可核验变化数（后端唯一口径；无变化 ≠ 没有变化过）
+  const vc = (d as unknown as { verifiedChanges?: { count: number; firstAt: string | null; lastAt: string | null } }).verifiedChanges;
+  const changeCount = vc ? vc.count : 0;
+  const acc = accumulatedText(accumulatedStart);
+  const priceText2 = productPriceText(products.observations);
+  const monitorOn = !!mon && (mon.state === 'active' || mon.state === 'degraded');
+
+  // 「立即更新」目标：优先修复失败/待更新维度，否则刷新评论能力（真实请求）
+  const dimsAll = (bc && bc.dimensions) || [];
+  const needDim = dimsAll.find(x => x.state === 'failed') || dimsAll.find(x => x.usingPreviousData) || dimsAll.find(x => x.state === 'not_started');
+  const needCap = needDim && (needDim.capabilities || []).find(c => c.maturity !== 'not_integrated');
+  const refreshTarget = needCap ? needCap.code : 'public_reviews';
+  async function doRefresh() {
+    if (!b.competitorId || refreshing) return;
+    setRefreshing(true);
+    setRefreshMsg(null);
+    try {
+      const r = await refreshBrandSource({ projectId, competitorId: b.competitorId, capability: refreshTarget });
+      setRefreshMsg(r && r.attempt ? '已开始更新，完成后自动刷新' : '已开始更新');
+    } catch (e) {
+      setRefreshMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   const rangePicker = (
     <TimeRangePicker
       preset={preset} from={effectiveRange?.from || null} to={effectiveRange?.to || null}
@@ -210,14 +259,12 @@ function BrandDetailInner() {
     />
   );
 
-  // 下一步（只在概览出现一次；按真实状态给可执行动作）
+  // 下一步（只说一次，按真实状态给可执行动作）
   const nextStep = (() => {
-    // SC-08 r4 §5：「部分维度旧数据可用但最近更新失败」必须最先说清，
-    // 不得与「数据正在按计划正常积累」同页并存（一个说失败、一个说正常 = 自相矛盾）
-    if (staleDims > 0) return '部分维度已有历史数据，但最近一次更新失败；请查看「来源与采集记录」了解原因，最近一次成功后这里会自动恢复。';
+    if (staleDims > 0) return '部分维度已有历史数据，但最近一次更新失败；可在「数据覆盖与来源」查看原因，恢复后这里会自动更新。';
     if (sum.collecting > 0) return '正在采集数据，完成后这里会自动更新。';
-    if (sum.failed > 0) return '有维度的最近一次采集失败：可在「来源与采集记录」查看原因并重试。';
-    if (sum.available === 0) return '还没有可展示的采集数据：可在「来源与采集记录」发起首轮采集。';
+    if (sum.failed > 0) return '有维度的最近一次采集未成功：可在「数据覆盖与来源」查看原因并重试。';
+    if (sum.available === 0) return '还没有可展示的采集数据：可在「数据覆盖与来源」发起首轮采集。';
     if (mon && mon.state === 'none') return '尚未加入正式监控：加入后系统会按计划每天检查变化。';
     if (mon && mon.state === 'source_failed') return mon.nextStepText || '正式监控来源建立失败，可重新加入监控。';
     if ((sum.notConfigured || 0) > 0) return `部分维度（${sum.notConfigured} 个）的数据服务尚未接入，已接入维度照常积累。`;
@@ -228,27 +275,80 @@ function BrandDetailInner() {
     <div className="core-brand-detail">
       <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品数据库</Link></p>
 
-      {/* ---------- 顶部品牌总览卡（唯一的品牌级事实摘要） ---------- */}
-      <section className="core-brand-hero" data-testid="brand-overview-card">
+      {/* ---------- 顶部品牌头部（唯一品牌级标识区） ---------- */}
+      <header className="core-brand-hero" data-testid="brand-overview-card">
         <div className="core-brand-hero-head">
-          <h2 title={b.name}>{b.name}</h2>
-          <span className="core-brand-rel">{relationText(b.relation)}</span>
+          <h1 title={b.name}>{b.name}</h1>
+          <span className="core-badge core-badge-neutral">{relationText(b.relation)}</span>
         </div>
         <a className="core-brand-hero-domain" href={b.officialDomain ? `https://${b.officialDomain}` : undefined} target="_blank" rel="noopener noreferrer nofollow">
           {b.officialDomain || '官网待确认'}
         </a>
         <dl className="core-brand-hero-facts">
-          <div><dt>市场 / 品类</dt><dd>{[marketText(b.market), b.category].filter(Boolean).join(' · ') || '—'}</dd></div>
+          <div><dt>主要市场</dt><dd>{[marketText(b.market), b.category].filter(Boolean).join(' · ') || '未标注'}</dd></div>
           <div><dt>官网确认</dt><dd>{d.officialSite ? d.officialSite.statusText : '未采集'}</dd></div>
-          <div><dt>正式监控</dt><dd className={mon && (mon.state === 'active' || mon.state === 'degraded') ? 'is-on' : undefined}>
-            {mon ? mon.stateText : '未加入监控'}{mon && mon.signalsText ? `（${mon.signalsText}）` : ''}
-          </dd></div>
-          <div><dt>数据积累起点</dt><dd>{accumulatedStart ? fmt(accumulatedStart) : '尚未开始积累'}</dd></div>
-          {/* SC-08 r3 §三：「成功观察」只认最近一次成功采集（lastSuccessfulAt），
-              失败的采集不能冒充成功观察时间 */}
-          <div><dt>最近一次成功观察</dt><dd>{d.collection && d.collection.lastSuccessfulAt ? fmt(d.collection.lastSuccessfulAt, true) : '—'}</dd></div>
-          <div><dt>已接入维度</dt><dd>{configuredDims} / {sum.total}{sum.available ? `（${sum.available} 个已有数据）` : ''}</dd></div>
+          <div><dt>最近成功更新</dt><dd>{d.collection && d.collection.lastSuccessfulAt ? fmt(d.collection.lastSuccessfulAt, true) : '—'}</dd></div>
+          <div>
+            <dt>正式监控</dt>
+            <dd>
+              <span className={'core-badge ' + (monitorOn ? 'core-badge-ok' : 'core-badge-neutral')}>
+                {mon ? mon.stateText : '未加入监控'}
+              </span>
+              {mon && mon.signalsText ? <span className="core-brand-muted core-brand-mini">（{mon.signalsText}）</span> : null}
+            </dd>
+          </div>
         </dl>
+        <div className="core-brand-hero-actions">
+          <button type="button" className="btn-mini" disabled={refreshing} onClick={doRefresh}>
+            {refreshing ? '正在更新…' : '立即更新'}
+          </button>
+          <Link className="btn-ghost btn-mini" href={`/intel?${keep}&brandId=${encodeURIComponent(b.brandId)}`}>
+            {monitorOn ? '管理监控' : '加入监控'}
+          </Link>
+          {refreshMsg ? <span className="core-brand-muted core-brand-mini">{refreshMsg}</span> : null}
+        </div>
+      </header>
+
+      {/* ---------- 第一屏摘要：最多四张卡 ---------- */}
+      <section className="core-sum-grid" data-testid="brand-summary-cards">
+        <article className="core-sum-card">
+          <h3>已积累时长</h3>
+          <p className="core-sum-main">{acc.main}</p>
+          <p className="core-sum-sub">{acc.sub}</p>
+        </article>
+        <article className="core-sum-card">
+          <h3>可核验变化</h3>
+          <p className="core-sum-main">{changeCount > 0 ? `${changeCount} 条` : '暂无'}</p>
+          <p className="core-sum-sub">
+            {changeCount > 0
+              ? `最近 ${fmt(vc?.lastAt || null, true)}`
+              : '有可核实的变化才会记录；没有记录不代表没有变化。'}
+          </p>
+        </article>
+        <article className="core-sum-card">
+          <h3>商品与价格</h3>
+          <p className="core-sum-main">
+            {products.observations.length ? `${products.observations.length} 款在售` : '暂无商品观察'}
+          </p>
+          <p className="core-sum-sub">
+            {priceText2 ? `价格带 ${priceText2}` : '采集到公开商品价格后显示区间'}
+            {products.collectedAt ? ` · ${fmt(products.collectedAt)}` : ''}
+          </p>
+        </article>
+        <article className="core-sum-card">
+          <h3>数据覆盖</h3>
+          <p className="core-sum-main">{sum.available} / {sum.total} 个维度</p>
+          <p className="core-sum-sub">
+            {[
+              sum.collecting ? `${sum.collecting} 个正在采集` : null,
+              sum.failed ? `${sum.failed} 个未成功` : null,
+              staleDims ? `${staleDims} 个用历史数据` : null,
+              (sum.notConfigured || 0) ? `${sum.notConfigured} 个未接入` : null,
+            ].filter(Boolean).join(' · ') || '暂无可展示数据'}
+            {' · '}
+            <button type="button" className="core-link-btn" onClick={() => switchTab('sources')}>查看明细</button>
+          </p>
+        </article>
       </section>
 
       <nav className="core-tabs" role="tablist" aria-label="品牌档案分区">
@@ -266,34 +366,24 @@ function BrandDetailInner() {
         ))}
       </nav>
 
-      {/* ---------- ① 概览：结论 + 下一步（不复制各 Tab 正文） ---------- */}
+      {/* ---------- ① 概览：结论 + 下一步（不复制各 Tab 正文、不重复覆盖面板） ---------- */}
       {tab === 'overview' && (
         <section className="core-sec">
-          <div className="core-overview-grid">
-            <div className="core-overview-card">
-              <h4>最近一次可核验变化</h4>
+          <div className="core-overview-two">
+            <div>
+              <h3>最近一次可核验变化</h3>
               {d.lastVerifiedChange ? (
                 <p className="core-overview-main">
-                  <span className={`core-inbox-dim core-dim-${d.lastVerifiedChange.dimension}`}>{DIM_TEXT[d.lastVerifiedChange.dimension] || '变化'}</span>
+                  <span className={`core-badge core-badge-info`}>{DIM_TEXT[d.lastVerifiedChange.dimension] || '变化'}</span>
                   <span>{d.lastVerifiedChange.title}</span>
-                  <span className="core-overview-at">{fmt(d.lastVerifiedChange.at, true)}</span>
+                  <span className="core-brand-muted core-brand-mini">{fmt(d.lastVerifiedChange.at, true)}</span>
                 </p>
-              ) : <p className="core-brand-muted">暂未观察到可核验变化（不代表该品牌没有变化）。</p>}
+              ) : (
+                <p className="core-brand-muted">暂未观察到可核验变化（不代表该品牌没有变化）。</p>
+              )}
             </div>
-            <div className="core-overview-card">
-              <h4>数据覆盖</h4>
-              <p className="core-overview-main">
-                {sum.total} 个维度中 {sum.available} 个已有数据
-                {sum.collecting ? `、${sum.collecting} 个正在采集` : ''}
-                {sum.failed ? `、${sum.failed} 个需要处理` : ''}
-                {/* SC-08 r3 §三：旧数据仍可用但最近更新失败的维度，不冒充完全正常 */}
-                {staleDims ? `、${staleDims} 个已有历史数据但最近更新失败` : ''}
-                {sum.notConfigured ? `、${sum.notConfigured} 个未接入` : ''}。
-              </p>
-              <button type="button" className="btn-ghost btn-mini" onClick={() => switchTab('sources')}>查看来源与采集记录</button>
-            </div>
-            <div className="core-overview-card">
-              <h4>下一步</h4>
+            <div>
+              <h3>下一步</h3>
               <p className="core-overview-main">{nextStep}</p>
             </div>
           </div>
@@ -307,13 +397,13 @@ function BrandDetailInner() {
       {tab === 'timeline' && (
         <section className="core-sec">
           <h3>时间线</h3>
-          <p className="desc">按时间倒序排列的品牌档案事件：首次观察、日常采集、出现的变化与生成的报告。</p>
+          <p className="desc">按时间倒序排列：价格变化、上新与下架、库存、官网内容、评论、内容与广告、报告生成。首次观察是档案起点，不是变化。</p>
           {rangePicker}
           {loadErr ? <p className="core-err">{loadErr}</p> : null}
           {tl ? (
             (tl.items && tl.items.length)
               ? <MemoryTimelineList data={tl} onEvidence={setEvRefs} />
-              : <EmptyState title="这段时间还没有记录" sub="换个时间范围，或先在「来源与采集记录」发起一次采集。" />
+              : <EmptyState title="这段时间还没有记录" sub="换个时间范围，或先在「数据覆盖与来源」发起一次采集。" />
           ) : <p className="hint">加载中…</p>}
         </section>
       )}
@@ -379,9 +469,8 @@ function BrandDetailInner() {
       {tab === 'voice' && (
         <section className="core-sec">
           <VoicePanel voice={d.unifiedVoice} onEvidence={setEvRefs} />
-          {/* SC-09 §四：公开评论页的真实观察（不是搜索摘要，正文经合规抓取） */}
           <div className="core-sub" data-testid="reviews-observations">
-            <h4>公开评论页</h4>
+            <h3>公开评论页</h3>
             {reviewsDet && reviewsDet.observations.length ? (
               <>
                 <p className="hint">本次采集到 {reviewsDet.observations.length} 个可访问的公开页面{reviewsDet.collectedAt ? `（${fmt(reviewsDet.collectedAt, true)}）` : ''}；样本不等于全网口碑。</p>
@@ -421,16 +510,15 @@ function BrandDetailInner() {
                     </li>
                   ))}
                 </ul>
-                {/* SC-09 §四：真实内容观察（YouTube 公开视频等） */}
                 {socialDet && socialDet.observations.length ? (
                   <div className="core-sub">
-                    <h4>公开内容（{socialDet.observations.length} 条，{socialDet.collectedAt ? fmt(socialDet.collectedAt, true) : '—'}）</h4>
+                    <h3>公开内容（{socialDet.observations.length} 条，{socialDet.collectedAt ? fmt(socialDet.collectedAt, true) : '—'}）</h3>
                     <ObsList items={socialDet.observations} evidenceRefs={socialDet.evidenceRefs} onEvidence={setEvRefs} />
                   </div>
                 ) : null}
                 {adsDet && adsDet.observations.length ? (
                   <div className="core-sub">
-                    <h4>公开广告信息（{adsDet.observations.length} 条）</h4>
+                    <h3>公开广告信息（{adsDet.observations.length} 条）</h3>
                     <ObsList items={adsDet.observations} evidenceRefs={adsDet.evidenceRefs} onEvidence={setEvRefs} />
                   </div>
                 ) : null}
@@ -438,7 +526,7 @@ function BrandDetailInner() {
             );
           })()}
           <div className="core-sub" data-testid="search-interest">
-            <h4>搜索热度</h4>
+            <h3>搜索热度</h3>
             {searchDet && searchDet.observations.length ? (
               <>
                 <p className="hint">数据服务估算（非绝对搜索量，不等于销量或市场份额）{searchDet.collectedAt ? `　观察时间：${fmt(searchDet.collectedAt, true)}` : ''}</p>
@@ -454,17 +542,16 @@ function BrandDetailInner() {
         </section>
       )}
 
-      {/* ---------- ⑥ 来源与采集记录（覆盖明细的唯一位置） ---------- */}
+      {/* ---------- ⑥ 数据覆盖与来源（覆盖明细的唯一位置） ---------- */}
       {tab === 'sources' && (
-        <section className="core-sec">
-          <h3>来源与采集记录</h3>
-          <p className="desc">每个数据维度的真实来源状态、最近观察时间、观察与证据条数；失败原因只在对应维度显示一次。</p>
+        <section className="core-sec" id="coverage">
+          <h3>数据覆盖与来源</h3>
+          <p className="desc">每个数据维度的真实来源状态、最近观察时间、观察与证据条数；同一失败原因只说明一次。</p>
           <table className="core-cov-table" data-testid="brand-coverage-table">
             <thead>
               <tr><th>维度</th><th>状态</th><th>最近观察</th><th>观察</th><th>证据</th><th>来源</th><th>说明</th></tr>
             </thead>
             <tbody>
-              {/* SC-08 r3 §三：同一失败原因只显示一次（多维度同因时只在第一行出现） */}
               {(() => {
                 const seenFail = new Set<string>();
                 return bc.dimensions.map(x => {
@@ -473,13 +560,12 @@ function BrandDetailInner() {
                   return (
                     <tr key={x.code} className={'core-cov-row core-cov-' + x.state}>
                       <td>{x.label}</td>
-                      <td><span className={'core-cov-badge core-cov-badge-' + x.state}>{x.stateText}</span></td>
+                      <td><span className={'core-badge core-badge-' + (x.state === 'available' ? 'ok' : x.state === 'failed' ? 'danger' : x.state === 'collecting' ? 'info' : 'neutral')}>{x.stateText}</span></td>
                       <td>{x.lastObservedAt ? fmt(x.lastObservedAt) : '—'}</td>
                       <td>{x.state === 'available' ? x.observationCount : '—'}</td>
                       <td>{x.state === 'available' ? x.evidenceCount : '—'}</td>
                       <td>{x.state === 'available' && x.sourceCount ? x.sourceCount : '—'}</td>
                       <td className="core-cov-note">
-                        {/*「已有历史数据」由状态徽标表达；说明列只放失败原因，不重复 */}
                         {failOnce ? (x.latestFailureText || '') : (x.usingPreviousData ? '' : (x.reason === 'credential_required' ? '' : (x.note || '')))}
                       </td>
                     </tr>
@@ -488,7 +574,6 @@ function BrandDetailInner() {
               })()}
             </tbody>
           </table>
-          {/* 同一类「数据服务暂不可用」只在表下说明一次，不在每行重复 */}
           {(() => {
             const notConfigured = bc.dimensions.filter(x => x.reason === 'credential_required');
             const notIntegrated = bc.dimensions.filter(x => x.reason === 'source_not_integrated');

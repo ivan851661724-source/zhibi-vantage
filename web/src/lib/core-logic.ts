@@ -112,6 +112,22 @@ export const RELATION_TEXT: Record<string, string> = {
   emerging: '新兴竞品',
   competitor: '竞品',
 };
+// SC-12 §三.3：品牌卡片短状态词表（与后端 brand-service.cardStatusOf 同口径）
+// 规则：只给短状态词与一句短提示；不出现 attempt / source_status / internal_error 等内部码。
+export const CARD_STATUS_TEXT: Record<string, string> = {
+  updated: '已更新',
+  partial: '部分数据待更新',
+  collecting: '正在采集',
+  stale: '已有历史数据，最近更新失败',
+  source_unreachable: '来源暂时不可达',
+  source_blocked: '来源拒绝了本次访问',
+  source_rate_limited: '来源访问频率受限',
+  source_parse_failed: '来源内容暂时无法解析',
+  needs_attention: '采集未完成，需要重试',
+  awaiting_config: '等待系统数据服务配置',
+  not_started: '尚未开始采集',
+};
+
 export function relationText(r: string | null | undefined): string {
   const k = String(r || '').trim().toLowerCase();
   if (!k) return '竞品';

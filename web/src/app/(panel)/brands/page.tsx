@@ -21,7 +21,7 @@ import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchBrands, retryFirstCollection, type BrandListItem, type BrandsProjectStats, type FirstCollectionSummary } from '@/lib/core-api';
 import { apiPost } from '@/lib/api';
-import { BRAND_COVER_TEXT, brandCoverState, allBrandsNotCollected, relationText, type BrandCoverState } from '@/lib/core-logic';
+import { BRAND_COVER_TEXT, CARD_STATUS_TEXT, brandCoverState, allBrandsNotCollected, relationText, type BrandCoverState } from '@/lib/core-logic';
 import { EmptyState } from '@/components/core-ui';
 
 export default function BrandsPage() {
@@ -249,9 +249,7 @@ function BrandsInner() {
             <span>正在采集 <b>{fc.brandsCollecting}</b></span>
             <span>部分完成 <b>{fc.brandsPartial}</b></span>
             <span className={fc.brandsNeedsAttention > 0 ? 'is-warn' : ''}>需要处理 <b>{fc.brandsNeedsAttention}</b></span>
-            {fc.failedCount > 0 ? <span className="is-warn">采集失败 <b>{fc.failedCount}</b></span> : null}
-            {fc.notConfiguredCount > 0 ? <span>尚未配置 <b>{fc.notConfiguredCount}</b></span> : null}
-            {fc.outOfCoverageCount > 0 ? <span>不覆盖该市场 <b>{fc.outOfCoverageCount}</b></span> : null}
+            {/* SC-12 §四：首页不铺 attempt 级计数（失败/未配置/不覆盖明细属诊断区） */}
             {fc.canRetry ? (
               <button type="button" className="btn-ghost btn-mini" disabled={retrying} onClick={retryFailedItems}>
                 {retrying ? '正在重试…' : '重新检查失败项'}
@@ -265,7 +263,7 @@ function BrandsInner() {
       {/* ③ 紧凑项目统计（后端同源派生；点击「需要处理」可直接筛选） */}
       <div id="coverage" className="core-stat-row" data-testid="brands-stats">
         <div className="core-stat"><span className="core-stat-num">{stats ? stats.brands : items.length}</span><span className="core-stat-label">品牌总数</span></div>
-        <div className="core-stat"><span className="core-stat-num">{stats ? stats.accumulating : 0}</span><span className="core-stat-label">已开始积累</span></div>
+        <div className="core-stat"><span className="core-stat-num">{stats ? stats.accumulating : 0}</span><span className="core-stat-label">已获得数据</span></div>
         <div className="core-stat"><span className="core-stat-num">{stats ? stats.collecting : 0}</span><span className="core-stat-label">正在采集</span></div>
         <div className={'core-stat' + (stats && stats.needsAttention > 0 ? ' is-warn' : '')}>
           <span className="core-stat-num">{stats ? stats.needsAttention : 0}</span><span className="core-stat-label">需要处理</span>
@@ -313,6 +311,7 @@ function BrandsInner() {
             const dims = b.brandCoverage.dataDimensions || [];
             const mon = b.monitoring;
             const dg = b.collectionDigest || null;
+            const st = b.status || { code: 'not_started', text: CARD_STATUS_TEXT.not_started, detail: null };
             const href = `/brands/${b.brandId}?projectId=${encodeURIComponent(projectId)}`;
             return (
               <li key={b.brandId} className="core-brand-card">
@@ -322,56 +321,35 @@ function BrandsInner() {
                 </div>
                 <p className="core-brand-domain" title={b.officialDomain || ''}>{b.officialDomain || '官网待确认'}</p>
 
+                {/* SC-12 §四：卡片只保留 7 项——品牌名/域名/关系、官网确认、正式监控、
+                    已获得数据的维度数、最近一次可核验变化、时间积累起点、一个主操作。
+                    采集失败不占整张卡，只给「需要处理」短状态，详细原因在「数据覆盖与来源」。 */}
                 <dl className="core-brand-facts">
                   <div><dt>官网</dt><dd>{b.officialSite ? b.officialSite.statusText : '尚未采集'}</dd></div>
-                  {/* SC-09 §四：真实采集摘要（无数据就不显示该行，不补 0） */}
-                  {dg && dg.products ? (
-                    <div><dt>商品</dt><dd>
-                      {dg.products.count} 个
-                      {priceRangeText(dg.products) ? <span className="core-brand-sig">{priceRangeText(dg.products)}</span> : null}
-                    </dd></div>
-                  ) : null}
-                  {dg && (dg.reviews || dg.social) ? (
-                    <div><dt>口碑 / 内容</dt><dd>
-                      {dg.reviews ? `评论页 ${dg.reviews.pageCount} 个` : '评论尚未采集'}
-                      {dg.social ? ` · 内容 ${dg.social.count} 条` : ''}
-                    </dd></div>
-                  ) : null}
-                  {dg && dg.search ? (
-                    <div><dt>搜索热度</dt><dd className={dg.search.state === 'available' ? undefined : 'core-brand-muted'}>
-                      {SEARCH_STATE_TEXT[dg.search.state] || '尚未采集'}
-                    </dd></div>
-                  ) : null}
-                  {dg && dg.ads ? (
-                    <div><dt>广告</dt><dd className={dg.ads.coverage === 'covered' ? undefined : 'core-brand-muted'}>
-                      {ADS_COVERAGE_TEXT[dg.ads.coverage] || '覆盖范围未知'}
-                    </dd></div>
-                  ) : null}
                   <div><dt>监控</dt><dd className={mon && mon.state === 'active' ? 'is-on' : undefined}>
                     {mon ? mon.stateText : '未加入监控'}{mon && mon.signalsText ? <span className="core-brand-sig">{mon.signalsText}</span> : null}
                   </dd></div>
-                  <div><dt>最近成功</dt><dd>{dg && dg.lastSuccessAt ? fmtDateTime(dg.lastSuccessAt) : <span className="core-brand-muted">尚未采集成功</span>}</dd></div>
+                  <div><dt>已有数据</dt><dd>{dims.length} / {sum.total} 个维度</dd></div>
                   {b.lastVerifiedChange ? (
                     <div><dt>最近变化</dt><dd>
                       <span className="core-brand-change-line" title={b.lastVerifiedChange.title}>
                         {DIM_LABEL[b.lastVerifiedChange.dimension] || '变化'} · {fmtDateTime(b.lastVerifiedChange.at)}
                       </span>
                     </dd></div>
-                  ) : null}
+                  ) : (
+                    <div><dt>最近变化</dt><dd><span className="core-brand-muted">暂无可核验变化</span></dd></div>
+                  )}
+                  <div><dt>积累起点</dt><dd>{b.firstObservedAt ? fmtDate(b.firstObservedAt) : <span className="core-brand-muted">尚未开始</span>}</dd></div>
                 </dl>
-                {/* 最近一次失败：只在当前确实失败时提示（成功后自动消失） */}
-                {dg && dg.lastFailureText ? <p className="core-brand-warn">{dg.lastFailureText}</p> : null}
-                {/* 首采逐能力状态：只在有失败/采集中时给一行人话，不铺技术枚举 */}
-                {b.firstCollection && b.firstCollection.collecting ? <p className="core-brand-muted core-brand-mini">首采进行中，结果会自动更新</p> : null}
-                {/* 首采失败但没有「最近一次失败」摘要（如最新一次是官网成功、商品失败）时，
-                    仍要如实提示一次，并引导到来源与采集记录 */}
-                {b.firstCollection && b.firstCollection.hasFailure && !(dg && dg.lastFailureText)
-                  ? <p className="core-brand-warn">{b.firstCollection.failureText || '部分来源采集失败，可查看来源与采集记录。'}</p>
-                  : null}
+
+                {/* 短状态（后端单一真源；不出现长错误段落与内部码） */}
+                <div className="core-brand-state" data-state={st.code}>
+                  <span className={'core-state-chip core-state-' + st.code}>{st.text}</span>
+                  {st.detail ? <span className="core-brand-muted core-brand-mini">{st.detail}</span> : null}
+                </div>
 
                 <div className="core-brand-card-foot">
-                  <span className={`core-cover-badge core-cover-${cs}`}>{BRAND_COVER_TEXT[cs]}</span>
-                  <Link className="btn-mini core-brand-open" href={href}>查看品牌档案</Link>
+                  <Link className="btn-mini core-brand-open" href={href}>查看品牌数据</Link>
                 </div>
               </li>
             );

@@ -3258,6 +3258,63 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-cover-failed{color:#b06a1f;border-color:rgba(176,106,31,.35)}
 .core-cover-notCollected,.core-cover-notIntegrated{color:var(--ink3)}
 
+/* ---- SC-12 §六：机会视图模块（价格带 / 定位 / 矩阵 / 动态 / 评论 / 线索） ---- */
+.core-opp-modules{display:block;margin:0 0 16px}
+.core-opp-basis-line{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;
+  font-size:12.5px;color:var(--ink2);border:1px solid var(--line1);border-radius:10px;padding:9px 12px;margin:0 0 12px;background:var(--bg1,#fff)}
+.core-opp-basis-line b{color:var(--ink);font-size:14px}
+.core-opp-grid{display:grid;gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
+@media (max-width:1499px){.core-opp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:760px){.core-opp-grid{grid-template-columns:minmax(0,1fr)}}
+.core-opp-card{border:1px solid var(--line1);border-radius:12px;padding:14px 16px;background:var(--bg1,#fff);min-width:0}
+.core-opp-card h4{margin:0 0 10px;font-size:13.5px;font-weight:600;color:var(--ink)}
+.core-opp-bands,.core-opp-bars{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.core-opp-bands li,.core-opp-bars li{display:grid;grid-template-columns:74px minmax(0,1fr) 84px;gap:8px;align-items:center}
+.core-opp-band-label{font-size:12px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.core-opp-band-bar{display:block;height:8px;border-radius:4px;background:rgba(29,158,117,.10);overflow:hidden}
+.core-opp-band-bar i{display:block;height:100%;background:var(--brand);border-radius:4px}
+.core-opp-band-num{font-size:11.5px;color:var(--ink3);text-align:right;white-space:nowrap}
+.core-opp-table{width:100%;border-collapse:collapse;font-size:12px}
+.core-opp-table th,.core-opp-table td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line1);white-space:nowrap}
+.core-opp-table th{color:var(--ink3);font-weight:500}
+.core-opp-table td{color:var(--ink2)}
+.core-opp-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--ink2)}
+.core-opp-list b{color:var(--ink)}
+/* SC-12 r2 §六：币种分组 / 证据按钮 / 不可比较行 */
+.core-opp-cur-group{margin:6px 0}
+.core-opp-cur-title{font-weight:600;font-size:12px;margin:4px 0}
+.core-opp-ev-btn{border:1px solid var(--border,#d0d0d0);background:transparent;border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer}
+.core-opp-ev-btn:hover{background:rgba(0,0,0,0.04)}
+.core-opp-nc-row td{color:var(--muted,#888)}
+.core-opp-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.core-opp-table-wrap .core-opp-table{min-width:520px}
+.core-opp-gate{font-size:13px;color:var(--ink);font-weight:600;margin:0 0 6px}
+.core-opp-gate-block{border:1px dashed var(--line1);border-radius:10px;padding:14px 16px;background:rgba(0,0,0,.015)}
+.core-opp-dim-state{color:var(--ink3)}
+.core-opp-opps{margin-top:14px}
+.core-opp-opps h3{margin:0 0 10px;font-size:14px;color:var(--ink)}
+.core-opp-opp{border:1px solid var(--line1);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:var(--bg1,#fff)}
+.core-opp-opp h4{margin:0 0 6px;font-size:13px;color:var(--ink)}
+.core-opp-fact{margin:0 0 8px;font-size:12.5px;color:var(--ink2);line-height:1.6}
+.core-opp-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 14px;margin:0}
+.core-opp-meta>div{display:grid;grid-template-columns:68px minmax(0,1fr);gap:8px;min-width:0}
+.core-opp-meta dt{font-size:11.5px;color:var(--ink3);white-space:nowrap}
+.core-opp-meta dd{margin:0;font-size:12px;color:var(--ink2);overflow-wrap:anywhere}
+@media (max-width:760px){.core-opp-meta{grid-template-columns:minmax(0,1fr)}}
+
+/* ---- SC-12 §三/§四：品牌卡片短状态（首页只显示短状态，不铺长错误段落） ---- */
+.core-brand-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px}
+.core-state-chip{font-size:11.5px;font-weight:600;line-height:1.5;padding:2px 9px;border-radius:999px;
+  border:1px solid var(--line1);color:var(--ink2);background:var(--bg1,#fff);white-space:nowrap}
+.core-state-updated{color:#1D9E75;border-color:rgba(29,158,117,.35);background:rgba(29,158,117,.07)}
+.core-state-partial{color:#8a6d1a;border-color:rgba(138,109,26,.30);background:rgba(138,109,26,.07)}
+.core-state-collecting{color:#1f6fb2;border-color:rgba(31,111,178,.30);background:rgba(31,111,178,.07)}
+.core-state-stale{color:#8a6d1a;border-color:rgba(138,109,26,.30);background:rgba(138,109,26,.10)}
+.core-state-needs_attention,.core-state-source_unreachable,.core-state-source_blocked,
+.core-state-source_rate_limited,.core-state-source_parse_failed{color:#b06a1f;border-color:rgba(176,106,31,.35);background:rgba(176,106,31,.07)}
+.core-state-awaiting_config,.core-state-not_started{color:var(--ink3)}
+.core-brand-state .core-brand-mini{font-size:11.5px}
+
 /* ---- 品牌详情：总览卡 ---- */
 .core-brand-hero{border:1px solid var(--line1);border-radius:12px;padding:18px 20px;margin:10px 0 14px;min-width:0}
 .core-brand-hero-head{display:flex;align-items:baseline;gap:10px;min-width:0}
@@ -3367,3 +3424,153 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-obs-meta{display:flex;flex-wrap:wrap;gap:10px;font-size:11.5px;color:var(--ink3);margin-top:3px;font-family:var(--num)}
 .core-obs-snip{font-size:12.5px;color:var(--ink2);margin-top:3px;overflow-wrap:anywhere}
 .core-obs-ev{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+
+/* ============================================================
+   核心产品体验收敛 r1 · 统一视觉规范层（design tokens 增量）
+   ------------------------------------------------------------
+   只做「统一」，不做全站重绘：
+   · 语义色/文字层级/间距/圆角/阴影 收敛成一套变量，新组件只允许用变量；
+   · 文字对比度按 WCAG AA 校正（弱文字 #888 → #6B6B6B，白底 4.9:1）；
+   · 状态一律走 .core-badge 一套组件，不再各页自造颜色；
+   · 390px 下不横向滚动、不文字重叠。
+   ============================================================ */
+:root{
+  /* 表面与文字（语义命名，供新组件使用） */
+  --page-bg: var(--bg0);
+  --card-bg: var(--bg2);
+  --text-primary: #0D0D0D;
+  --text-secondary: #555555;
+  --text-weak: #6B6B6B;      /* AA：白底 4.9:1，浅底 4.8:1 */
+  --border: var(--line1);
+  --border-strong: var(--line2);
+  /* 品牌与语义 */
+  --brand-primary: #1F9D63;  /* 单一绿色阶：可读性优先，不用亮薄荷绿做文字 */
+  --brand-surface: var(--brand-dim);
+  --success: #1F9D63; --success-bg: #E7F6EE;
+  --warning: #8A5A14; --warning-bg: #FBF1E2;
+  --danger:  #B03A34; --danger-bg:  #FBE9E8;
+  --info:    #2F6FB0; --info-bg:    #E8F1FA;
+  /* 字号层级（页面 32 / 区块 22 / 卡 17 / 正文 14 / 辅助 12.5） */
+  --fs-page-title: 32px; --lh-page-title: 40px;
+  --fs-section: 22px;    --lh-section: 30px;
+  --fs-card-title: 17px; --lh-card-title: 26px;
+  --fs-body: 14px;       --lh-body: 22px;
+  --fs-aux: 12.5px;      --lh-aux: 18px;
+  /* 圆角 / 阴影 / 间距 */
+  --radius-card: 12px; --radius-chip: 999px; --radius-input: 8px;
+  --shadow-card: 0 1px 3px rgba(0,0,0,.05);
+  --shadow-pop: 0 8px 24px rgba(0,0,0,.10);
+  --space-page: 24px; --space-card: 16px; --space-tight: 8px;
+  /* 字体栈：中英文系统字体优先（不依赖外链字体） */
+  --font-ui: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", system-ui, sans-serif;
+}
+
+/* 文字层级统一：新页面标题用 h1/h2 语义 + 变量字号 */
+.core-brand-hero h1{ font-size: var(--fs-page-title); line-height: var(--lh-page-title); font-weight: 600; letter-spacing: -.2px; margin: 0; }
+.core-sec > h3, .core-opp-layer-head h3, .core-inbox-head h3{ font-size: var(--fs-section); line-height: var(--lh-section); font-weight: 600; margin: 0 0 6px; }
+.core-sum-card h3, .core-opp-card h4, .core-sub h3, .core-sub h4{ font-size: var(--fs-card-title); line-height: var(--lh-card-title); font-weight: 600; margin: 0 0 6px; }
+.core-sum-sub, .core-brand-mini, .hint{ font-size: var(--fs-aux); line-height: var(--lh-aux); color: var(--text-weak); }
+.core-opp-main, .core-overview-main{ font-size: var(--fs-body); line-height: var(--lh-body); }
+
+/* ---------- Badge / Chip：全站唯一状态组件 ---------- */
+.core-badge{
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: var(--radius-chip);
+  font-size: var(--fs-aux); line-height: var(--lh-aux); font-weight: 500;
+  border: 1px solid var(--border); background: var(--card-bg); color: var(--text-secondary);
+  white-space: nowrap;
+}
+.core-badge-ok{ background: var(--success-bg); border-color: #BFE6CF; color: var(--success); }
+.core-badge-warn{ background: var(--warning-bg); border-color: #EBD3A7; color: var(--warning); }
+.core-badge-danger{ background: var(--danger-bg); border-color: #F0C4C1; color: var(--danger); }
+.core-badge-info{ background: var(--info-bg); border-color: #C3DAF0; color: var(--info); }
+.core-badge-neutral{ background: var(--unk-bg); border-color: var(--unk-line); color: var(--unk); }
+
+/* 文字型按钮（不抢视觉，但有可点语义） */
+.core-link-btn{
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--brand-primary); font: inherit; font-size: var(--fs-aux);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.core-link-btn:hover{ color: #157A4B; }
+
+/* ---------- 品牌档案：第一屏四张摘要卡 ---------- */
+.core-sum-grid{
+  display: grid; gap: var(--space-card);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  margin: 16px 0 8px;
+}
+.core-sum-card{
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-card); box-shadow: var(--shadow-card);
+  padding: var(--space-card); min-width: 0;
+}
+.core-sum-main{
+  font-size: 22px; line-height: 30px; font-weight: 600;
+  color: var(--text-primary); margin: 2px 0 4px;
+  overflow-wrap: anywhere;
+}
+.core-sum-sub{ margin: 0; overflow-wrap: anywhere; }
+
+/* 概览两栏（结论 + 下一步） */
+.core-overview-two{ display: grid; grid-template-columns: 1.15fr 1fr; gap: var(--space-card); }
+.core-brand-hero-facts{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 18px; }
+.core-brand-hero-facts dt{ color: var(--text-weak); font-size: var(--fs-aux); }
+.core-brand-hero-facts dd{ margin: 2px 0 0; color: var(--text-primary); }
+
+/* ---------- 机会视图：三层 ---------- */
+.core-opp-layer{ margin: 18px 0 6px; }
+.core-opp-layer-head{ margin-bottom: 10px; }
+.core-opp-layer-head p{ margin: 0; font-size: var(--fs-aux); line-height: var(--lh-aux); color: var(--text-weak); }
+.core-opp-layer .core-opp-grid{ margin-top: 0; }
+
+/* ---------- 收件箱：空态 / 差异值 / 纠错 ---------- */
+.core-inbox-scope{
+  margin: 6px 0 10px; font-size: var(--fs-aux); line-height: var(--lh-aux);
+  color: var(--text-weak);
+}
+.core-inbox-empty{
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-card);
+  background: var(--card-bg); padding: 20px var(--space-card);
+}
+.core-inbox-empty h4{ font-size: var(--fs-card-title); line-height: var(--lh-card-title); margin: 0 0 6px; font-weight: 600; }
+.core-inbox-empty p{ font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-secondary); margin: 0 0 10px; }
+.core-empty-actions{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.core-inbox-diff{
+  font-size: var(--fs-aux); line-height: var(--lh-aux); color: var(--text-secondary);
+  background: var(--bg1); border: 1px solid var(--border); border-radius: 6px;
+  padding: 1px 6px; white-space: nowrap;
+}
+.core-inbox-corr{
+  background: none; border: none; padding: 0 2px; cursor: pointer;
+  font-size: var(--fs-aux); line-height: var(--lh-aux); color: var(--text-weak);
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.core-inbox-corr:hover{ color: var(--text-secondary); }
+.core-inbox-corr-done{ font-size: var(--fs-aux); color: var(--success); }
+.core-inbox-corr-form{
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  flex-basis: 100%; margin-top: 6px;
+}
+.core-inbox-corr-form select, .core-inbox-corr-form input{
+  font: inherit; font-size: var(--fs-aux);
+  padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-input);
+  background: var(--card-bg); color: var(--text-primary); min-width: 0;
+}
+.core-inbox-corr-form input{ flex: 1 1 180px; }
+
+/* ---------- 响应式：1440 舒适、390 不横向滚动 ---------- */
+@media (max-width: 1100px){
+  .core-sum-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .core-overview-two{ grid-template-columns: 1fr; }
+}
+@media (max-width: 430px){
+  :root{ --fs-page-title: 24px; --lh-page-title: 32px; --fs-section: 19px; --lh-section: 26px; }
+  .core-sum-grid{ grid-template-columns: 1fr; gap: 10px; }
+  .core-brand-hero{ padding: 14px; }
+  .core-sum-card{ padding: 12px; }
+  /* 宽表格在窄屏内部滚动，绝不把整页撑出横向滚动条 */
+  .core-cov-table, .core-opp-table{ display: block; overflow-x: auto; white-space: nowrap; }
+  .core-inbox-item{ flex-wrap: wrap; }
+  .core-tabs{ overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+}

@@ -438,8 +438,10 @@ test('R3-3 先成功再失败：覆盖仍 available、lastSuccessfulAt 保持、
 // ============================================================
 test('R3-4 前端成功观察只读 lastSuccessfulAt；失败原因同一文案只显示一次（代码级）', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'app', '(panel)', 'brands', '[brandId]', 'page.tsx'), 'utf8');
-  assert.ok(/最近一次成功观察/.test(page));
-  assert.ok(!/最近一次成功观察[^`]*lastAttemptAt/.test(page), '成功观察不得读 lastAttemptAt');
+  // 核心产品体验收敛 r1：头部字段统一为「最近成功更新」（同一事实、同一数据源，
+  // lastSuccessfulAt），断言随之对齐字段名，意图不变。
+  assert.ok(/最近成功更新/.test(page));
+  assert.ok(!/最近成功更新[^`]*lastAttemptAt/.test(page), '成功观察不得读 lastAttemptAt');
   assert.ok(/lastSuccessfulAt/.test(page), '成功观察读 lastSuccessfulAt');
   assert.ok(/seenFail/.test(page), '失败原因按文案去重（同一原因只显示一次）');
   assert.ok(!/<DataSurfaceOverview|import\\s*\\{[^}]*DataSurfaceOverview/.test(page), 'r2 约束保持：无重复覆盖组件（注释提及不算）');

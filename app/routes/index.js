@@ -116,6 +116,8 @@ function registerAll() {
   registry.register('GET', '/api/watch-targets', 'tenant', WatchH.listTargets);
   registry.register('PATCH', '/api/watch-targets/:id', 'tenant', WatchH.patchTarget);
   registry.register('DELETE', '/api/watch-targets/:id', 'tenant', WatchH.deleteTarget);
+  // 核心产品体验收敛 r1：立即巡检（真实执行一次监控窗口，202 + 后台）
+  registry.register('POST', '/api/watch-targets/:id/inspect', 'tenant', WatchH.inspectTarget);
   // SC-07 §2：监控意向（非 Shopify 品牌「建立来源中」）——与正式监控对象分开
   registry.register('DELETE', '/api/watch-intents/:id', 'tenant', WatchH.deleteIntent);
   registry.register('GET', '/api/digests/daily', 'tenant', WatchH.dailyDigest);
@@ -136,6 +138,8 @@ function registerAll() {
   registry.register('GET', '/api/intelligence', 'tenant', CoreH.intelligence);
   // SC-08 §二：每日变化收件箱（只含 monitoring 确定性变化；cursor 分页）
   registry.register('GET', '/api/intel/inbox', 'tenant', CoreH.intelInbox);
+  // 核心产品体验收敛 r1：事件级纠错（不改写事实，只登记复核）
+  registry.register('POST', '/api/intel/events/:id/correction', 'tenant', CoreH.intelEventCorrection);
   // SC-09：项目级自动首采（进度轮询 / 失败项重试）
   registry.register('GET', '/api/first-collection', 'tenant', CoreH.firstCollectionStatus);
   registry.register('POST', '/api/first-collection/retry-failed', 'tenant', CoreH.firstCollectionRetry);

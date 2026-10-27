@@ -328,6 +328,7 @@ function listInbox(q) {
     nextCursor: hasMore && pageRows.length ? encodeCursor(pageRows[pageRows.length - 1].observed_at, pageRows[pageRows.length - 1].event_id) : null,
     total: Number(counted ? counted.n : 0),
     polling,
+    state: inboxState(tid, pid, tz),
     filters: {
       brandId: o.brandId || null, dimension: o.dimension || null, eventType: o.eventType || null,
       verificationStatus: o.verificationStatus || null, from: o.from || null, to: o.to || null,
@@ -335,6 +336,173 @@ function listInbox(q) {
     timeZone: tz,
     limitations,
   };
+}
+
+// ---------- 收件箱真实状态投影（本轮新增） ----------
+// 目的：空收件箱必须能区分三种完全不同的处境，用户才知道下一步该做什么：
+//   ① no_monitoring          —— 还没有正式监控目标（含从未加入 / 已全部停用）
+//   ② awaiting_comparison    —— 已加入监控，但还没有任何一次完成的巡检窗口
+//                                （＝尚未完成第二次可比观察，结构上不可能有变化事件）
+//   ③ inspected              —— 已按计划巡检；todayInspected 表示今日是否已巡
+// 纪律：只读真实表（watch_targets / monitoring_windows），不推断、不补 0；
+//       缺表视为能力未就绪（state=unknown），绝不伪造「已巡检」。
+function inboxState(tenantId, projectId, timeZone) {
+  const tid = String(tenantId || '');
+  const pid = String(projectId || '');
+  const tz = timeZone || 'Asia/Shanghai';
+  const out = {
+    state: 'no_monitoring',
+    activeTargets: 0,
+    pausedTargets: 0,
+    pendingIntents: 0,
+    failedIntents: 0,
+    intentNote: null,
+    signals: [],
+    signalsText: '',
+    baselineCompleted: 0,
+    windowCount: 0,
+    lastWindowAt: null,
+    lastWindowStatus: null,
+    lastSuccessAt: null,
+    todayInspected: false,
+    todayWindowCount: 0,
+    lastEventsVerified: 0,
+  };
+  let db;
+  try { db = WatchStore.getDb(); } catch (e) { out.state = 'unknown'; return out; }
+  let targets = [];
+  try {
+    targets = db.prepare(`SELECT watch_target_id, monitoring_status, enabled_signals, baseline_completed_at, last_success_at
+      FROM watch_targets WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+  } catch (e) { out.state = 'unknown'; return out; }
+  const active = targets.filter(t => t.monitoring_status === 'active' || t.monitoring_status === 'degraded');
+  const paused = targets.filter(t => t.monitoring_status === 'paused');
+  out.activeTargets = active.length;
+  out.pausedTargets = paused.length;
+  out.baselineCompleted = active.filter(t => t.baseline_completed_at).length;
+  // 信号范围：**只报真实 enabled_signals**（不把未实现的信号说成「监控中」）
+  const sig = [];
+  for (const t of active) {
+    try {
+      for (const s of (JSON.parse(t.enabled_signals || '[]') || [])) if (s && !sig.includes(s)) sig.push(s);
+    } catch (e) { /* 脏数据忽略，不猜测 */ }
+  }
+  out.signals = sig;
+  out.signalsText = sig.map(s => SIGNAL_TEXT[s] || s).join('、');
+  // 最近成功观察（只认 target 自报的 last_success_at，不拿窗口时间冒充）
+  const lastSuccess = active.map(t => t.last_success_at).filter(Boolean).sort().pop() || null;
+  out.lastSuccessAt = lastSuccess;
+  try {
+    const w = db.prepare(`SELECT COUNT(*) AS n, MAX(ended_at) AS last_at, MAX(events_verified) AS ev
+      FROM monitoring_windows WHERE tenant_id=? AND project_id=? AND status='complete'`).get(tid, pid) || {};
+    out.windowCount = Number(w.n || 0);
+    out.lastWindowAt = w.last_at || null;
+    out.lastWindowStatus = out.windowCount ? 'complete' : null;
+    out.lastEventsVerified = Number(w.ev || 0);
+    // 今日（按产品时区）是否有完成的巡检窗口
+    const today = localDateOf(new Date().toISOString(), tz);
+    const rows = db.prepare(`SELECT ended_at FROM monitoring_windows
+      WHERE tenant_id=? AND project_id=? AND status='complete' AND ended_at IS NOT NULL`).all(tid, pid);
+    let todayN = 0;
+    for (const r of rows) if (localDateOf(r.ended_at, tz) === today) todayN++;
+    out.todayWindowCount = todayN;
+    out.todayInspected = todayN > 0;
+  } catch (e) { /* monitoring_windows 未建表：保持 windowCount=0，state 落到 awaiting_comparison */ }
+
+  // 监控意向（非 Shopify 品牌「正在建立公开来源」）：必须与「尚未加入」区分，
+  // 否则用户点了「加入监控」看不到任何变化，会重复提交。
+  try {
+    const intents = db.prepare(`SELECT state, reason_text FROM watch_intents WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+    const establishing = intents.filter(i => i.state === 'establishing');
+    const failed = intents.filter(i => i.state === 'source_failed');
+    out.pendingIntents = establishing.length;
+    out.failedIntents = failed.length;
+    out.intentNote = establishing.length ? '正在建立公开商品来源，完成后自动转为正式监控'
+      : (failed.length ? (failed[0].reason_text || '监控来源建立失败，可稍后重试') : null);
+  } catch (e) { /* watch_intents 未建表：保持 0，不推断 */ }
+
+  if (out.state === 'unknown') return out;
+  if (!out.activeTargets) {
+    if (out.pendingIntents > 0) out.state = 'establishing';
+    else if (out.failedIntents > 0) out.state = 'source_failed';
+    // inactive（用户主动移出监控）不显示「已暂停」——它与「从未加入」对用户是同一件事：
+    // 当前没有在跑的正式监控，需要重新加入。只有真正 paused 才提示可恢复。
+    else out.state = out.pausedTargets > 0 ? 'paused' : 'no_monitoring';
+  }
+  else if (out.windowCount === 0) out.state = 'awaiting_comparison';
+  else out.state = 'inspected';
+  return out;
+}
+
+// 信号 → 用户可读名（内部词表 price/launch/stock/site_change 不进页面）
+const SIGNAL_TEXT = Object.freeze({
+  price: '价格',
+  launch: '上新',
+  stock: '库存',
+  site_change: '官网内容',
+});
+
+// ---------- 事件级纠错（本轮新增） ----------
+// 为什么单独一张表：既有 /api/field-correct 面向旧 state.competitors 字段模型，
+// 无法表达「这条变化记录有误」。事件纠错**不改写**已记录事实（忠实助理红线），
+// 只登记用户质疑并进入复核队列，事件本身仍按原核验状态展示。
+const CORRECTION_REASONS = new Set(['wrong_value', 'wrong_evidence', 'not_a_change', 'wrong_brand', 'other']);
+function ensureCorrectionTable() {
+  ensureTable();
+  WatchStore.getDb().exec(`CREATE TABLE IF NOT EXISTS intel_event_corrections (
+    correction_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    UNIQUE (tenant_id, event_id, reason)
+  )`);
+}
+function submitCorrection(input) {
+  ensureCorrectionTable();
+  const o = input || {};
+  const tid = String(o.tenantId || ''), pid = String(o.projectId || ''), eid = String(o.eventId || '');
+  if (!tid || !pid || !eid) return { ok: false, reason: 'MISSING_SCOPE' };
+  const reason = CORRECTION_REASONS.has(o.reason) ? o.reason : 'other';
+  const note = o.note == null ? null : String(o.note).slice(0, 500);
+  const db = WatchStore.getDb();
+  // 事件必须属于本租户本项目（跨租户/不存在一律 404 语义，不泄露存在性）
+  const ev = db.prepare('SELECT event_id FROM intel_events WHERE tenant_id=? AND project_id=? AND event_id=?').get(tid, pid, eid);
+  if (!ev) return { ok: false, reason: 'EVENT_NOT_FOUND' };
+  const id = 'corr_' + crypto.randomBytes(8).toString('hex');
+  try {
+    db.prepare(`INSERT INTO intel_event_corrections (correction_id, tenant_id, project_id, event_id, reason, note, status, created_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(id, tid, pid, eid, reason, note, 'open', new Date().toISOString());
+    return { ok: true, correctionId: id, status: 'open' };
+  } catch (e) {
+    if (/UNIQUE|constraint/i.test(String(e && e.message))) {
+      return { ok: true, duplicate: true, message: '这条反馈已记录，我们在复核中。' };
+    }
+    return { ok: false, reason: 'WRITE_FAILED' };
+  }
+}
+function correctionCountFor(tenantId, projectId, eventId) {
+  ensureCorrectionTable();
+  const r = WatchStore.getDb().prepare('SELECT COUNT(*) AS n FROM intel_event_corrections WHERE tenant_id=? AND project_id=? AND event_id=?')
+    .get(String(tenantId || ''), String(projectId || ''), String(eventId || ''));
+  return Number(r ? r.n : 0);
+}
+
+// 某品牌的「可核验变化」统计（品牌档案第一屏摘要卡的唯一口径）：
+// 只数 origin=monitoring 且 verification_status=verified 的真实变化，不带时间窗（全部已积累）。
+function verifiedEventStats(tenantId, projectId, competitorId) {
+  ensureTable();
+  try {
+    const r = WatchStore.getDb().prepare(`SELECT COUNT(*) AS n, MIN(observed_at) AS first_at, MAX(observed_at) AS last_at
+      FROM intel_events WHERE tenant_id=? AND project_id=? AND competitor_id=? AND origin='monitoring' AND verification_status='verified'`)
+      .get(String(tenantId || ''), String(projectId || ''), String(competitorId || ''));
+    return { count: Number((r && r.n) || 0), firstAt: (r && r.first_at) || null, lastAt: (r && r.last_at) || null };
+  } catch (e) {
+    return { count: 0, firstAt: null, lastAt: null };
+  }
 }
 
 function countForScope(tenantId, projectId) {
@@ -355,5 +523,6 @@ function latestVerifiedEvent(tenantId, projectId, competitorId) {
 
 module.exports = {
   ORIGINS, VERIFICATION, SOURCE_KINDS, DIMENSIONS, EVENT_TYPES, DIMENSIONS_WITH_WRITERS, FORBIDDEN_CHANGE_KEYS,
-  ensureTable, recordEvent, listInbox, countForScope, latestVerifiedEvent, normalizeChange, encodeCursor, decodeCursor,
+  SIGNAL_TEXT, inboxState, CORRECTION_REASONS, ensureCorrectionTable, submitCorrection, correctionCountFor,
+  ensureTable, recordEvent, listInbox, countForScope, latestVerifiedEvent, verifiedEventStats, normalizeChange, encodeCursor, decodeCursor,
 };

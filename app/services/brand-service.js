@@ -383,6 +383,10 @@ function buildBrandCoverage(tenantId, projectId, competitor) {
       sourceCount: hosts.size,
       // 失败原因：维度真失败 或 旧数据可用但最新失败，都要如实可见
       latestFailureText: failedAtt && (state === 'failed' || usingPreviousData) ? (failedAtt.errorUserText || null) : null,
+      // SC-12 §三.3：失败分类只以**用户级派生分类**暴露（failureKind）。
+      // 原始 source_status / error_class（internal_error、adapter_output_invalid 等）
+      // 属内部码，不得进入用户可见载荷（§三 红线：用户页面不得出现内部枚举）。
+      failureKind: failedAtt ? failureKindOf(failedAtt) : null,
       capabilities: caps.map(c => ({ code: c.code, label: c.displayName, displayName: c.displayName, maturity: c.maturity })),
     });
   }
@@ -448,6 +452,8 @@ function rebuildTimeline(tenantId, brandId, projectId, competitor) {
 }
 
 function timelineView(tenantId, brandId, opts) {
+  // 注：refId 是「证据/事件追溯锚点」（SC-08 冻结契约，前端用作打开来源的引用），
+  // 与「attempt 内部标识」不是同一语义；用户页面不渲染其值。
   return BrandStore.listTimeline(tenantId, brandId, opts).map(e => Object.assign({}, e, {
     natureText: NATURE_TEXT[e.nature] || '来源直接记录',
     statusText: INTEL_STATUS_TEXT[e.status] || '待核实',
@@ -509,7 +515,9 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
       }).filter(Boolean);
       const hasEvidence = evRefs.length > 0;
       push({
-        id: a.attemptId, brandId, brandName: comp.name || null, competitorId: comp.id || null,
+        // SC-12 §三：情报条目 id 不得是 attempt 内部标识（att_xxx），改为不透明外部 ID
+        id: 'intel_' + String(a.attemptId || '').replace(/[^a-zA-Z0-9]/g, '').slice(-16),
+        brandId, brandName: comp.name || null, competitorId: comp.id || null,
         type: cap.code === 'shopify_catalog' ? 'product' : 'monitor',
         typeText: cap.code === 'shopify_catalog' ? '商品' : '监控状态',
         at, nature: 'observed', natureText: NATURE_TEXT.observed,
@@ -519,7 +527,8 @@ function buildBrandIntelligence(tenantId, projectId, brandId, comp, opts) {
         detail: a.status === 'failed' ? (a.errorUserText || '采集失败') : `观察 ${a.observationCount || 0} 条`,
         evidence: evRefs,
         correctionEndpoint: '/api/field-correct',
-        attemptId: a.attemptId, capability: cap.code,
+        // SC-12 §三：用户载荷不得出现 attempt 内部标识，只给「是否有该次采集」的布尔
+        hasAttempt: !!a.attemptId, capability: cap.code,
       });
     }
   }
@@ -861,7 +870,7 @@ function latestVerifiedChange(tenantId, projectId, competitorId) {
 // 缺陷修复：website_products 维度同时含 official_site_profile，直接取维度 observations
 // 会把「官网资料观察」当成商品展示（Grovemade 真实数据实测：只显示 1 条而非 10 件商品）。
 function buildProductsView(tenantId, projectId, comp) {
-  const out = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  const out = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
   if (!comp || !comp.id) return out;
   const caps = ['shopify_catalog', 'public_site_products'];
   const seen = new Set();
@@ -906,7 +915,7 @@ function buildProductsView(tenantId, projectId, comp) {
       discoveryPath: discoveryPath,
       sampleNote: '样本为公开页面可安全识别的商品（发现路径受限），非全量商品清单，不推断销量',
     };
-    out.attemptId = latestAttempt ? latestAttempt.attemptId : null;
+    out.hasAttempt = !!(latestAttempt && latestAttempt.attemptId);
     out.collectedAt = latestAt;
   }
   return out;
@@ -994,6 +1003,63 @@ function buildCollectionDigest(tenantId, projectId, comp) {
 }
 
 // ---------- 品牌视图 ----------
+
+// SC-12 §三.3：把内部失败分类（source_status / error_class）映射为**用户级**失败种类。
+// 用户侧只允许出现下面这组 kind；internal_error / adapter_output_invalid 等内部枚举一律不出现在用户载荷。
+const FAILURE_KIND_BY_STATUS = Object.freeze({
+  blocked: 'source_blocked',
+  unavailable: 'source_unreachable',
+  timeout: 'source_unreachable',
+  rate_limited: 'source_rate_limited',
+  parse_failed: 'source_parse_failed',
+});
+function failureKindOf(failedAtt) {
+  const ss = failedAtt.sourceStatus || failedAtt.source_status || '';
+  const ec = failedAtt.errorClass || failedAtt.error_class || '';
+  if (ss && FAILURE_KIND_BY_STATUS[ss]) return FAILURE_KIND_BY_STATUS[ss];
+  if (ec === 'adapter_output_invalid') return 'source_output_incomplete';
+  if (ss === 'not_configured') return 'awaiting_config';
+  if (ss) return 'needs_attention';
+  return ec ? 'needs_attention' : null;
+}
+
+// SC-12 §三.3：品牌卡片短状态（用户可见的唯一真源）
+// 规则：
+//   · 当前状态由最新一次有效 attempt 决定（历史 internal_error 不得继续占据卡片主状态）；
+//   · 有历史数据 + 最近一次失败 → 数据保留 + 标「已有历史数据，最近更新失败」；
+//   · 只输出短状态词与一句短提示；禁止出现 attempt / source_status / internal_error /
+//     adapter_output_invalid / jobId 等内部细节（详细原因只在「数据覆盖与来源」）。
+function cardStatusOf(coverage) {
+  const dims = (coverage && coverage.dimensions) || [];
+  const collecting = dims.filter(d => d.state === 'collecting');
+  const stale = dims.filter(d => d.usingPreviousData);
+  const failed = dims.filter(d => d.state === 'failed');
+  const available = dims.filter(d => d.state === 'available');
+  const notConfigured = dims.filter(d => d.state === 'not_configured');
+  if (collecting.length) return { code: 'collecting', text: '正在采集', detail: null };
+  if (stale.length) {
+    return {
+      code: 'stale', text: '已有历史数据，最近更新失败',
+      detail: '数据保留，' + stale.length + ' 个维度可重新检查',
+    };
+  }
+  if (failed.length) {
+    const kind = failed[0].failureKind || '';
+    if (kind === 'source_unreachable') return { code: 'source_unreachable', text: '来源暂时不可达', detail: '可稍后重新检查' };
+    if (kind === 'source_blocked') return { code: 'source_blocked', text: '来源拒绝了本次访问', detail: '可在数据覆盖与来源查看' };
+    if (kind === 'source_rate_limited') return { code: 'source_rate_limited', text: '来源访问频率受限', detail: '可稍后重新检查' };
+    if (kind === 'source_parse_failed') return { code: 'source_parse_failed', text: '来源内容暂时无法解析', detail: '原始数据已保留' };
+    return { code: 'needs_attention', text: '采集未完成，需要重试', detail: '可在数据覆盖与来源查看原因' };
+  }
+  if (available.length) {
+    const partial = dims.some(d => d.state === 'available' && d.latestAttemptStatus === 'partial');
+    return { code: partial ? 'partial' : 'updated', text: partial ? '部分数据待更新' : '已更新', detail: null };
+  }
+  if (notConfigured.length && notConfigured.length === dims.length) {
+    return { code: 'awaiting_config', text: '等待系统数据服务配置', detail: null };
+  }
+  return { code: 'not_started', text: '尚未开始采集', detail: null };
+}
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
   const state = loadProjectState(tenantId, projectId);
@@ -1021,6 +1087,8 @@ function listBrandViews(tenantId, projectId) {
       lastObservedAt: last ? last.at : (bc.dimensions.reduce((acc, d) => (d.lastObservedAt && (!acc || d.lastObservedAt > acc) ? d.lastObservedAt : acc), null)),
       // SC-09 §四：卡片真实摘要（商品/价格区间/评论/社媒/热度/广告覆盖/最近成功与失败）
       collectionDigest: buildCollectionDigest(tenantId, projectId, comp || {}),
+      // SC-12 §三.3：卡片短状态（首页卡片只显示这个，不显示长错误段落）
+      status: cardStatusOf(bc),
     };
   });
 }
@@ -1059,7 +1127,7 @@ function getBrandView(tenantId, brandId, projectId) {
   const bc = buildBrandCoverage(tenantId, projectId, comp || {});
   // 商品与价格（来自 Data Surface 已采集 attempt，不复制真值）
   // 商品视图：只聚合同维度的两个商品能力（不把官网资料观察当商品）
-  let products = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] };
+  let products = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] };
   if (comp) {
     try { products = buildProductsView(tenantId, projectId, comp); }
     catch (e) { /* 不可读：保持空，不填充 */ }
@@ -1073,7 +1141,8 @@ function getBrandView(tenantId, brandId, projectId) {
         dimensionDetails[dim] = {
           observations: det.observations || [],
           summary: det.summary || null,
-          attemptId: det.attemptId || null,
+          // SC-12 §三：attempt 内部标识不进入用户载荷，只给布尔
+          hasAttempt: !!det.attemptId,
           collectedAt: det.collectedAt || null,
           surfaceState: det.surfaceState || null,
           evidenceRefs: (det.evidenceRefs || []).map(r => ({
@@ -1081,7 +1150,7 @@ function getBrandView(tenantId, brandId, projectId) {
             sourceUrl: r.sourceUrl || null, label: r.label || null,
           })),
         };
-      } catch (e) { dimensionDetails[dim] = { observations: [], summary: null, attemptId: null, collectedAt: null, evidenceRefs: [] }; }
+      } catch (e) { dimensionDetails[dim] = { observations: [], summary: null, hasAttempt: false, collectedAt: null, evidenceRefs: [] }; }
     }
   }
   const collection = buildCollectionState(tenantId, projectId, comp || {});
@@ -1105,6 +1174,11 @@ function getBrandView(tenantId, brandId, projectId) {
     collection,
     monitoring,
     lastVerifiedChange: latestVerifiedChange(tenantId, projectId, competitorId),
+    // 核心产品体验收敛 r1：品牌级「可核验变化数」（第一屏摘要卡唯一口径）
+    verifiedChanges: (function () {
+      try { return require('./intel-inbox.js').verifiedEventStats(tenantId, projectId, competitorId); }
+      catch (e) { return { count: 0, firstAt: null, lastAt: null }; }
+    })(),
     unifiedVoice: VoiceUnified.buildUnifiedVoice({ tenantId, projectId, brandId, competitorId: comp ? comp.id : null, comp: comp || {} }),
     products,
     dimensionDetails: dimensionDetails,

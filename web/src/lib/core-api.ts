@@ -93,10 +93,14 @@ export interface BrandCoverageDimension {
   lastSuccessfulAt?: string | null;
   latestAttemptStatus?: 'success' | 'partial' | 'failed' | 'running' | null;
   usingPreviousData?: boolean;
+  // SC-12：维度下辖能力（含 maturity）——「立即更新」据此挑选可刷新的能力
+  capabilities?: { code: string; label?: string; displayName?: string; maturity?: string }[];
   observationCount: number;
   evidenceCount: number;
   sourceCount: number;
   latestFailureText: string | null;
+  // SC-12 §三.3：用户级失败种类（非内部码）
+  failureKind?: string | null;
 }
 export interface BrandCoverageSummary {
   available: number;
@@ -153,7 +157,9 @@ export interface BrandListItem {
   lastVerifiedChange?: BrandVerifiedChange | null;
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
-  // SC-09：品牌真实采集摘要 + 首采逐能力状态
+  // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
+  status?: { code: string; text: string; detail: string | null };
+  // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
   collectionDigest?: BrandCollectionDigest | null;
   firstCollection?: BrandFirstCollection | null;
 }
@@ -364,6 +370,109 @@ export interface OpportunityView {
   nextSteps?: string[];
   limits: string[];
   note?: string | null;
+  // SC-12 §六：机会数据基础（缺失维度如实标注；不因单个维度缺失而整页空白）
+  foundation?: OpportunityFoundation | null;
+}
+
+// ---------- SC-12 §六：机会数据基础（服务端按可用维度独立产出） ----------
+export interface OpportunityDimensionBasis {
+  code: string; label: string;
+  status: 'complete' | 'partial' | 'missing' | 'not_covered' | 'not_configured' | 'checked_empty';
+  statusText: string | null;
+  brandCount: number;        // 参与品牌数
+  observationCount: number;  // 观察数量
+  evidenceCount: number;     // Evidence 数量
+  window: { from: string | null; to: string | null };
+  measurementMethod: string | null;
+  limits: string[];
+  // §三：历史数据与最新失败
+  usingPreviousData?: boolean;
+  lastSuccessAt?: string | null;
+  latestFailureText?: string | null;
+  // §二：逐品牌状态（UI 用于「每项只显示一次」+ 混合状态不混用）
+  perBrand?: { brandId: string; name: string; state: string; stateText: string | null; observationCount: number; observedAt: string | null; outOfCoverage?: boolean; coverageNote?: string | null }[] | null;
+}
+
+export interface OpportunityEvidenceRef {
+  evidenceId: string | null;
+  snapshotId: string | null;
+  sourceUrl: string | null;
+  brandId?: string | null;
+  observedAt?: string | null;
+}
+
+export interface OpportunityPriceRow {
+  brandId: string; name: string; competitorId: string | null;
+  productCount: number | null; available: number | null; soldOut: number | null;
+  priceMin: number | null; priceMedian: number | null; priceMax: number | null;
+  currency: string | null; currencyStatus?: 'confirmed' | 'mixed' | 'unknown';
+  priceComparable?: boolean;
+  observedAt: string | null; evidenceIds: string[];
+  usingPreviousData?: boolean; lastSuccessAt?: string | null; latestFailureText?: string | null;
+  evidenceRefs?: OpportunityEvidenceRef[];
+}
+
+export interface OpportunityLead {
+  id: string; title: string; fact: string; dimension: string; dimensionCode?: string; sampleSize: string;
+  window: { from: string | null; to: string | null };
+  evidenceRefs: OpportunityEvidenceRef[];
+  limits: string[]; question: string;
+  historical?: boolean;
+}
+
+export interface OpportunityFoundation {
+  projectId: string;
+  generatedAt: string;
+  brandScope: {
+    total: number; withData: number; withReviews: number;
+    list: { brandId: string; competitorId: string | null; name: string; domain: string | null; relation: string | null; market: string | null; category: string | null; hasPrice: boolean; hasReviews: boolean }[];
+  };
+  dimensions: Record<string, OpportunityDimensionBasis>;
+  // §六.1：不可用维度统一在此列出（每个维度只出现一次）
+  unavailableDimensions: OpportunityDimensionBasis[];
+  modules: {
+    priceBands: {
+      available: boolean;
+      // §一.5：按币种分组
+      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
+      bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[];
+      currency: string | null;
+      multiCurrency: boolean;
+      rows: OpportunityPriceRow[];
+      nonComparableRows: { brandId: string; competitorId: string | null; name: string; productCount: number | null; currencyStatus: string; note: string }[];
+      limits: string[];
+    };
+    matrixDensity: { available: boolean; rows: OpportunityPriceRow[]; medianProductCount: number | null; limits: string[] };
+    newItemDynamics: {
+      available: boolean;
+      rows: { brandId: string; name: string; baselineItems: number; firstSeenAt: string | null; lastSeenAt: string | null; days: { day: string; count: number; firstAt: string | null }[] }[];
+      comparableWindows: number;
+      limits: string[];
+    };
+    reviewInsights: {
+      available: boolean;
+      rows: { brandId: string; name: string; pageCount: number; ratedPages: number; reviewCount: number | null; sourceCount: number | null; observedAt: string | null; evidenceIds: string[]; usingPreviousData?: boolean; latestFailureText?: string | null; pages: { url: string | null; title: string | null; rating: number | null; reviewCount: number | null; observedAt: string | null }[] }[];
+      ratedObjects: number;
+      limits: string[];
+    };
+    // §四：散点门槛结论由服务端给出（前端只消费，不自行判定；无 jitter）
+    satisfactionScatter: {
+      available: boolean; minObjects: number; evaluatedObjects?: number; comparableObjects: number;
+      objects: { oid: string | null; label: string | null; satisfaction: number | null; importance: number | null; sampleScope: string | null; window: { from: string | null; to: string | null }; evidenceRefs: OpportunityEvidenceRef[] }[];
+      rejected?: { label: string | null; missing: string[] }[];
+      reason: string | null;
+      detail?: string | null;
+      coordsBasis?: string;
+      limits: string[];
+    };
+  };
+  opportunities: OpportunityLead[];
+  summary: {
+    usableDimensionCodes: string[]; unavailableDimensionCodes?: string[]; missingDimensionCodes: string[];
+    usableDimensionCount: number; missingDimensionCount: number;
+    brandCount: number; brandsWithData: number; opportunityCount: number;
+    hasAnalysis?: boolean;
+  };
 }
 
 export interface ReportListItem {
@@ -455,11 +564,13 @@ export interface BrandDetail {
   brandCoverage: BrandCoverage;
   monitoring?: BrandMonitoringState | null;
   lastVerifiedChange?: BrandVerifiedChange | null;
+  // 核心产品体验收敛 r1：品牌级可核验变化统计（第一屏摘要卡唯一口径）
+  verifiedChanges?: { count: number; firstAt: string | null; lastAt: string | null };
   // SC-09 §四：详情 Tab 的真实 observations（评论/社媒/热度/广告）+ 证据引用
   dimensionDetails?: Record<string, {
     observations: DimensionObservation[];
     summary: Record<string, unknown> | null;
-    attemptId: string | null;
+    hasAttempt: boolean;
     collectedAt: string | null;
     surfaceState?: string | null;
     evidenceRefs: { evidenceId: string | null; snapshotId: string | null; sourceUrl: string | null; label: string | null }[];
@@ -476,7 +587,7 @@ export interface BrandDetail {
   products: {
     observations: ProductObservation[];
     summary: Record<string, unknown> | null;
-    attemptId: string | null;
+    hasAttempt: boolean;
     collectedAt: string | null;
     evidenceRefs: EvidenceRefLite[];
   };
@@ -548,6 +659,25 @@ export interface InboxEvent {
 }
 export interface InboxGroup { date: string; events: InboxEvent[] }
 export interface InboxSummary { today: number; verified: number; pending: number; brandsChanged: number }
+// 收件箱真实状态（后端只读投影）：空收件箱必须能区分「没加入监控 / 加了没跑过 / 跑过没变化」
+export interface InboxState {
+  state: 'no_monitoring' | 'paused' | 'establishing' | 'source_failed' | 'awaiting_comparison' | 'inspected' | 'unknown';
+  activeTargets: number;
+  pausedTargets: number;
+  pendingIntents?: number;
+  failedIntents?: number;
+  intentNote?: string | null;
+  signals: string[];
+  signalsText: string;
+  baselineCompleted: number;
+  windowCount: number;
+  lastWindowAt: string | null;
+  lastWindowStatus: string | null;
+  lastSuccessAt: string | null;
+  todayInspected: boolean;
+  todayWindowCount: number;
+  lastEventsVerified: number;
+}
 export interface InboxResponse {
   projectId: string;
   summary: InboxSummary;
@@ -555,6 +685,7 @@ export interface InboxResponse {
   nextCursor: string | null;
   total: number;
   polling: { enabled: boolean; reason: string; activeTargets?: number };
+  state: InboxState;
   filters: Record<string, string | null>;
   timeZone: string;
   limitations: string[];
@@ -584,6 +715,53 @@ export function fetchIntelligence(params: { projectId: string; brandId?: string;
 export function fetchOpportunities(projectId: string, signal?: AbortSignal) {
   return apiGet<OpportunityView>(`/api/opportunities?projectId=${encodeURIComponent(projectId)}`, signal);
 }
+// SC-12 §五：品牌详情页「立即更新」——对单个能力的真实刷新（后端 202 入队，非前端伪造状态）
+export function refreshBrandSource(body: { projectId: string; competitorId: string; capability: string }) {
+  return apiPost<{ attempt?: { attemptId: string; status: string }; jobId?: string; deduped?: boolean; message?: string }>(
+    '/api/data-surface/refresh', body,
+  );
+}
+
+// ---------- 正式监控对象（收件箱的「立即巡检 / 加入监控」真实动作） ----------
+export interface WatchTargetInfo {
+  watchTargetId: string;
+  competitorId: string;
+  monitoringStatus: string;
+  enabledSignals: string[];
+  supportedSignals: string[];
+  baselineCompletedAt?: string | null;
+  lastSuccessAt?: string | null;
+}
+export interface WatchIntentInfo {
+  intentId: string;
+  competitorId: string;
+  state: string;
+  reasonText?: string | null;
+  monitoring?: boolean;
+}
+export function fetchWatchTargets(projectId: string, signal?: AbortSignal) {
+  return apiGet<{ targets: WatchTargetInfo[]; intents: WatchIntentInfo[] }>(
+    `/api/watch-targets?projectId=${encodeURIComponent(projectId)}`, signal,
+  );
+}
+// 立即巡检：202 + 后台真实执行一次监控窗口（不是前端假状态）
+export function inspectWatchTarget(watchTargetId: string) {
+  return apiPost<{ accepted: boolean; windowKey: string; message: string }>(
+    `/api/watch-targets/${encodeURIComponent(watchTargetId)}/inspect`, {},
+  );
+}
+// 加入正式监控（真实建目标；幂等）
+export function createWatchTarget(body: { projectId: string; competitorId: string }) {
+  return apiPost<{ target?: WatchTargetInfo; existed?: boolean; reactivated?: boolean }>('/api/watch-targets', body);
+}
+// 事件级纠错：只登记复核，不改写已记录事实
+export function reportIntelEvent(body: { projectId: string; eventId: string; reason: string; note?: string }) {
+  return apiPost<{ ok: boolean; duplicate?: boolean; message: string }>(
+    `/api/intel/events/${encodeURIComponent(body.eventId)}/correction`,
+    { projectId: body.projectId, eventId: body.eventId, reason: body.reason, note: body.note || '' },
+  );
+}
+
 export function fetchReports(projectId: string, signal?: AbortSignal) {
   return apiGet<{ projectId: string; reports: ReportListItem[] }>(`/api/reports?projectId=${encodeURIComponent(projectId)}`, signal);
 }

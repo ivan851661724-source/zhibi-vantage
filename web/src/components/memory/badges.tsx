@@ -8,7 +8,7 @@ const FALLBACK_SOURCE: Record<SourceKind, string> = {
   live_observation: '直接观察',
   archived_observation: '历史存档观察',
   licensed_dataset: '授权数据服务',
-  derived_event: '系统推导事件',
+  derived_event: '基于已核验数据的变化',
 };
 const FALLBACK_PRECISION: Record<TimePrecision, string> = {
   exact: '精确到时刻', day: '精确到日', month: '精确到月', captured_only: '仅采集时可知', unknown: '时间无法确认',
