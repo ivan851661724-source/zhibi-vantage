@@ -85,12 +85,13 @@ resource_preflight() {
   disk_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
   load1=$(cut -d' ' -f1 /proc/loadavg)
   cores=$(nproc)
+  # 并发互斥由 /tmp/zhibi-deploy.inner.lock 保证；这里只报告进程数（pgrep 会把
+  # 自身与调用链上的字符串也算进去，不能作为失败依据）
   builds=$(pgrep -cf 'docker build|compose build|buildkit|deploy\.sh' 2>/dev/null || true)
-  echo "资源预检: 内存可用=${avail_mb}MB swap=${swap_mb}MB 磁盘可用=${disk_gb}GB load1=$load1 cores=$cores 并发构建/部署=${builds:-0}"
+  echo "资源预检: 内存可用=${avail_mb}MB swap=${swap_mb}MB 磁盘可用=${disk_gb}GB load1=$load1 cores=$cores 构建/部署进程=${builds:-0}（含自身）"
   [ "${avail_mb:-0}" -ge 800 ] || reasons="$reasons 可用内存${avail_mb}MB<800MB;"
   [ "${disk_gb:-0}" -ge 2 ] || reasons="$reasons 磁盘可用${disk_gb}GB<2GB;"
   awk "BEGIN{exit !($load1 <= $cores * 2)}" || reasons="$reasons load1=$load1 超过 ${cores}x2;"
-  [ "${builds:-0}" -le 1 ] || reasons="$reasons 已有 ${builds} 个构建/部署进程在跑"
   if [ -n "$reasons" ]; then
     echo "资源预检未通过：$reasons —— 在修改运行服务前退出"
     return 1
