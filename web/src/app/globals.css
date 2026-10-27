@@ -3574,3 +3574,57 @@ a.core-inbox-text:hover{text-decoration:underline}
   .core-inbox-item{ flex-wrap: wrap; }
   .core-tabs{ overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
 }
+
+/* 390 下的应用外壳：侧栏收为底部横条（原实现是 216px 定宽侧栏被压成窄柱，
+   图标纵向堆叠、内容区被挤压 —— 属于窄屏布局破损，必须修） */
+@media (max-width: 430px){
+  .side-nav{
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+    width: 100%; height: auto; max-height: 64px;
+    flex-direction: row; align-items: center; gap: 2px;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+    border-right: none; border-top: 1px solid var(--border);
+    box-shadow: 0 -4px 18px rgba(0,0,0,.06);
+    overflow-x: auto; overflow-y: hidden; z-index: 60;
+  }
+  /* 只保留导航项本身：其余子元素（品牌区/分组标题/用户区）一律隐藏，
+     并强制单行横向排列——否则会折成两行，看起来像布局破损 */
+  .side-nav > *:not(.nav-group):not(.nav-item){ display: none; }
+  .side-nav .nav-group{ display: contents; }
+  .side-nav .nav-sec, .side-nav .side-foot{ display: none; }
+  .side-nav{ flex-wrap: nowrap; }
+  .side-nav .nav-item{
+    width: auto; flex: 0 0 auto; flex-direction: column; gap: 2px;
+    padding: 4px 9px; font-size: 11px; line-height: 14px; text-align: center;
+    border-radius: 10px; white-space: nowrap;
+  }
+  .side-nav .nav-item .badge{ display: none; }
+  .main, .main-wrap{ padding-bottom: 74px; }
+}
+
+/* 390 下的应用外壳：侧栏收为底部横条（原实现是 216px 定宽侧栏被压成窄柱，
+   图标纵向堆叠、内容区被挤压 —— 属于窄屏布局破损，必须修） */
+@media (max-width: 430px){
+  .side-nav{
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+    width: 100%; height: auto; max-height: 64px;
+    flex-direction: row; align-items: center; gap: 2px;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+    border-right: none; border-top: 1px solid var(--border);
+    box-shadow: 0 -4px 18px rgba(0,0,0,.06);
+    overflow-x: auto; overflow-y: hidden; z-index: 60;
+  }
+  /* 只保留导航项本身：其余子元素（品牌区/分组标题/用户区）一律隐藏，
+     并强制单行横向排列——否则会折成两行，看起来像布局破损 */
+  .side-nav > *:not(.nav-group):not(.nav-item){ display: none; }
+  .side-nav .nav-group{ display: contents; }
+  .side-nav .nav-sec, .side-nav .side-foot{ display: none; }
+  .side-nav{ flex-wrap: nowrap; }
+  .side-nav .nav-item{
+    width: auto; flex: 0 0 auto; flex-direction: column; gap: 2px;
+    padding: 4px 9px; font-size: 11px; line-height: 14px; text-align: center;
+    border-radius: 10px; white-space: nowrap;
+  }
+  .side-nav .nav-item .badge{ display: none; }
+  .main, .main-wrap{ padding-bottom: 74px; }
+}
