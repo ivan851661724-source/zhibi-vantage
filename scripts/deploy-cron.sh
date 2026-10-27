@@ -315,10 +315,11 @@ docker tag "$NEW_API_IMG" "zhibi-vantage:deployed-$SHORT"
 STAGE="旧槽排空"
 echo "$(date '+%F %T') 旧槽 $ACTIVE_NAME 排空 120s 后停止"
 sleep 120
-docker stop "$ACTIVE_NAME" >/dev/null 2>&1 || true
-# 旧槽停止后把 previous 指向当前槽，避免静态回退命中已停容器
+# 顺序很关键：先把 previous 指向当前槽并 reload，再停旧容器。
+# 反过来会留下「upstream 指向已停容器」的时间窗，静态回退会拿到 connect refused（502）。
 write_upstream "$CAND_PORT" "$CAND_PORT"
 nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || true
+docker stop "$ACTIVE_NAME" >/dev/null 2>&1 || true
 echo "旧槽已停止（zhibi-web:rollback 保留供回滚）"
 
 docker image prune -f --filter "until=48h" >/dev/null 2>&1 || true
