@@ -101,10 +101,19 @@ state_write() { # $1=deployed_sha $2=web_img $3=api_img $4=slot $5=failed_sha $6
   printf '{"deployed_sha":"%s","deployed_web_image_id":"%s","deployed_api_image_id":"%s","active_web_slot":"%s","failed_sha":"%s","deployed_at":"%s"}\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" > "$tmp" && mv "$tmp" "$STATE"
 }
-inflight_write() { # $1=target_sha $2=web_img $3=api_img $4=slot
+inflight_write() { # $1=target_sha $2=web_img $3=api_img $4=slot（初始 phase=candidate_started）
   local tmp="$INFLIGHT.tmp.$$"
-  printf '{"target_sha":"%s","web_img":"%s","api_img":"%s","slot":"%s","ts":"%s"}\n' \
+  printf '{"target_sha":"%s","web_img":"%s","api_img":"%s","slot":"%s","phase":"candidate_started","ts":"%s"}\n' \
     "$1" "$2" "$3" "$4" "$(date -u '+%FT%TZ')" > "$tmp" && mv "$tmp" "$INFLIGHT"
+}
+inflight_set_phase() { # $1=phase（candidate_started / switched / health_verified）
+  [ -f "$INFLIGHT" ] || return 0
+  local tmp="$INFLIGHT.tmp.$$"
+  local t w a s ts
+  t=$(state_get target_sha "$INFLIGHT"); w=$(state_get web_img "$INFLIGHT")
+  a=$(state_get api_img "$INFLIGHT"); s=$(state_get slot "$INFLIGHT"); ts=$(state_get ts "$INFLIGHT")
+  printf '{"target_sha":"%s","web_img":"%s","api_img":"%s","slot":"%s","phase":"%s","ts":"%s"}\n' \
+    "$t" "$w" "$a" "$s" "$1" "$ts" > "$tmp" && mv "$tmp" "$INFLIGHT"
 }
 
 port_of_slot() { case "$1" in blue) echo "$SLOT_BLUE_PORT";; green) echo "$SLOT_GREEN_PORT";; *) echo "";; esac; }
@@ -235,6 +244,14 @@ rollback() {
 
 on_exit() {
   local rc=$1 dur
+  # r4 提交窗口兜底：进程内 COMMITTED 可能尚未置位，但若持久状态已原子替换为
+  # 本版本（deployed_sha==NEW 且 web 镜像一致）且入口已切到候选，则以持久事实
+  # 为准视为已提交——绝不回滚出"状态新版、运行旧版"。
+  if [ "$COMMITTED" = "0" ] && [ "$rc" -ne 0 ] && [ -n "$NEW" ] && [ "$NGX_SWITCHED" = "1" ] \
+     && [ "$(state_get deployed_sha)" = "$NEW" ] && [ "$(state_get deployed_web_image_id)" = "$NEW_WEB_IMG" ]; then
+    COMMITTED=1
+    echo "$(date '+%F %T') on_exit 兜底：持久状态已登记为本版本且入口已切换 → 视为已提交，不回滚"
+  fi
   if [ "$rc" -ne 0 ] && [ "$SERVICE_TOUCHED" = "1" ] && [ "$COMMITTED" = "0" ] && [ "$ROLLBACK_DONE" = "0" ]; then
     echo "$(date '+%F %T') 非零退出（stage=$STAGE），开始回滚"
     rollback || true
@@ -277,22 +294,44 @@ reconcile() {
   if container_running "$actual_name"; then actual_up=1; else actual_up=0; fi
   b_img=$(docker inspect -f '{{.Image}}' zhibi-vantage 2>/dev/null || echo none)
 
-  local if_target if_web if_api if_slot
+  local if_target if_web if_api if_slot if_phase
   if_target=$(state_get target_sha "$INFLIGHT" 2>/dev/null || true)
   if_web=$(state_get web_img "$INFLIGHT" 2>/dev/null || true)
   if_api=$(state_get api_img "$INFLIGHT" 2>/dev/null || true)
   if_slot=$(state_get slot "$INFLIGHT" 2>/dev/null || true)
+  if_phase=$(state_get phase "$INFLIGHT" 2>/dev/null || true)
 
-  # A. 滚动提交：被打断的部署已实际接管入口，且候选/后端均健康
-  if [ "$actual_up" = "1" ] && [ "$ngx_port" != "$s_port" ] && [ -n "$if_target" ] \
+  # A. 滚动提交：仅当持久化 phase=health_verified（健康门+最终核验已完成登记），
+  #    且此刻重新核验入口/静态/双容器/镜像全部通过——不得只凭 Docker healthy 提交。
+  local rf=0
+  if [ "$actual_up" = "1" ] && [ -n "$if_target" ] && [ "$if_phase" = "health_verified" ] \
+     && [ "$ngx_port" = "$(port_of_slot "$if_slot")" ] \
      && [ "$actual_img" = "$if_web" ] && container_healthy "$actual_name" \
      && [ "$b_img" = "$if_api" ] && container_healthy zhibi-vantage; then
-    echo "reconcile: 被打断的部署已实际接管入口且健康 → 滚动提交 $if_target (slot=$if_slot)"
-    state_write "$if_target" "$if_web" "$if_api" "$if_slot" "" "$(date -u '+%FT%TZ')"
-    docker tag "$if_web" "zhibi-web:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
-    docker tag "$if_api" "zhibi-vantage:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
-    rm -f "$INFLIGHT"
-    s_sha=$if_target; s_web=$if_web; s_api=$if_api; s_slot=$if_slot; s_port=$(port_of_slot "$s_slot")
+    local e1 e2 sbad
+    e1=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null || echo 000)
+    e2=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/healthz" 2>/dev/null || echo 000)
+    sbad=$(curl -s -m 5 "http://127.0.0.1:$WEB_PORT/login" | grep -oE '/_next/static/[^"\\]+' | sort -u | while read -r a; do
+        [ -n "$a" ] || continue
+        c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT$a"); [ "$c" = "200" ] || echo x
+      done | wc -l)
+    if [ "$e1" = "200" ] && [ "$e2" = "200" ] && [ "$sbad" = "0" ]; then
+      rf=1
+      echo "reconcile: phase=health_verified 且入口/静态/双容器/镜像复验通过 → 滚动提交 $if_target (slot=$if_slot)"
+      state_write "$if_target" "$if_web" "$if_api" "$if_slot" "" "$(date -u '+%FT%TZ')"
+      if [ "${ZB_DRILL_MODE:-0}" != "1" ]; then
+        docker tag "$if_web" "zhibi-web:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
+        docker tag "$if_api" "zhibi-vantage:deployed-$(git rev-parse --short=7 "$if_target" 2>/dev/null || echo unknown)" 2>/dev/null || true
+      fi
+      rm -f "$INFLIGHT"
+      # 滚动提交 = 无 trap 硬中断后的收尾：清理遗留登记临时文件
+      cleanup_registered_tmp
+      s_sha=$if_target; s_web=$if_web; s_api=$if_api; s_slot=$if_slot; s_port=$(port_of_slot "$s_slot")
+    else
+      echo "reconcile: phase=health_verified 但复验未通过（/login=$e1 /healthz=$e2 静态异常=$sbad）→ 按旧状态恢复"
+    fi
+  elif [ -n "$if_target" ] && [ "$if_phase" != "health_verified" ] && [ "$ngx_port" != "$s_port" ]; then
+    echo "reconcile: nginx 已指向候选但持久化 phase=$if_phase（未达 health_verified）→ 不允许滚动提交，按旧状态恢复"
   fi
 
   # 一致性判定（滚动提交后按新状态判定）
@@ -334,11 +373,24 @@ reconcile() {
   write_upstream_file "$s_port" "$s_port"
   mv "$NGX_UPSTREAM.new" "$NGX_UPSTREAM"
   nginx -t >/dev/null 2>&1 && nginx -s reload 2>/dev/null || echo "reconcile: 警告 nginx 回切失败"
-  # B3. 后端镜像与状态一致
+  # B3. 后端镜像与状态一致（带维护窗：恢复期间入口明确 503，绝不穿透到启动中的后端）
   if [ -n "$s_api" ] && [ "$b_img" != "$s_api" ]; then
     echo "reconcile: 后端镜像回滚到状态锚点 ${s_api:7:12}"
+    touch "$NGX_MAINT" 2>/dev/null || true
     docker tag "$s_api" "zhibi-vantage:1.5.0" 2>/dev/null || true
-    ( cd /opt/zhibi-vantage && docker compose up -d --no-deps zhibi-vantage 2>&1 | tail -1 ) || true
+    local rb_ok=0 rb_i
+    for rb_i in 1 2; do
+      if ( cd /opt/zhibi-vantage && docker compose up -d --no-deps zhibi-vantage ); then rb_ok=1; break; fi
+      echo "reconcile: compose 恢复第 ${rb_i} 次失败，3s 后重试"
+      sleep 3
+    done
+    [ "$rb_ok" = "1" ] || echo "reconcile: 警告 后端恢复启动失败"
+    local ri
+    for ri in $(seq 1 120); do
+      if api_ready; then break; fi
+      sleep 0.5
+    done
+    rm -f "$NGX_MAINT" 2>/dev/null || true
   fi
   # B4. 移除候选/残留槽容器
   local other
@@ -347,6 +399,8 @@ reconcile() {
     docker rm -f "$other" >/dev/null 2>&1 || true
   done
   rm -f "$INFLIGHT"
+  # 恢复路径 = 上一运行无 trap 硬中断后的收尾：清理其遗留的登记临时文件
+  cleanup_registered_tmp
   # B5. 就绪核验
   local i ok=1
   for i in $(seq 1 60); do
@@ -457,7 +511,14 @@ if [ -n "${ZB_PREBUILT_WEB_IMG:-}" ] || [ -n "${ZB_PREBUILT_API_IMG:-}" ]; then
   docker tag "$NEW_WEB_IMG" zhibi-web:0.2.0
   docker tag "$NEW_API_IMG" zhibi-vantage:1.5.0
 elif [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then
-  # 机制回归专用：候选镜像必须由调用方显式提供，且与当前运行镜像不同。
+  # 机制回归专用（r4 收紧）：仅允许显式 ZB_DRILL_MODE=1 的回归演练使用；
+  # 普通 cron、main 部署或缺少 drill 标记一律拒绝。
+  # drill 不进行正式登记（不打 deployed-<sha> 标签、不写 release manifest）——
+  # 历史镜像不得被登记为目标 commit/tree 的已部署产物。
+  if [ "${ZB_DRILL_MODE:-0}" != "1" ]; then
+    echo "拒绝：ZB_SKIP_BUILD 仅限 ZB_DRILL_MODE=1 的回归演练使用（cron/main 部署禁用）"
+    exit 1
+  fi
   [ -n "${ZB_CANDIDATE_WEB_IMG:-}" ] || { echo "ZB_SKIP_BUILD 需要 ZB_CANDIDATE_WEB_IMG"; exit 1; }
   [ -n "${ZB_CANDIDATE_API_IMG:-}" ] || { echo "ZB_SKIP_BUILD 需要 ZB_CANDIDATE_API_IMG"; exit 1; }
   docker image inspect "$ZB_CANDIDATE_WEB_IMG" >/dev/null 2>&1 || { echo "候选 web 镜像不存在: $ZB_CANDIDATE_WEB_IMG"; exit 1; }
@@ -470,11 +531,17 @@ elif [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then
   docker tag "$NEW_WEB_IMG" zhibi-web:0.2.0
   docker tag "$NEW_API_IMG" zhibi-vantage:1.5.0
 else
-  # 缓存构建（cron 正式路径）：串行、禁止 --no-cache、构建后 label 自检 fail-closed。
+  # 缓存构建（cron 兜底路径；正式推荐预构建镜像）：串行、禁止 --no-cache、构建后 label 自检 fail-closed。
+  # r4：禁止裸 docker compose build（会并行构建全部服务）——后端、前端按明确顺序
+  # 分别构建（单次调用单服务，天然串行），客户端 nice/ionice 降低 CPU/IO 优先级。
+  # 若现网/第三方测点在构建窗口出现服务超时，本机构建必须退回"仅预构建镜像"路径。
   STAGE="构建前资源预检"
   resource_preflight || exit 1
-  STAGE="docker compose build"
-  ZB_COMMIT="$REMOTE" ZB_TREE="$TREE" docker compose build
+  STAGE="构建（串行：后端→前端）"
+  IONICE=""
+  ionice -c3 true >/dev/null 2>&1 && IONICE="ionice -c3"
+  ZB_COMMIT="$REMOTE" ZB_TREE="$TREE" nice -n 19 ${IONICE} docker compose build zhibi-vantage
+  ZB_COMMIT="$REMOTE" ZB_TREE="$TREE" nice -n 19 ${IONICE} docker compose build zhibi-web
   NEW_WEB_IMG=$(docker inspect -f '{{.Id}}' zhibi-web:0.2.0)
   NEW_API_IMG=$(docker inspect -f '{{.Id}}' zhibi-vantage:1.5.0)
   local_check_labels() { # $1=img_id $2=期望commit $3=期望tree $4=名称
@@ -585,6 +652,7 @@ nginx -t >/dev/null 2>&1 || { echo "nginx -t 失败，放弃切换"; rm -f "$NGX
 mv "$NGX_UPSTREAM.new" "$NGX_UPSTREAM"
 nginx -s reload
 NGX_SWITCHED=1
+inflight_set_phase switched
 echo "$(date '+%F %T') 入口已切到 $CAND_NAME:$CAND_PORT"
 
 STAGE="健康门-基线"
@@ -641,24 +709,50 @@ if [ -n "$FV_FAIL" ]; then
   exit 1
 fi
 echo "最终核验通过：入口三端点 200、静态 0 异常、双容器 healthy"
+inflight_set_phase health_verified
 
-STAGE="提交部署状态"
-# 唯一的状态提交点：全部必要步骤与最终核验完成后原子写入。
-# 此后 COMMITTED=1，剩余步骤全部容错，任何异常不再回滚运行版本。
-state_write "$REMOTE" "$NEW_WEB_IMG" "$NEW_API_IMG" "$NEXT_SLOT" "" "$(date -u '+%FT%TZ')"
-rm -f "$INFLIGHT"
-docker tag "$NEW_WEB_IMG" "zhibi-web:deployed-$SHORT"
-docker tag "$NEW_API_IMG" "zhibi-vantage:deployed-$SHORT"
-WEB_DIGEST=$(docker image inspect -f '{{join .RepoDigests ","}}' "$NEW_WEB_IMG" 2>/dev/null || echo "local-only")
-API_DIGEST=$(docker image inspect -f '{{join .RepoDigests ","}}' "$NEW_API_IMG" 2>/dev/null || echo "local-only")
-BUILD_MODE="cached-build"
-if [ -n "${ZB_PREBUILT_WEB_IMG:-}" ]; then BUILD_MODE="prebuilt";
-elif [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then BUILD_MODE="drill"; fi
-cat > "$STATE_DIR/release-$SHORT.json" <<EOF
+# 提交窗口测试钩子：health_verified 持久化后立即 SIGKILL 自身（无 EXIT trap，
+# 模拟硬中断）——reconcile 只允许在该 phase 下滚动提交。
+if [ "${ZB_TEST_SIGKILL_AFTER_HEALTH_VERIFY:-0}" = "1" ]; then
+  echo "钩子：health_verified 登记后立即 SIGKILL 自身（模拟无 trap 硬中断）"
+  kill -9 $$
+fi
+
+STAGE="提交前正式登记"
+# r4：release manifest 与镜像正式标签必须在状态原子替换【之前】完成——
+# 状态替换是最后一个必要的可失败操作，其后不存在任何可失败步骤。
+# drill 模式不进行正式登记：历史镜像不得被登记为目标 commit/tree 的已部署产物。
+if [ "${ZB_DRILL_MODE:-0}" = "1" ]; then
+  echo "drill 模式：跳过正式登记（release manifest / deployed-<sha> 标签）"
+else
+  docker tag "$NEW_WEB_IMG" "zhibi-web:deployed-$SHORT"
+  docker tag "$NEW_API_IMG" "zhibi-vantage:deployed-$SHORT"
+  WEB_DIGEST=$(docker image inspect -f '{{join .RepoDigests ","}}' "$NEW_WEB_IMG" 2>/dev/null || echo "local-only")
+  API_DIGEST=$(docker image inspect -f '{{join .RepoDigests ","}}' "$NEW_API_IMG" 2>/dev/null || echo "local-only")
+  BUILD_MODE="cached-build"
+  if [ -n "${ZB_PREBUILT_WEB_IMG:-}" ]; then BUILD_MODE="prebuilt";
+  elif [ "${ZB_SKIP_BUILD:-0}" = "1" ]; then BUILD_MODE="drill"; fi
+  cat > "$STATE_DIR/release-$SHORT.json" <<EOF
 {"commit":"$REMOTE","tree":"$TREE","web_image_id":"$NEW_WEB_IMG","api_image_id":"$NEW_API_IMG","web_repo_digests":"$WEB_DIGEST","api_repo_digests":"$API_DIGEST","slot":"$NEXT_SLOT","build_mode":"$BUILD_MODE","deployed_at":"$(date -u '+%FT%TZ')"}
 EOF
+  echo "正式登记完成：release-$SHORT.json + deployed 标签"
+fi
+
+STAGE="提交部署状态"
+# 唯一的状态提交点（最后一个可失败操作）：原子写入后立即置 COMMITTED=1。
+# 即便进程在本行与 COMMITTED=1 之间被 SIGTERM 打断，on_exit 也会读取持久状态
+# 判定为已提交（见 on_exit 提交窗口兜底），绝不出现"状态新版、运行旧版"。
+state_write "$REMOTE" "$NEW_WEB_IMG" "$NEW_API_IMG" "$NEXT_SLOT" "" "$(date -u '+%FT%TZ')"
+
+# 提交窗口测试钩子：state_write 完成后、COMMITTED 置位前向自身发送 SIGTERM。
+if [ "${ZB_TEST_SIGTERM_AFTER_STATE_WRITE:-0}" = "1" ]; then
+  echo "钩子：state_write 完成后立即向自身发送 SIGTERM（模拟提交窗口中断）"
+  kill -TERM $$
+fi
+
 COMMITTED=1
-echo "$(date '+%F %T') 部署状态已提交：sha=$REMOTE slot=$NEXT_SLOT web=${NEW_WEB_IMG:7:12} api=${NEW_API_IMG:7:12}（release-$SHORT.json）"
+rm -f "$INFLIGHT"
+echo "$(date '+%F %T') 部署状态已提交：sha=$REMOTE slot=$NEXT_SLOT web=${NEW_WEB_IMG:7:12} api=${NEW_API_IMG:7:12}$([ "${ZB_DRILL_MODE:-0}" = "1" ] && echo '（drill：无正式登记）' || echo "（release-$SHORT.json）")"
 
 STAGE="旧槽排空"
 echo "$(date '+%F %T') 旧槽 $ACTIVE_NAME 排空 120s 后停止（静态保护由磁盘归档承担，不再依赖槽存活）"

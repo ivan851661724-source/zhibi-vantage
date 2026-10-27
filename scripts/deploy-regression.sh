@@ -138,6 +138,7 @@ drill_envs() { # 演练时刻现选候选（运行镜像随演练变化）
 run_drill() { # $1=log 前缀 + 其余 env 已在调用方给出 → 执行并回显输出
   local log="$1"; shift
   env ZB_TEST_SECRET_MARKER="$MARKER" ZB_HEALTH_ROUNDS=$HEALTH_ROUNDS_DRILL \
+      ZB_DRILL_MODE=1 \
       DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 "$@" \
       bash scripts/deploy-cron.sh > "$log" 2>&1
 }
@@ -172,20 +173,63 @@ AFTER_LOGIN=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB
 [ "$BEFORE_CONTAINERS" = "$AFTER_CONTAINERS" ] && ok "运行容器未被改动（$AFTER_CONTAINERS）" || bad "容器被改动：$BEFORE_CONTAINERS -> $AFTER_CONTAINERS"
 [ "$AFTER_LOGIN" = "200" ] && ok "旧服务继续服务（/login=200）" || bad "旧服务中断：/login=$AFTER_LOGIN"
 
-echo "== R3+R4 真实替换 + 成功部署全过程探测 =="
+echo "== R17 ZB_SKIP_BUILD 无 drill 标记必须拒绝 =="
+CAND17_W=$(pick_diff "$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)")" zhibi-web)
+CAND17_A=$(pick_diff "$(docker inspect -f '{{.Image}}' zhibi-vantage)" zhibi-vantage)
+outR17=$(env ZB_SKIP_BUILD=1 ZB_CANDIDATE_WEB_IMG="$CAND17_W" ZB_CANDIDATE_API_IMG="$CAND17_A" \
+  DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 timeout 60 bash scripts/deploy-cron.sh 2>&1 || true)
+case "$outR17" in *"仅限 ZB_DRILL_MODE=1"*) ok "无 drill 标记的 ZB_SKIP_BUILD 被拒绝（cron/main 部署无法走历史镜像路径）" ;; *) bad "ZB_SKIP_BUILD 未被拦截：$(echo "$outR17" | tail -1)" ;; esac
+outR17b=$(env ZB_TEST_SECRET_MARKER="$MARKER" ZB_DRILL_MODE=1 ZB_DRILL_FAIL_STAGE=build FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 timeout 60 bash scripts/deploy-cron.sh 2>&1 || true)
+echo "$outR17b" | grep -q "拒绝" && bad "带 drill 标记的正常演练被误拒" || ok "ZB_DRILL_MODE=1 演练不受影响"
+
+echo "== R3+R4 真实替换（缓存串行构建）+ 成功部署全过程探测 =="
+# r4：R3 改走真实缓存构建路径（禁止裸 compose build：后端→前端串行、低优先级），
+# 用 docker shim 记录每次 docker 调用时间戳，行为级证明两服务没有并行构建；
+# 探测自 spawn 前启动，覆盖整个构建/部署窗口。
 IMG_BEFORE=$(docker inspect -f '{{.Image}}' "$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)")
 SLOT_BEFORE=$(docker ps --filter name=zhibi-web --format '{{.Names}}' | head -1)
 OLD_SLOT_LIST=$(docker exec "$SLOT_BEFORE" find /app/.next/static -type f 2>/dev/null | sed 's|^/app||' | sort)
+REAL_DOCKER=$(command -v docker)
+SHIM_DIR=/tmp/r4-docker-shim; rm -rf "$SHIM_DIR"; mkdir -p "$SHIM_DIR"
+CALLLOG=/tmp/r4-docker-calls.log; : > "$CALLLOG"
+cat > "$SHIM_DIR/docker" <<EOF
+#!/bin/bash
+printf 'CALL %s START %s\n' "\$(date +%s.%3N)" "\$*" >> "$CALLLOG"
+$REAL_DOCKER "\$@"
+RC=\$?
+printf 'CALL %s END rc=%s %s\n' "\$(date +%s.%3N)" "\$RC" "\$*" >> "$CALLLOG"
+exit \$RC
+EOF
+chmod +x "$SHIM_DIR/docker"
+# 源码检查：禁止裸 docker compose build
+if grep -qE 'docker compose build[[:space:]]*$' scripts/deploy-cron.sh; then
+  bad "源码存在裸 docker compose build"
+else
+  ok "源码检查：无裸 docker compose build（按服务显式构建）"
+fi
 PROBE_FILE=/tmp/p0-probe-success.txt
-start_probe "$PROBE_FILE"          # 探测先于部署子进程启动
-run_drill /tmp/p0-reg-r3.log $(drill_envs)
+start_probe "$PROBE_FILE"          # 探测先于部署子进程启动（覆盖构建窗口）
+run_drill /tmp/p0-reg-r3.log PATH="$SHIM_DIR:$PATH"   # 无 ZB_SKIP_BUILD → 真缓存构建
 DRILL_RC=$?
 DEPLOY_EXIT_TS=$(date +%s)
 finish_probe "$PROBE_FILE" "$DEPLOY_EXIT_TS"   # 退出后继续探测 ≥60s
 out=$(cat /tmp/p0-reg-r3.log)
-echo "$out" | grep -E "deploy done|candidate images|入口已切|部署状态已提交|旧槽已停止|候选静态已归档" | sed 's/^/    | /'
-[ "$DRILL_RC" = "0" ] && ok "真实部署成功完成" || bad "真实部署失败 rc=$DRILL_RC"
-assert_probe_clean "成功部署全过程（含退出后60s）" "$PROBE_FILE"
+echo "$out" | grep -E "deploy done|串行|label 自检|入口已切|部署状态已提交|旧槽已停止|候选静态已归档" | sed 's/^/    | /'
+[ "$DRILL_RC" = "0" ] && ok "真实部署成功完成（缓存串行构建）" || bad "真实部署失败 rc=$DRILL_RC"
+# 串行构建行为证明：恰好 2 次 compose build，后端→前端顺序，且不重叠
+B_STARTS=$(awk '/ START .*compose build/ && !/config|version|ps|logs/ {print}' "$CALLLOG" | grep -E 'build (zhibi-vantage|zhibi-web)( |$)' || true)
+N_API=$(printf '%s\n' "$B_STARTS" | grep -c 'build zhibi-vantage' || true)
+N_WEB=$(printf '%s\n' "$B_STARTS" | grep -c 'build zhibi-web' || true)
+T_API=$(printf '%s\n' "$B_STARTS" | awk '/build zhibi-vantage/{print $3; exit}')
+T_WEB=$(printf '%s\n' "$B_STARTS" | awk '/build zhibi-web/{print $3; exit}')
+T_API_END=$(awk '/ END .*build zhibi-vantage/{print $3; exit}' "$CALLLOG")
+if [ "${N_API:-0}" = "1" ] && [ "${N_WEB:-0}" = "1" ] && awk "BEGIN{exit !($T_API <= $T_WEB)}" 2>/dev/null \
+   && awk "BEGIN{exit !($T_API_END <= $T_WEB)}" 2>/dev/null; then
+  ok "串行构建证明：zhibi-vantage($T_API)→结束($T_API_END) 先于 zhibi-web($T_WEB) 启动，无并行"
+else
+  bad "串行构建证明失败（api=$N_API web=$N_WEB T_API=$T_API T_API_END=$T_API_END T_WEB=$T_WEB）"
+fi
+assert_probe_clean "成功部署全过程（含构建窗口与退出后60s）" "$PROBE_FILE"
 if [ "$DRILL_RC" = "0" ]; then
   MW=$(maint_window "$PROBE_FILE")
   awk "BEGIN{exit !($MW<=15)}" && ok "后端维护窗口 ${MW}s（明确 503，≤15s）" || bad "后端维护窗口 ${MW}s 超过 15s"
@@ -198,9 +242,18 @@ DEPLOYED_SHA=$(state_field deployed_sha)
 [ "$DEPLOYED_SHA" = "$(git rev-parse "origin/$DEPLOY_REF" 2>/dev/null || git rev-parse HEAD)" ] && ok "deployed_sha == 部署目标（${DEPLOYED_SHA:0:12}）" || bad "deployed_sha 异常：$DEPLOYED_SHA"
 STATE_IMG=$(state_field deployed_web_image_id)
 [ "$STATE_IMG" = "$IMG_AFTER" ] && ok "state 镜像 == 实际运行镜像" || bad "state 镜像 != 运行镜像"
-# 候选镜像 label 自检（缓存构建/演练镜像均应打标；演练用历史镜像可能无 label——只记录不判失败）
 LBL_W=$(docker image inspect -f '{{index .Config.Labels "zb.commit"}}' "$IMG_AFTER" 2>/dev/null || echo "")
-echo "  info: 运行 web 镜像 zb.commit=${LBL_W:-<无>}（演练历史镜像可无 label）"
+[ "$LBL_W" = "$(git rev-parse "origin/$DEPLOY_REF" 2>/dev/null || git rev-parse HEAD)" ] \
+  && ok "运行 web 镜像 zb.commit label == 部署目标（构建溯源闭合）" \
+  || bad "运行 web 镜像 label 异常：${LBL_W:-<无>}"
+[ -f "$STATE_DIR/release-$(git rev-parse --short=7 "$DEPLOYED_SHA" 2>/dev/null).json" ] \
+  && ok "release manifest 已随正式部署落盘" || bad "正式部署缺 release manifest"
+# 正式状态快照（回归演练可能污染 state，结束时按此恢复）
+STATE_FORMAL=/tmp/p0-state-formal.json
+cp "$STATE" "$STATE_FORMAL"
+FORMAL_SHA=$(state_field deployed_sha); FORMAL_WEB=$(state_field deployed_web_image_id)
+FORMAL_API=$(state_field deployed_api_image_id); FORMAL_SLOT=$(state_field active_web_slot)
+echo "  正式状态快照：sha=${FORMAL_SHA:0:12} slot=$FORMAL_SLOT web=${FORMAL_WEB:7:12} api=${FORMAL_API:7:12}"
 
 echo "== R11 静态多版本归档（旧槽已停止，保护必须超过 120s 排空窗）=="
 if printf '%s' "$out" | grep -q "旧槽已停止"; then
@@ -289,6 +342,7 @@ sigterm_drill() { # $1=tag $2=等待标记 $3=标记后等待秒 $4=期望 rollb
   fi
   start_probe "$pf"
   env ZB_TEST_SECRET_MARKER="$MARKER" ZB_HEALTH_ROUNDS=$HEALTH_ROUNDS_DRILL \
+      ZB_DRILL_MODE=1 \
       DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 $(drill_envs) \
       bash scripts/deploy-cron.sh > "$log" 2>&1 &
   local dpid=$! i seen=0
@@ -328,6 +382,78 @@ sigterm_drill after-switch "入口已切到" 3 rollback
 sigterm_drill health-gate "健康门基线" 6 rollback
 sigterm_drill post-commit "部署状态已提交" 6 committed
 
+echo "== R15 state_write 完成后 SIGTERM（提交窗口，不得出现状态新版/运行旧版）=="
+state_force "$PREV_SHA" ""
+PROBE_FILE=/tmp/p0-probe-r15.txt
+start_probe "$PROBE_FILE"
+run_drill /tmp/p0-reg-r15.log ZB_TEST_SIGTERM_AFTER_STATE_WRITE=1 $(drill_envs)
+R15_RC=$?
+DEPLOY_EXIT_TS=$(date +%s)
+finish_probe "$PROBE_FILE" "$DEPLOY_EXIT_TS"
+out15=$(cat /tmp/p0-reg-r15.log)
+case "$out15" in *"state_write 完成后立即向自身发送 SIGTERM"*) ok "R15 钩子触发：SIGTERM 落在 state_write 与 COMMITTED 置位之间（rc=$R15_RC）" ;; *) bad "R15 钩子未触发（部署未到达提交点，rc=$R15_RC）" ;; esac
+echo "$out15" | grep -q "触发回滚" && bad "R15 提交窗口 SIGTERM 触发了回滚" || ok "R15 未回滚"
+echo "$out15" | grep -q "视为已提交，不回滚" && ok "R15 on_exit 以持久状态判定为已提交（提交窗口兜底生效）" || bad "R15 on_exit 兜底未生效"
+outR15=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+echo "$outR15" | grep "reconcile:" | tail -2 | sed 's/^/    | /'
+assert_consistent "R15"
+R15SHA=$(state_field deployed_sha)
+[ "$R15SHA" = "$REMOTE_SHA" ] && ok "R15 状态为提交的新版且运行一致（${R15SHA:0:12}）" || bad "R15 状态异常：$R15SHA"
+assert_probe_clean "R15 全过程（含退出后60s）" "$PROBE_FILE"
+
+echo "== R16 nginx 切换后 SIGKILL（无 trap）→ reconcile 必须恢复旧版本 =="
+cp "$STATE_FORMAL" "$STATE"
+outR16p=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+state_force "$PREV_SHA" ""
+log16=/tmp/p0-sigkill-switch.log
+env ZB_TEST_SECRET_MARKER="$MARKER" ZB_HEALTH_ROUNDS=$HEALTH_ROUNDS_DRILL ZB_DRILL_MODE=1 \
+    DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 $(drill_envs) \
+    bash scripts/deploy-cron.sh > "$log16" 2>&1 &
+DP16=$!
+SEEN16=0
+for i in $(seq 1 240); do
+  grep -q "入口已切到" "$log16" 2>/dev/null && { SEEN16=1; break; }
+  kill -0 "$DP16" 2>/dev/null || break
+  sleep 1
+done
+[ "$SEEN16" = "1" ] || echo "    | 标记未出现（部署提前退出）"
+sleep 2
+kill -9 "$DP16" 2>/dev/null || true
+wait "$DP16" 2>/dev/null; R16_RC=$?
+echo "  SIGKILL 后退出码 rc=$R16_RC（无 trap，无回滚执行）"
+outR16=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+echo "$outR16" | grep "reconcile:" | head -4 | sed 's/^/    | /'
+echo "$outR16" | grep -q "不允许滚动提交" && ok "R16 reconcile 按 phase 门控拒绝滚动提交（phase=switched < health_verified）" \
+  || bad "R16 reconcile 未按 phase 门控（输出：$(echo "$outR16" | grep 'reconcile:' | head -1)）"
+assert_consistent "R16"
+R16SHA=$(state_field deployed_sha)
+[ "$R16SHA" = "$PREV_SHA" ] && ok "R16 状态保持旧版本（${R16SHA:0:12}，未被硬中断的部署滚动提交）" \
+  || bad "R16 状态被滚动提交为 ${R16SHA:0:12}"
+EC16=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null || echo 000)
+[ "$EC16" = "200" ] && ok "R16 恢复后入口 200（旧版本实际在服务）" || bad "R16 恢复后入口 $EC16"
+
+echo "== R16b health_verified 持久化后 SIGKILL（无 trap）→ reconcile 允许滚动提交 =="
+cp "$STATE_FORMAL" "$STATE"
+outR16bp=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+state_force "$PREV_SHA" ""
+env ZB_TEST_SECRET_MARKER="$MARKER" ZB_HEALTH_ROUNDS=$HEALTH_ROUNDS_DRILL ZB_DRILL_MODE=1 \
+    ZB_TEST_SIGKILL_AFTER_HEALTH_VERIFY=1 \
+    DEPLOY_REF="$DEPLOY_REF" FORCE_DEPLOY=1 ZB_IGNORE_PAUSE=1 $(drill_envs) \
+    bash scripts/deploy-cron.sh > /tmp/p0-sigkill-verified.log 2>&1
+R16B_RC=$?
+grep -q "health_verified 登记后立即 SIGKILL" /tmp/p0-sigkill-verified.log \
+  && ok "R16b 钩子触发：SIGKILL 落在 phase=health_verified 持久化之后（rc=$R16B_RC，无 trap）" \
+  || bad "R16b 钩子未触发"
+outR16b=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+echo "$outR16b" | grep "reconcile:" | head -3 | sed 's/^/    | /'
+echo "$outR16b" | grep -q "滚动提交" && ok "R16b reconcile 在 phase=health_verified 下滚动提交（复验入口/静态/容器/镜像后）" \
+  || bad "R16b reconcile 未滚动提交"
+assert_consistent "R16b"
+R16BSHA=$(state_field deployed_sha)
+[ "$R16BSHA" = "$REMOTE_SHA" ] && ok "R16b 滚动提交后的状态 = 部署目标（${R16BSHA:0:12}）" || bad "R16b 状态异常：$R16BSHA"
+EC16B=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null || echo 000)
+[ "$EC16B" = "200" ] && ok "R16b 滚动提交后入口 200" || bad "R16b 入口 $EC16B"
+
 echo "== R10 密钥临时文件零残留 =="
 sleep 2   # 等 EXIT trap 的清理完全落地
 HITS=$(grep -rl "$MARKER" /tmp/zhibi-cand-env.* /tmp/zhibi-deploy-log.* /var/lib/zhibi-deploy 2>/dev/null | grep -v Binary | wc -l)
@@ -354,6 +480,21 @@ echo "== R13 结束态 reconcile 总核对 =="
 out6=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
 echo "$out6" | grep "reconcile:" | tail -2 | sed 's/^/    | /'
 assert_consistent "R13 结束态"
+
+echo "== R14 正式状态恢复（drill 不得污染正式 state）=="
+cp "$STATE_FORMAL" "$STATE"
+outR14=$(ZB_IGNORE_PAUSE=1 timeout 300 bash scripts/deploy-cron.sh --reconcile 2>&1 || true)
+echo "$outR14" | grep "reconcile:" | tail -2 | sed 's/^/    | /'
+assert_consistent "R14 正式恢复"
+R14SHA=$(state_field deployed_sha); R14WEB=$(state_field deployed_web_image_id); R14API=$(state_field deployed_api_image_id)
+if [ "$R14SHA" = "$FORMAL_SHA" ] && [ "$R14WEB" = "$FORMAL_WEB" ] && [ "$R14API" = "$FORMAL_API" ]; then
+  ok "R14 结束态 == 正式版本（sha=${FORMAL_SHA:0:12} web=${FORMAL_WEB:7:12} api=${FORMAL_API:7:12}）——演练未污染正式 state"
+else
+  bad "R14 正式状态恢复失败（$R14SHA / ${R14WEB:7:12} / ${R14API:7:12}）"
+fi
+EC14=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/login" 2>/dev/null || echo 000)
+[ "$EC14" = "200" ] && ok "R14 恢复后入口 200" || bad "R14 恢复后入口 $EC14"
+
 flock -n "$INNER_LOCK" true 2>/dev/null && ok "R8 锁在成功与失败路径均释放" || bad "锁泄漏"
 
 echo ""
