@@ -278,21 +278,58 @@ async function intelligence(ctx, req, res, url) {
 }
 
 // ---------------- 机会视图 ----------------
+// r2 性能：机会视图三段聚合（view / historyBasis / foundation）在同一进程内复用，
+// 短 TTL 内重复请求不再重算（页面一次加载会发两次请求，评测/刷新同样重复）；
+// 每次响应带 phaseTimings（仅 ?debug=1 时返回，避免把内部耗时塞给所有用户）。
+const OPP_CACHE = new Map(); // `${tid}:${pid}` -> { at, payload }
+const OPP_TTL_MS = Math.max(0, Number(process.env.ZB_OPP_CACHE_MS || 20000));
+const OPP_CACHE_MAX = 64;
+function oppCacheGet(key) {
+  if (!OPP_TTL_MS) return null;
+  const e = OPP_CACHE.get(key);
+  if (!e) return null;
+  if (Date.now() - e.at > OPP_TTL_MS) { OPP_CACHE.delete(key); return null; }
+  return e;
+}
+function oppCacheSet(key, payload) {
+  if (!OPP_TTL_MS) return;
+  if (OPP_CACHE.size >= OPP_CACHE_MAX) { const k0 = OPP_CACHE.keys().next().value; OPP_CACHE.delete(k0); }
+  OPP_CACHE.set(key, { at: Date.now(), payload });
+}
+
 async function opportunities(ctx, req, res, url) {
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const debug = q(url, 'debug') === '1';
+  const key = tid + ':' + rp.projectId;
+  const hit = oppCacheGet(key);
+  if (hit) {
+    const payload = Object.assign({}, hit.payload);
+    payload.meta = Object.assign({}, payload.meta, { cached: true, cacheAgeMs: Date.now() - hit.at });
+    ctx.sendJSON(res, 200, payload);
+    return true;
+  }
+  const t0 = process.hrtime.bigint();
   const view = ReportSvc.buildOpportunities(tid, rp.projectId);
+  const t1 = process.hrtime.bigint();
   // SC-05：机会判断的数据基础补「可用历史跨度」与「本次使用的时间范围」
   let historyBasis = null;
   try { historyBasis = MemView.projectHistoryBasis(tid, rp.projectId); } catch (e) { historyBasis = null; }
+  const t2 = process.hrtime.bigint();
   // SC-12 §六.1：机会数据基础——按可用维度独立工作（价格/商品/上新/评论独立成模块），
   // 缺失维度保持 null 并如实标注状态；不再因单个维度不可用而整页空白。
   let foundation = null;
   try { foundation = require('../../services/opportunity-foundation.js').buildOpportunityFoundation(tid, rp.projectId); }
   catch (e) { foundation = null; }
-  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
+  const t3 = process.hrtime.bigint();
+  const ms = (a, b) => Math.round(Number(b - a) / 1e6);
+  const timings = { view: ms(t0, t1), historyBasis: ms(t1, t2), foundation: ms(t2, t3), total: ms(t0, t3) };
+  const payload = Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view);
+  payload.meta = { cached: false, timings: debug ? timings : undefined };
+  oppCacheSet(key, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
+  ctx.sendJSON(res, 200, payload);
   return true;
 }
 

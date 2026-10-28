@@ -2,7 +2,7 @@
 // SC-04 UI 框架轮共享小组件：项目选择器 / 空状态 / 建设中维度区域。
 // 纪律：不出现后端术语（adapter/attempt/payload 等）；
 // 未接入维度只显示「尚未接入」，不显示 0、空图、模拟图表或占位样本。
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchProjects, type CoverageDimension, type ProjectInfo } from '@/lib/core-api';
@@ -24,13 +24,10 @@ export function projectSwitchUrl(pathname: string, searchParams: URLSearchParams
   if (seg.length > 1 && CORE_ROOTS.includes(root)) {
     return `${root}?projectId=${pid}`;
   }
-  const sp = new URLSearchParams(searchParams.toString());
-  // 项目内资源参数不跨项目保留
-  sp.delete('brandId');
-  sp.delete('reportId');
-  sp.delete('tab');
-  sp.set('projectId', nextProjectId);
-  return root + '?' + sp.toString();
+  // r2：跨项目只带 projectId——品牌/资源 ID 与筛选条件（brandId/dimension/status/from/to/tab…）
+  // 都属于原项目上下文，带过去会得到「顶部是 B、内容是 A」或假空结果。
+  void searchParams;
+  return `${root}?projectId=${pid}`;
 }
 
 // ---------- 项目选择器（TopBar）：projectId 随页面跳转持续传递 ----------
@@ -45,6 +42,16 @@ export function ProjectPicker() {
   const { state } = useZhibiState();
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [failed, setFailed] = useState(false);
+  // r2：菜单按触发按钮位置自动靠左/靠右，宽度不超 calc(100vw - 24px)
+  const boxRef = useRef<HTMLDetailsElement | null>(null);
+  const [align, setAlign] = useState<'left' | 'right'>('left');
+  const updateAlign = () => {
+    const el = boxRef.current;
+    if (!el || typeof window === 'undefined') return;
+    const r = el.getBoundingClientRect();
+    const want = Math.min(340, window.innerWidth - 24);
+    setAlign(window.innerWidth - r.left >= want ? 'left' : 'right');
+  };
 
   useEffect(() => {
     let alive = true;
@@ -67,18 +74,23 @@ export function ProjectPicker() {
   }
 
   return (
-    <details className="proj-picker" title="切换当前项目（项目上下文会随跳转保持）">
+    <details
+      className="proj-picker"
+      ref={boxRef}
+      title="切换当前项目（切换后不保留原项目的品牌与筛选）"
+      onToggle={updateAlign}
+    >
       <summary>
         <span className="proj-picker-label">项目</span>
         <span className="proj-picker-name">{curLabel}</span>
         <span className="proj-picker-count">{projects ? `${projects.length}` : '…'}</span>
       </summary>
-      <ul className="proj-picker-menu">
+      <ul className="proj-picker-menu" data-align={align} style={{ maxWidth: 'calc(100vw - 24px)' }}>
         {failed ? <li className="proj-picker-empty">项目清单加载失败，可稍后重试。</li> : null}
         {!failed && projects && !projects.length ? <li className="proj-picker-empty">还没有项目——先在工作台发起一次赛道调研。</li> : null}
         {(projects || []).map((p) => (
           <li key={p.id}>
-            <button type="button" className={p.id === curId ? 'on' : ''} onClick={() => pick(p.id)}>
+            <button type="button" className={p.id === curId ? 'on' : ''} onClick={() => pick(p.id)} title={p.track || '(未命名)'}>
               <span>{p.track || '(未命名)'}</span>
               <span className="proj-picker-meta">竞品 {p.total} · 完成 {p.done}{p.current ? ' · 当前档案' : ''}</span>
             </button>

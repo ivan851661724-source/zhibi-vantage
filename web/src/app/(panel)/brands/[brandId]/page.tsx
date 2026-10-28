@@ -202,7 +202,7 @@ function BrandDetailInner() {
   if (err) return (
     <div>
       <p className="core-err">{err}</p>
-      <p className="hint"><Link href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品数据库</Link></p>
+      <p><Link className="core-back-link" href={`/brands?projectId=${encodeURIComponent(projectId)}`}>← 返回竞品数据库</Link></p>
     </div>
   );
   if (!d) return <p className="hint">加载品牌档案…</p>;
@@ -273,7 +273,7 @@ function BrandDetailInner() {
 
   return (
     <div className="core-brand-detail">
-      <p className="hint"><Link href={`/brands?${keep}`}>← 返回竞品数据库</Link></p>
+      <p><Link className="core-back-link" href={`/brands?${keep}`}>← 返回竞品数据库</Link></p>
 
       {/* ---------- 顶部品牌头部（唯一品牌级标识区） ---------- */}
       <header className="core-brand-hero" data-testid="brand-overview-card">

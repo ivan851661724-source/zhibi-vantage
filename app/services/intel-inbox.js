@@ -421,6 +421,71 @@ function inboxState(tenantId, projectId, timeZone) {
       : (failed.length ? (failed[0].reason_text || '监控来源建立失败，可稍后重试') : null);
   } catch (e) { /* watch_intents 未建表：保持 0，不推断 */ }
 
+  // ---- r2：项目级来源结果聚合（部分失败 / 全部失败由后端给出，前端不自行猜测） ----
+  // 语义（与本轮验收一致）：
+  //   · 全部成功且无事件 → inspected（今日巡检完成，未发现重要变化）
+  //   · 有事件 → 由 summary/events 呈现数量，状态仍为 inspected
+  //   · 部分来源失败 → inspected_partial（必须列出品牌/来源/类别/动作）
+  //   · 全部失败 → inspection_failed（不得显示「巡检完成」式成功态）
+  //   · 历史数据仍可展示，但标注「使用历史数据，最近一次更新失败」
+  out.sources = { total: 0, ok: 0, failed: 0, items: [], latestAt: null };
+  out.partialFailure = false;
+  out.allFailed = false;
+  out.historicalNote = null;
+  try {
+    const rows = db.prepare(`SELECT watch_target_id, attempted, succeeded, failed, partial_scan, failure_reasons, ended_at
+      FROM monitoring_windows w
+      WHERE w.tenant_id=? AND w.project_id=? AND w.status='complete' AND w.ended_at IS NOT NULL
+        AND w.ended_at = (SELECT MAX(x.ended_at) FROM monitoring_windows x
+                          WHERE x.tenant_id=w.tenant_id AND x.project_id=w.project_id
+                            AND x.watch_target_id=w.watch_target_id AND x.status='complete')`).all(tid, pid);
+    const names = competitorNames(tid, pid);
+    const targetRows = db.prepare(`SELECT watch_target_id, competitor_id FROM watch_targets WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+    const compOf = {};
+    for (const t of targetRows) compOf[t.watch_target_id] = t.competitor_id;
+    let ok = 0, failed = 0;
+    for (const r of rows) {
+      const brand = names[compOf[r.watch_target_id]] || names[r.watch_target_id] || '未知品牌';
+      const att = Number(r.attempted || 0);
+      const bad = Number(r.failed || 0);
+      const reasons = safeReasons(r.failure_reasons);
+      if (bad > 0 || (att > 0 && Number(r.succeeded || 0) === 0)) {
+        failed++;
+        out.sources.items.push({
+          brandName: brand,
+          source: '公开商品目录',
+          category: reasons[0].code,
+          categoryText: reasons[0].text,
+          action: reasons[0].action,
+          actionText: reasons[0].actionText,
+        });
+      } else ok++;
+    }
+    // 来源建立失败（intent）：同样计入「部分失败」，并给出可执行动作
+    try {
+      const fi = db.prepare(`SELECT competitor_id, reason_text FROM watch_intents
+        WHERE tenant_id=? AND project_id=? AND state='source_failed'`).all(tid, pid);
+      for (const i of fi) {
+        failed++;
+        out.sources.items.push({
+          brandName: names[i.competitor_id] || '未知品牌',
+          source: '公开商品页面',
+          category: 'source_unavailable',
+          categoryText: '无法建立可核验的公开来源',
+          action: 'rejoin',
+          actionText: '重新加入监控',
+        });
+      }
+    } catch (e) { /* watch_intents 未建表：跳过 */ }
+    out.sources.total = ok + failed;
+    out.sources.ok = ok;
+    out.sources.failed = failed;
+    out.sources.latestAt = rows.length ? rows.map(r => r.ended_at).sort().pop() : null;
+    out.partialFailure = failed > 0;
+    out.allFailed = failed > 0 && ok === 0;
+    if (out.allFailed) out.historicalNote = '使用历史数据，最近一次更新失败';
+  } catch (e) { /* 聚合失败不改变既有状态语义：保持 sources 空，不伪造成功 */ }
+
   if (out.state === 'unknown') return out;
   if (!out.activeTargets) {
     if (out.pendingIntents > 0) out.state = 'establishing';
@@ -430,8 +495,47 @@ function inboxState(tenantId, projectId, timeZone) {
     else out.state = out.pausedTargets > 0 ? 'paused' : 'no_monitoring';
   }
   else if (out.windowCount === 0) out.state = 'awaiting_comparison';
+  else if (out.allFailed) out.state = 'inspection_failed';
+  else if (out.partialFailure) out.state = 'inspected_partial';
   else out.state = 'inspected';
   return out;
+}
+
+// 失败类别 → 用户可读（禁内部码/路径/栈；未知类别一律归「暂时无法访问」）
+const FAILURE_CATEGORY_TEXT = Object.freeze({
+  blocked: '对方官网拒绝访问',
+  rate_limited: '对方官网限制访问频率',
+  timeout: '对方官网响应超时',
+  unavailable: '对方官网暂时不可用',
+  parse_failed: '返回内容无法解析',
+  event_write_failed: '变化记录写入失败',
+  source_unavailable: '无法建立可核验的公开来源',
+});
+function safeReasons(raw) {
+  let obj = null;
+  try { obj = JSON.parse(raw || '{}'); } catch (e) { obj = null; }
+  const keys = obj && typeof obj === 'object' ? Object.keys(obj).filter(k => Number(obj[k]) > 0) : [];
+  if (!keys.length) return [{ code: 'unavailable', text: FAILURE_CATEGORY_TEXT.unavailable, action: 'retry', actionText: '重新巡检' }];
+  return keys.map(k => ({
+    code: FAILURE_CATEGORY_TEXT[k] ? k : 'unavailable',
+    text: FAILURE_CATEGORY_TEXT[k] || FAILURE_CATEGORY_TEXT.unavailable,
+    action: 'retry',
+    actionText: '重新巡检',
+  }));
+}
+function competitorNames(tenantId, projectId) {
+  const map = {};
+  try {
+    const { projFile } = require('../core/state-store.js');
+    const fs = require('fs');
+    const f = projFile(projectId, tenantId);
+    if (!f || !fs.existsSync(f)) return map;
+    const st = JSON.parse(fs.readFileSync(f, 'utf8'));
+    for (const c of (st && Array.isArray(st.competitors) ? st.competitors : [])) {
+      if (c && c.id) map[c.id] = c.name || c.brand || '未知品牌';
+    }
+  } catch (e) { /* 名称缺失不阻断状态聚合 */ }
+  return map;
 }
 
 // 信号 → 用户可读名（内部词表 price/launch/stock/site_change 不进页面）

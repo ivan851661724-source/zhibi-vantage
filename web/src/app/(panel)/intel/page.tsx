@@ -190,6 +190,38 @@ function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, lastMsg }: {
       </div>
     );
   }
+  // r2：项目级来源结果——「部分失败」不得被「今日巡检已完成」掩盖；
+  // 「全部失败」不得显示成功态。列表由后端聚合（品牌/来源/类别/动作），前端只渲染。
+  if (st.state === 'inspected_partial' || st.state === 'inspection_failed') {
+    const allBad = st.state === 'inspection_failed';
+    const items = (st.sources && st.sources.items) || [];
+    return (
+      <div
+        className="core-inbox-empty"
+        data-testid={'inbox-empty-' + (allBad ? 'inspection-failed' : 'inspected-partial')}
+        data-empty-state={st.state}
+      >
+        <h4>{allBad ? '本次巡检没有成功' : '巡检已完成，但部分来源未成功'}</h4>
+        <p>
+          {allBad
+            ? '所有监控来源本次都未能成功采集，因此没有新的可核验变化。'
+            : '已完成的来源按计划记录了观察；以下来源本次未成功，它们的变化可能没有被记录。'}
+          {st.historicalNote ? ' ' + st.historicalNote + '。' : ''}
+        </p>
+        <ul className="core-inbox-sources">
+          {items.map((it, i) => (
+            <li key={i}>
+              <span className="core-inbox-src-brand">{it.brandName}</span>
+              <span className="core-inbox-src-source">{it.source}</span>
+              <span className="core-inbox-src-cat">{it.categoryText}</span>
+              <button type="button" className="core-text-btn" onClick={onJumpJoin}>{it.actionText}</button>
+            </li>
+          ))}
+        </ul>
+        {common}
+      </div>
+    );
+  }
   // inspected：已完成巡检但没发现变化 —— 区分「今天已巡」与「今天还没巡」
   return (
     <div className="core-inbox-empty" data-testid="inbox-empty-inspected" data-empty-state="inspected">

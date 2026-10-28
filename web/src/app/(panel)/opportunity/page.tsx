@@ -750,10 +750,32 @@ function OppItem({ t, hl }: { t: OppTheme; hl: boolean }) {
   );
 }
 
+// ---------- r2：机会视图骨架（首屏 500ms 内出现，避免整页空白） ----------
+function OpportunitySkeleton() {
+  return (
+    <div className="core-opp-skeleton" data-testid="opp-skeleton" aria-busy="true" role="status" aria-label="正在汇总机会数据">
+      <div className="page-head">
+        <div>
+          <h2>机会视图</h2>
+          <p className="hint">正在汇总价格、商品与用户声音，先显示已就绪的维度…</p>
+        </div>
+      </div>
+      <div className="core-sk core-sk-head" />
+      <div className="core-sk core-sk-row" />
+      <div className="core-sk core-sk-row short" />
+      <div className="core-sk-grid">
+        <div className="core-sk core-sk-card" />
+        <div className="core-sk core-sk-card" />
+        <div className="core-sk core-sk-card" />
+      </div>
+    </div>
+  );
+}
+
 // ---------- 主页面（Suspense：useSearchParams 深链接） ----------
 export default function OpportunityPage() {
   return (
-    <Suspense fallback={<p className="hint">加载机会视图…</p>}>
+    <Suspense fallback={<OpportunitySkeleton />}>
       <OpportunityInner />
     </Suspense>
   );
@@ -786,7 +808,8 @@ function OpportunityInner() {
   // SC-12：机会数据基础（服务端按可用维度独立产出）——与旧视图同一接口，一次请求
   const oppView = useOpportunityView(urlProjectId);
 
-  if (loading) return <p className="hint">加载机会视图…</p>;
+  // r2：首屏立即给结构化骨架（不整页空白），后端聚合完成后再替换为真实内容
+  if (loading) return <OpportunitySkeleton />;
   if (!op) {
     return (
       <div>

@@ -660,8 +660,28 @@ export interface InboxEvent {
 export interface InboxGroup { date: string; events: InboxEvent[] }
 export interface InboxSummary { today: number; verified: number; pending: number; brandsChanged: number }
 // 收件箱真实状态（后端只读投影）：空收件箱必须能区分「没加入监控 / 加了没跑过 / 跑过没变化」
+export interface InboxSourceIssue {
+  brandName: string;
+  source: string;
+  category: string;
+  categoryText: string;
+  action: string;
+  actionText: string;
+}
+export interface InboxSources {
+  total: number;
+  ok: number;
+  failed: number;
+  items: InboxSourceIssue[];
+  latestAt: string | null;
+}
 export interface InboxState {
-  state: 'no_monitoring' | 'paused' | 'establishing' | 'source_failed' | 'awaiting_comparison' | 'inspected' | 'unknown';
+  state: 'no_monitoring' | 'paused' | 'establishing' | 'source_failed' | 'awaiting_comparison' | 'inspected' | 'inspected_partial' | 'inspection_failed' | 'unknown';
+  /** r2：项目级来源结果（后端聚合，前端不猜测） */
+  sources?: InboxSources;
+  partialFailure?: boolean;
+  allFailed?: boolean;
+  historicalNote?: string | null;
   activeTargets: number;
   pausedTargets: number;
   pendingIntents?: number;

@@ -70,6 +70,42 @@ function isPrivateIp(ip) {
   return false;
 }
 // 解析并校验 URL 可安全外抓；返回 URL 对象，不安全抛 SSRF_BLOCKED
+// ---------- r2：受控测试资产来源（test asset source） ----------
+// 目的：为「第二次可比较观察 → Diff → intel_event → 收件箱 → 证据抽屉」提供**可重复**的受控来源。
+// 纪律：
+//   · 仅当 ZB_TEST_ASSETS=1 时启用（默认关闭，生产不开启即不存在该路径）；
+//   · 只接管保留域名 *.zb.test，其余主机一律走真实网络（不改变生产采集语义）；
+//   · 只替换传输层字节（与真实 HTTPS 响应同形），解析/快照/证据/契约全部沿用真实实现。
+const TEST_ASSET_SUFFIX = '.zb.test';
+function testAssetRoot() {
+  if (process.env.ZB_TEST_ASSETS !== '1') return null;
+  // 默认落在应用目录下（镜像可读）；测试服通过 ZB_TEST_ASSET_DIR 指到数据卷，便于两次观察之间改价
+  return process.env.ZB_TEST_ASSET_DIR || require('path').join(__dirname, '..', 'test-assets');
+}
+function testAssetPath(rawUrl) {
+  const root = testAssetRoot();
+  if (!root) return null;
+  let u;
+  try { u = new URL(String(rawUrl)); } catch (e) { return null; }
+  const host = String(u.hostname || '').toLowerCase();
+  if (!host.endsWith(TEST_ASSET_SUFFIX)) return null;
+  const rel = String(u.pathname || '').replace(/^\/+/, '');
+  if (!rel || rel.indexOf('..') >= 0) return null;
+  return require('path').join(root, host, rel);
+}
+function testAssetResponse(rawUrl) {
+  const fp = testAssetPath(rawUrl);
+  if (!fp) return null;
+  const fs = require('fs');
+  try {
+    if (!fs.existsSync(fp)) return { status: 404, headers: { 'content-type': 'text/plain' }, buffer: Buffer.from('not found') };
+    const buf = fs.readFileSync(fp);
+    return { status: 200, headers: { 'content-type': 'application/json' }, buffer: buf, headersRaw: null };
+  } catch (e) {
+    return { status: 500, headers: { 'content-type': 'text/plain' }, buffer: Buffer.from('test asset read error') };
+  }
+}
+
 async function assertPublicUrl(rawUrl) {
   let u;
   try { u = new URL(String(rawUrl)); } catch (e) { throw new Error('SSRF_BLOCKED:invalid_url'); }
@@ -77,6 +113,7 @@ async function assertPublicUrl(rawUrl) {
   // 🔴 R3：URL.hostname 对 IPv6 字面量保留方括号（'[::1]'）——net.isIP 判 0 → 绕过 IP
   // 直判而下沉到 dns.lookup，形成私网/回环绕过。判定前统一剥离括号。
   const host = String(u.hostname || '').replace(/^\[/, '').replace(/\]$/, '');
+  if (testAssetPath(rawUrl)) return u; // r2：受控测试资产不经网络，无需 DNS/私网校验
   if (BLOCKED_HOST_RE.test(host) || BLOCKED_HOST_SUFFIX.test(host)) throw new Error('SSRF_BLOCKED:host');
   if (net.isIP(host)) {
     if (isPrivateIp(host)) throw new Error('SSRF_BLOCKED:ip');
@@ -315,6 +352,8 @@ function safeLookup(hostname, options, cb) {
 // 返回 { status, headers, buffer, url }；url = 实际请求的已校验 URL。
 async function safeRequestOnce(rawUrl, opts) {
   const o = opts || {};
+  const asset = testAssetResponse(rawUrl); // r2：测试资产直接返回等价字节
+  if (asset) return asset;
   const u = await assertPublicUrl(rawUrl); // 连接前校验：协议/主机/DNS+私网
   const res = await new Promise((resolve, reject) => {
     const mod = u.protocol === 'https:' ? nodeHttps : nodeHttp;

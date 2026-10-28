@@ -1,0 +1,5 @@
+{"products":[
+ {"id":9001001,"title":"CERA 冻干鲜食 · 鸡肉配方 200g","handle":"cera-chicken-200g","vendor":"CERA","product_type":"冻干主粮","published_at":"2026-09-01T00:00:00Z","variants":[{"id":91001001,"title":"默认","price":"29.90","compare_at_price":null,"available":true,"sku":"CERA-CHK-200"}]},
+ {"id":9001002,"title":"CERA 冻干鲜食 · 牛肉配方 200g","handle":"cera-beef-200g","vendor":"CERA","product_type":"冻干主粮","published_at":"2026-09-01T00:00:00Z","variants":[{"id":91001002,"title":"默认","price":"32.50","compare_at_price":null,"available":true,"sku":"CERA-BEF-200"}]},
+ {"id":9001003,"title":"CERA 益生菌粉 60g","handle":"cera-probiotics-60g","vendor":"CERA","product_type":"营养补充","published_at":"2026-09-05T00:00:00Z","variants":[{"id":91001003,"title":"默认","price":"24.00","compare_at_price":null,"available":true,"sku":"CERA-PRO-60"}]}
+]}

@@ -182,7 +182,8 @@ function events(tid, pid) {
   await t('S4 listInbox 返回 state 投影（前端三空态的唯一依据）', () => {
     const r = Inbox.listInbox({ tenantId: TID, projectId: PID });
     assert.ok(r.state, '必须带 state');
-    assert.ok(['no_monitoring', 'paused', 'awaiting_comparison', 'inspected', 'unknown'].includes(r.state.state));
+    // r2：窗口完成后按项目级来源结果细分——部分失败 / 全部失败不再被「巡检完成」掩盖
+  assert.ok(['no_monitoring', 'paused', 'awaiting_comparison', 'inspected', 'inspected_partial', 'inspection_failed', 'unknown'].includes(r.state.state));
     assert.equal(typeof r.state.signalsText, 'string');
     assert.equal(typeof r.state.todayInspected, 'boolean');
   });

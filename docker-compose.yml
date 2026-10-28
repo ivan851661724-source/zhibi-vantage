@@ -35,6 +35,9 @@ services:
       # Wigolo 自托管搜索降级源（付费搜索全断时的 $0 兜底；留空则不启用）
       WIGOLO_URL: "${WIGOLO_URL:-}"
       WIGOLO_API_TOKEN: "${WIGOLO_API_TOKEN:-}"
+      # r2：受控测试资产来源（仅预览/回归使用；默认关闭，开启后只接管 *.zb.test 保留域名）
+      ZB_TEST_ASSETS: "${ZB_TEST_ASSETS:-0}"
+      ZB_TEST_ASSET_DIR: "${ZB_TEST_ASSET_DIR:-/app/data/test-assets}"
     volumes:
       - zhibi_data:/app/data             # 数据（配置/档案/数据库/日志）持久化
     healthcheck:
