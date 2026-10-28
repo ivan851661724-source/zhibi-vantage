@@ -501,16 +501,34 @@ async function fetchShopifyProducts(siteUrl, opts) {
     const pageSnapshotIds = []; // 每页原始响应快照（全部参与汇总复算）
     const successfullyFetchedPages = []; // 结构化的页级成功清单（复审 §二.1）
     let failedPage = null; // { page, reason } 结构化失败页（复审 §二.1）
+    let pageLimit = SHOPIFY_PAGE_LIMIT;
     for (let page = 1; page <= SHOPIFY_MAX_PAGES; page++) {
       let j = null;
       let buf = null, ct = null, lastMod = null, httpStatus = null;
-      const pageUrl = `https://${d}/products.json?limit=${SHOPIFY_PAGE_LIMIT}&page=${page}`;
+      let pageUrl = `https://${d}/products.json?limit=${pageLimit}&page=${page}`;
+      // r4g §五：大响应店降级——limit=250 单页超 SAFE_FETCH_MAX_BYTES 时（如 BURGA），
+      // 整体失败等于「有价格却采不到」。先降页大小到 50 重试一次；仍超大则原样上抛。
       try {
-        const r = await safeRequest(pageUrl, noRedirect ? { timeoutMs: 20000, followRedirects: false } : { timeoutMs: 20000 });
-        httpStatus = r.status;
-        ct = r.headers && r.headers['content-type'];
-        lastMod = r.headers && r.headers['last-modified'];
-        buf = r.buffer || Buffer.alloc(0);
+        const r0 = await safeRequest(pageUrl, noRedirect ? { timeoutMs: 20000, followRedirects: false } : { timeoutMs: 20000 });
+        httpStatus = r0.status;
+        ct = r0.headers && r0.headers['content-type'];
+        lastMod = r0.headers && r0.headers['last-modified'];
+        buf = r0.buffer || Buffer.alloc(0);
+      } catch (e0) {
+        if (String((e0 && e0.message) || e0).includes('SAFE_FETCH_TOO_LARGE') && pageLimit > 50) {
+          pageLimit = 50;
+          pageUrl = `https://${d}/products.json?limit=${pageLimit}&page=${page}`;
+          try {
+            const r1 = await safeRequest(pageUrl, noRedirect ? { timeoutMs: 20000, followRedirects: false } : { timeoutMs: 20000 });
+            httpStatus = r1.status;
+            ct = r1.headers && r1.headers['content-type'];
+            lastMod = r1.headers && r1.headers['last-modified'];
+            buf = r1.buffer || Buffer.alloc(0);
+          } catch (e1) { throw e0; }
+        } else throw e0;
+      }
+      try {
+        const r = { status: httpStatus, buffer: buf, headers: { 'content-type': ct, 'last-modified': lastMod } };
         if (!r.status || r.status < 200 || r.status >= 300) {
           if (page === 1) { firstStatus = r.status; }
           else {
@@ -549,7 +567,7 @@ async function fetchShopifyProducts(siteUrl, opts) {
       successfullyFetchedPages.push(page);
       const arr = Array.isArray(j.products) ? j.products : [];
       products = products.concat(arr);
-      if (arr.length < SHOPIFY_PAGE_LIMIT) break; // 末页自然收束
+      if (arr.length < pageLimit) break; // 末页自然收束
       if (page < SHOPIFY_MAX_PAGES) await new Promise(r2 => setTimeout(r2, SHOPIFY_PAGE_DELAY_MS));
     }
     if (firstStatus != null) {
