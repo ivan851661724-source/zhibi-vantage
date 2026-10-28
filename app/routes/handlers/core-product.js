@@ -307,25 +307,28 @@ function oppCacheSet(key, payload) {
 //（其余折叠为 evidenceCount），把约 227KB 首屏压到几十 KB；完整引用按品牌用
 // scope=detail 拉取（打开证据抽屉时才请求）。scope=full 保留旧行为（测试/审计用）。
 function trimEvidenceRefs(payload) {
-  const trimList = (list) => {
-    if (!Array.isArray(list)) return list;
-    for (const row of list) {
-      if (!row || !Array.isArray(row.evidenceRefs)) continue;
-      row.evidenceCount = Array.isArray(row.evidenceRefs) ? row.evidenceRefs.length : (row.evidenceCount || 0);
-      row.evidenceRefs = row.evidenceRefs.slice(0, 1);
-    }
-  };
+  // 🔴 不可原地修改：OPP_CACHE 命中路径与本次响应共享嵌套引用，原地裁剪会把
+  // 缓存里的完整证据引用一并剪掉（scope=full/detail 永远拿不到完整数据）。
+  // 这里按「复制被裁剪的列表」实现，其余子树保持共享引用。
+  const trimRows = (rows) => rows.map((r) => {
+    if (!r || !Array.isArray(r.evidenceRefs)) return r;
+    return Object.assign({}, r, { evidenceCount: r.evidenceRefs.length, evidenceRefs: r.evidenceRefs.slice(0, 1) });
+  });
   try {
     const f = payload.foundation;
     if (f && f.modules) {
-      for (const k of Object.keys(f.modules)) {
-        const m = f.modules[k];
+      const modules = Object.assign({}, f.modules);
+      for (const k of Object.keys(modules)) {
+        const m = modules[k];
         if (!m) continue;
-        if (Array.isArray(m.rows)) trimList(m.rows);
-        if (Array.isArray(m.groups)) for (const g of m.groups) trimList(g.rows);
+        if (Array.isArray(m.rows)) modules[k] = Object.assign({}, m, { rows: trimRows(m.rows) });
+        if (Array.isArray(m.groups)) modules[k] = Object.assign({}, m, { groups: m.groups.map(g => (g && Array.isArray(g.rows)) ? Object.assign({}, g, { rows: trimRows(g.rows) }) : g) });
       }
+      payload.foundation = Object.assign({}, f, { modules });
     }
-    if (Array.isArray(f && f.opportunities)) trimList(f.opportunities);
+    if (payload.foundation && Array.isArray(payload.foundation.opportunities)) {
+      payload.foundation = Object.assign({}, payload.foundation, { opportunities: trimRows(payload.foundation.opportunities) });
+    }
   } catch (e) { /* 裁剪失败按原样返回（宁可大也不坏） */ }
   return payload;
 }
