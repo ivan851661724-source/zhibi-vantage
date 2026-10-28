@@ -37,7 +37,9 @@ const path = require('path');
 const vm = require('vm');
 
 const APP_ROOT = path.join(__dirname, '..');
-const SKIP_DIRS = new Set(['node_modules', 'test', '.git']);
+// r2/r3：app/test-assets/ 是**测试资产数据**（受控来源的响应体，含 .js 扩展名的 JSON 夹具），
+// 不是可执行代码——按语法检查会把合法的 JSON 夹具判成语法错误。
+const SKIP_DIRS = new Set(['node_modules', 'test', 'test-assets', '.git']);
 // 标准全局/Node 内建（大写开头，允许未声明直接使用）
 const GLOBALS = new Set([
   'Math', 'JSON', 'Date', 'Object', 'Array', 'Number', 'String', 'Boolean', 'RegExp', 'Function',

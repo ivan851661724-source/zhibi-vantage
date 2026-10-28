@@ -249,4 +249,30 @@ async function bootstrap(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { overview, dimension, refresh, refreshPolicy, adminCapabilities, bootstrap };
+// ---------- POST /api/data-surface/reconcile（轻量对账：补缺失首采 + 续跑卡住的意向） ----------
+// r3 §三：工作台/竞品库进入时调用；幂等 + 60s 节流。
+// 只补「从未采集过」的品牌，以及「官网可访问但停在 source_failed」的意向；
+// 不重复成功任务、不重置进度、不产生第二条意向。
+async function reconcile(ctx, req, res, url, p) {
+  if (p !== '/api/data-surface/reconcile' || req.method !== 'POST') return false;
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const ap = ctx.getAuthPayload(req);
+  if (!ap) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录后再操作。' }); return true; }
+  const tid = (ap.payload && ap.payload.tid) || null;
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '缺少租户上下文。' }); return true; }
+  const projectId = typeof body.projectId === 'string' && body.projectId.trim()
+    ? body.projectId.trim()
+    : (ctx.loadState() && ctx.loadState().projectId) || '';
+  if (!projectId) { ctx.sendJSON(res, 400, { error: 'PROJECT_REQUIRED', message: '缺少项目。' }); return true; }
+  const db = require('../../services/db.js');
+  if (!db.getProject(tid, projectId)) { ctx.sendJSON(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在或不属于当前租户。' }); return true; }
+  const out = require('../../services/source-reconcile.js').reconcileProject({
+    tenantId: tid, projectId, force: !!body.force, trigger: 'reconcile',
+  });
+  if (!out.ok) { ctx.sendJSON(res, 400, { error: out.error, message: '项目状态不可用。' }); return true; }
+  ctx.sendJSON(res, 200, out);
+  return true;
+}
+
+module.exports = { overview, dimension, refresh, refreshPolicy, adminCapabilities, bootstrap, reconcile };

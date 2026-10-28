@@ -10,6 +10,7 @@ import { GuideTour, guideNeeded } from '@/components/guide-tour';
 import { WaitlistForm } from '@/components/waitlist-form';
 import { MaterialDrawer } from '@/components/wb-drawer';
 import { apiPost } from '@/lib/api';
+import { fetchBrands, retryFirstCollection, type BrandsHealthSummary } from '@/lib/core-api';
 import {
   useWbDecisions,
   wbDayGroups,
@@ -135,12 +136,12 @@ function MaterialCard({
         ) : null}
         {m.missingFields && m.missingFields.length ? (
           <div className="mat-facts">
-            <span className="ev ev-unk">
-              未探测：
+            <span className="ev ev-unk" title="这一条判断缺少下列字段；不代表该品牌未采集">
+              这条判断缺：
               {m.missingFields
-                .map((x) => (x === 'history:60d' ? '历史价 60 天' : x === 'priceRange' ? '价格未探测' : x))
+                .map((x) => (x === 'history:60d' ? '历史价 60 天' : x === 'priceRange' ? '价格' : x))
                 .join(' / ')}
-              （≠ 确认没有）
+              未采集（≠ 确认没有）
             </span>
           </div>
         ) : null}
@@ -185,6 +186,40 @@ function WorkbenchInner() {
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const searchParams = useSearchParams();
   const forceOb = searchParams.get('new') === '1';
+  // r3 §三：进入工作台即做一次轻量对账（补缺失首采 + 续跑卡住的来源），
+  // 并把品牌级来源状态摆到台面上——用户不需要逐品牌点击才开始采集。
+  const projectId = searchParams.get('projectId') || (state && state.projectId) || '';
+  const [health, setHealth] = useState<BrandsHealthSummary | null>(null);
+  const [rechecking, setRechecking] = useState(false);
+  const [healthMsg, setHealthMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    apiPost('/api/data-surface/reconcile', { projectId }).catch(() => { /* 对账失败不阻断页面 */ });
+    const load = () => {
+      fetchBrands(projectId)
+        .then(r => { if (alive) setHealth(r.healthSummary || null); })
+        .catch(() => { /* 单次读取失败保留上一次 */ });
+    };
+    const t = setTimeout(load, 2500);
+    return () => { alive = false; clearTimeout(t); };
+  }, [projectId]);
+
+  const recheckFailed = async () => {
+    if (!projectId || rechecking) return;
+    setRechecking(true);
+    setHealthMsg(null);
+    try {
+      const r = await retryFirstCollection(projectId);
+      setHealthMsg(r.message || '已重新排队检查失败项');
+      const fresh = await fetchBrands(projectId);
+      setHealth(fresh.healthSummary || null);
+    } catch (e) {
+      setHealthMsg(e instanceof Error ? e.message : '重新检查失败，请稍后再试。');
+    } finally {
+      setRechecking(false);
+    }
+  };
   // R6：诚实条数据（decorate 实时派生，深研过程中随之更新）
   const evidenceDist = (state ? (state.evidenceDist as EvidenceDist | undefined) : undefined) || undefined;
   // R7.1：首次报告生成后的 5 步导读（一次性）
@@ -285,6 +320,23 @@ function WorkbenchInner() {
           {/* R6.2 诚实条：置于 hero 黑卡底部整行 */}
           <EvidenceBar dist={evidenceDist} className="in-hero" />
         </section>
+      ) : null}
+      {/* r3：品牌级采集状态（与竞品库/情报库同一份投影）+ 一键重新检查 */}
+      {health ? (
+        <div className="core-health-strip" data-testid="wb-health" data-needs={health.needsHandling}>
+          <span>已建立数据 <b>{health.established}</b></span>
+          <span>正在采集 <b>{health.collecting}</b></span>
+          <span>有限覆盖 <b>{health.limited}</b></span>
+          <span className={health.needsHandling > 0 ? 'is-warn' : ''}>需要处理 <b>{health.needsHandling}</b></span>
+          <span className="core-health-weak">覆盖限制 <b>{health.limits}</b></span>
+          {health.needsHandling > 0 ? (
+            <button type="button" className="btn-mini" disabled={rechecking} onClick={recheckFailed}>
+              {rechecking ? '正在重新检查…' : '重新检查失败项'}
+            </button>
+          ) : null}
+          <a className="core-text-link" href={`/brands?projectId=${encodeURIComponent(projectId)}#coverage`}>查看来源明细</a>
+          {healthMsg ? <span className="core-health-msg">{healthMsg}</span> : null}
+        </div>
       ) : null}
       {/* R7.1：首次报告后的 5 步导读（一次性） */}
       {guide && <GuideTour onDone={() => setGuide(false)} />}

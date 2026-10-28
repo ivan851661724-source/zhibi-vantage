@@ -128,6 +128,8 @@ function registerAll() {
   registry.register('POST', '/api/data-surface/refresh', 'tenant', DataSurfaceH.refresh);
   // SC-07 §1：项目首轮采集补建（有界、可重复；幂等由采集链路保证）
   registry.register('POST', '/api/data-surface/bootstrap', 'tenant', DataSurfaceH.bootstrap);
+  // r3：轻量对账（工作台/竞品库进入时自动调用；幂等 + 节流）
+  registry.register('POST', '/api/data-surface/reconcile', 'tenant', DataSurfaceH.reconcile);
   registry.register('GET', '/api/data-surface/refresh-policy', 'tenant', DataSurfaceH.refreshPolicy); // SC-02 §6.3：capability 级 cooldown/额度
 
   // —— 核心产品主闭环（SC-04）：竞品库 → 情报库 → 机会视图 → 调研报告 ——

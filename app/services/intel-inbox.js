@@ -412,79 +412,123 @@ function inboxState(tenantId, projectId, timeZone) {
   // 监控意向（非 Shopify 品牌「正在建立公开来源」）：必须与「尚未加入」区分，
   // 否则用户点了「加入监控」看不到任何变化，会重复提交。
   try {
-    const intents = db.prepare(`SELECT state, reason_text FROM watch_intents WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+    const intents = db.prepare(`SELECT state, reason_code, reason_text, probe_phase FROM watch_intents WHERE tenant_id=? AND project_id=?`).all(tid, pid);
     const establishing = intents.filter(i => i.state === 'establishing');
     const failed = intents.filter(i => i.state === 'source_failed');
     out.pendingIntents = establishing.length;
     out.failedIntents = failed.length;
-    out.intentNote = establishing.length ? '正在建立公开商品来源，完成后自动转为正式监控'
-      : (failed.length ? (failed[0].reason_text || '监控来源建立失败，可稍后重试') : null);
+    // r3：说明文字按真实阶段/原因给出，不用笼统的「来源建立失败」
+    const sitePhase = establishing.some(i => String(i.probe_phase || '').indexOf('site') === 0);
+    out.intentNote = establishing.length
+      ? (sitePhase ? '正在建立官网观察基线，两次观察后自动转为正式监控' : '正在建立公开来源基线，完成后自动转为正式监控')
+      : (failed.length ? (failed[0].reason_text || '来源暂时不可访问，系统会自动重试') : null);
   } catch (e) { /* watch_intents 未建表：保持 0，不推断 */ }
 
-  // ---- r2：项目级来源结果聚合（部分失败 / 全部失败由后端给出，前端不自行猜测） ----
-  // 语义（与本轮验收一致）：
-  //   · 全部成功且无事件 → inspected（今日巡检完成，未发现重要变化）
-  //   · 有事件 → 由 summary/events 呈现数量，状态仍为 inspected
-  //   · 部分来源失败 → inspected_partial（必须列出品牌/来源/类别/动作）
-  //   · 全部失败 → inspection_failed（不得显示「巡检完成」式成功态）
-  //   · 历史数据仍可展示，但标注「使用历史数据，最近一次更新失败」
-  out.sources = { total: 0, ok: 0, failed: 0, items: [], latestAt: null };
+  // ---- r3：项目级来源结果聚合（唯一口径 = SourceHealth + 监控窗口） ----
+  // 语义修正（对应本轮验收）：
+  //   · 只有「本次监控窗口真实失败、可能造成数据缺口」的来源才进提示；
+  //   · limited（官网内容监控）与 not_configured（数据服务未配置）**不得**列为巡检失败；
+  //   · 「官网可访问但没有可比价格」不是巡检失败，只说明基线尚未建立；
+  //   · 同一品牌 × 来源 × 窗口的失败只出现一次。
+  out.sources = { total: 0, ok: 0, failed: 0, items: [], notes: [], latestAt: null };
   out.partialFailure = false;
   out.allFailed = false;
   out.historicalNote = null;
   try {
-    const rows = db.prepare(`SELECT watch_target_id, attempted, succeeded, failed, partial_scan, failure_reasons, ended_at
-      FROM monitoring_windows w
-      WHERE w.tenant_id=? AND w.project_id=? AND w.status='complete' AND w.ended_at IS NOT NULL
-        AND w.ended_at = (SELECT MAX(x.ended_at) FROM monitoring_windows x
-                          WHERE x.tenant_id=w.tenant_id AND x.project_id=w.project_id
-                            AND x.watch_target_id=w.watch_target_id AND x.status='complete')`).all(tid, pid);
+    const SourceHealth = require('./source-health.js');
     const names = competitorNames(tid, pid);
-    const targetRows = db.prepare(`SELECT watch_target_id, competitor_id FROM watch_targets WHERE tenant_id=? AND project_id=?`).all(tid, pid);
-    const compOf = {};
-    for (const t of targetRows) compOf[t.watch_target_id] = t.competitor_id;
+    const state = (() => { try { return require('./brand-service.js').loadProjectState(tid, pid); } catch (e) { return null; } })();
+    const comps = (state && Array.isArray(state.competitors)) ? state.competitors : [];
+    const compById = {};
+    for (const c of comps) if (c && c.id) compById[c.id] = c;
+
+    const targetRows = db.prepare(`SELECT watch_target_id, competitor_id, monitoring_status FROM watch_targets
+      WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+    const compOfTarget = {};
+    for (const t of targetRows) compOfTarget[t.watch_target_id] = t.competitor_id;
+
+    const seen = new Set();
     let ok = 0, failed = 0;
-    for (const r of rows) {
-      const brand = names[compOf[r.watch_target_id]] || names[r.watch_target_id] || '未知品牌';
-      const att = Number(r.attempted || 0);
-      const bad = Number(r.failed || 0);
-      const reasons = safeReasons(r.failure_reasons);
-      if (bad > 0 || (att > 0 && Number(r.succeeded || 0) === 0)) {
-        failed++;
+    let activeNonLimited = 0;
+
+    for (const t of targetRows) {
+      if (t.monitoring_status !== 'active' && t.monitoring_status !== 'degraded') continue;
+      const cid = t.competitor_id || '';
+      const comp = compById[cid] || { id: cid };
+      let h = null;
+      try { h = SourceHealth.build(tid, pid, comp); } catch (e) { h = null; }
+      const brand = names[cid] || comp.name || '未知品牌';
+      if (h && h.state === 'limited') {
+        // 降级到官网内容监控：不是巡检失败；仅在有失败时给一条非红色说明
+        if (h.stale) out.sources.notes.push({ brandName: brand, text: '官网内容监控最近一次未完成，将在下一轮重试' });
+        continue;
+      }
+      activeNonLimited += 1;
+      const win = db.prepare(`SELECT attempted, succeeded, failed, failure_reasons, ended_at, window_key
+        FROM monitoring_windows WHERE tenant_id=? AND project_id=? AND watch_target_id=? AND status='complete'
+        ORDER BY ended_at DESC LIMIT 1`).get(tid, pid, t.watch_target_id);
+      if (!win) continue;
+      const att = Number(win.attempted || 0);
+      const bad = Number(win.failed || 0);
+      const key = cid + '|window|' + (win.window_key || win.ended_at || '');
+      if (bad > 0 || (att > 0 && Number(win.succeeded || 0) === 0)) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const reasons = safeReasons(win.failure_reasons);
+        failed += 1;
         out.sources.items.push({
           brandName: brand,
-          source: '公开商品目录',
+          source: '公开商品页',
           category: reasons[0].code,
           categoryText: reasons[0].text,
           action: reasons[0].action,
           actionText: reasons[0].actionText,
+          windowAt: win.ended_at || null,
         });
-      } else ok++;
+      } else ok += 1;
     }
-    // 来源建立失败（intent）：同样计入「部分失败」，并给出可执行动作
+
+    // 监控意向：只有真实阻断/不可达才算来源未更新；
+    // 「官网可访问但无可比字段」只记一条基线说明（不计失败、不进红色清单）。
     try {
-      const fi = db.prepare(`SELECT competitor_id, reason_text FROM watch_intents
-        WHERE tenant_id=? AND project_id=? AND state='source_failed'`).all(tid, pid);
-      for (const i of fi) {
-        failed++;
+      const intents = db.prepare(`SELECT competitor_id, state, reason_code, reason_text FROM watch_intents
+        WHERE tenant_id=? AND project_id=?`).all(tid, pid);
+      const blocking = new Set(['blocked', 'rate_limited', 'source_unavailable', 'parse_failed']);
+      for (const i of intents) {
+        if (i.state !== 'source_failed') continue;
+        const brand = names[i.competitor_id] || (compById[i.competitor_id] && compById[i.competitor_id].name) || '未知品牌';
+        const reason = String(i.reason_code || '');
+        if (!blocking.has(reason)) {
+          out.sources.notes.push({ brandName: brand, text: '官网可访问，正在建立可监控基线（暂无可比较字段）' });
+          continue;
+        }
+        const key = i.competitor_id + '|intent|' + reason;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        failed += 1;
         out.sources.items.push({
-          brandName: names[i.competitor_id] || '未知品牌',
-          source: '公开商品页面',
-          category: 'source_unavailable',
-          categoryText: '无法建立可核验的公开来源',
+          brandName: brand,
+          source: '公开站点',
+          category: reason === 'blocked' ? 'blocked' : (reason === 'rate_limited' ? 'rate_limited' : 'unavailable'),
+          categoryText: reason === 'blocked' ? '来源拒绝访问（robots 或权限限制）'
+            : (reason === 'rate_limited' ? '来源限制了访问频率，稍后自动重试' : '来源暂时不可达，稍后自动重试'),
           action: 'rejoin',
           actionText: '重新加入监控',
+          windowAt: null,
         });
       }
     } catch (e) { /* watch_intents 未建表：跳过 */ }
+
     out.sources.total = ok + failed;
     out.sources.ok = ok;
     out.sources.failed = failed;
-    out.sources.latestAt = rows.length ? rows.map(r => r.ended_at).sort().pop() : null;
+    out.sources.latestAt = out.lastWindowAt || null;
     out.partialFailure = failed > 0;
-    out.allFailed = failed > 0 && ok === 0;
+    out.allFailed = failed > 0 && ok === 0 && activeNonLimited > 0;
     if (out.allFailed) out.historicalNote = '使用历史数据，最近一次更新失败';
-  } catch (e) { /* 聚合失败不改变既有状态语义：保持 sources 空，不伪造成功 */ }
+  } catch (e) {
+    /* 聚合失败不改变既有状态语义：保持 sources 为空，不伪造成功 */
+  }
 
   if (out.state === 'unknown') return out;
   if (!out.activeTargets) {

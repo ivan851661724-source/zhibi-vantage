@@ -22,6 +22,7 @@ import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { fetchBrands, retryFirstCollection, type BrandListItem, type BrandsProjectStats, type FirstCollectionSummary } from '@/lib/core-api';
 import { apiPost } from '@/lib/api';
 import { BRAND_COVER_TEXT, CARD_STATUS_TEXT, brandCoverState, allBrandsNotCollected, relationText, type BrandCoverState } from '@/lib/core-logic';
+import type { BrandsHealthSummary } from '@/lib/core-api';
 import { EmptyState } from '@/components/core-ui';
 
 export default function BrandsPage() {
@@ -93,6 +94,8 @@ function BrandsInner() {
   const [inFlight, setInFlight] = useState(false);
   // SC-09：项目级首采（后端自动建立，前端只轮询到终态，不需要用户逐个点击）
   const [fc, setFc] = useState<FirstCollectionSummary | null>(null);
+  // r3：品牌级四类计数（去重品牌；后端 SourceHealth 汇总，前端不再按维度累加）
+  const [hs, setHs] = useState<BrandsHealthSummary | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
 
@@ -138,6 +141,7 @@ function BrandsInner() {
         setItems(r.brands || []);
         setStats(r.stats || null);
         setFc(r.firstCollection || null);
+        setHs(r.healthSummary || null);
         setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
         setErr(null);
       })
@@ -155,11 +159,13 @@ function BrandsInner() {
     : fcExecRunning ? '正在采集'
       : fcCoveragePartial ? '首轮检查已完成'
         : '已完成';
+  // r3 §四：口径改为**品牌级**（同一品牌多个能力不再累加成「N 个来源」）；
+  // 有限覆盖与覆盖限制分别说，不混进「需要处理」。
   const fcNote = !fc ? ''
     : fcExecRunning ? '结果会自动更新，无需刷新页面'
-      : fc.failedCount > 0 ? `首轮检查已完成，${fc.failedCount} 个来源需要处理`
-        : fc.notConfiguredCount > 0 ? `首轮检查已完成，${fc.notConfiguredCount} 个数据服务尚未配置`
-          : fc.outOfCoverageCount > 0 ? `首轮检查已完成，${fc.outOfCoverageCount} 个来源不覆盖该市场`
+      : hs && hs.needsHandling > 0 ? `首轮检查已完成，${hs.needsHandling} 个品牌需要处理`
+        : hs && hs.limited > 0 ? `首轮检查已完成，${hs.limited} 个品牌仅能监控部分信号`
+          : hs && hs.limits > 0 ? `首轮检查已完成，${hs.limits} 个品牌受数据覆盖限制`
             : '数据已齐全';
   useEffect(() => {
     if (!projectId || (!inFlight && !fcRunning)) return;
@@ -171,6 +177,7 @@ function BrandsInner() {
           setItems(r.brands || []);
           setStats(r.stats || null);
           setFc(r.firstCollection || null);
+          setHs(r.healthSummary || null);
           setInFlight((r.collectionCoverage && r.collectionCoverage.anyInFlight) || false);
         })
         .catch(() => { /* 单次轮询失败不打断页面 */ });
@@ -190,6 +197,7 @@ function BrandsInner() {
       setItems(fresh.brands || []);
       setStats(fresh.stats || null);
       setFc(fresh.firstCollection || null);
+      setHs(fresh.healthSummary || null);
     } catch (e) {
       setRetryMsg(e instanceof Error ? e.message : '重试失败，请稍后再试。');
     } finally { setRetrying(false); }
@@ -246,9 +254,11 @@ function BrandsInner() {
             <i style={{ width: (fc.brandsTotal ? Math.round((fc.brandsDone / fc.brandsTotal) * 100) : 0) + '%' }} />
           </div>
           <div className="core-fc-facts">
-            <span>正在采集 <b>{fc.brandsCollecting}</b></span>
-            <span>部分完成 <b>{fc.brandsPartial}</b></span>
-            <span className={fc.brandsNeedsAttention > 0 ? 'is-warn' : ''}>需要处理 <b>{fc.brandsNeedsAttention}</b></span>
+            <span>已建立数据 <b>{hs ? hs.established : 0}</b></span>
+            <span>正在采集 <b>{hs ? hs.collecting : 0}</b></span>
+            <span>有限覆盖 <b>{hs ? hs.limited : 0}</b></span>
+            <span className={hs && hs.needsHandling > 0 ? 'is-warn' : ''}>需要处理 <b>{hs ? hs.needsHandling : 0}</b></span>
+            <span className="core-fc-limit">覆盖限制 <b>{hs ? hs.limits : 0}</b></span>
             {/* SC-12 §四：首页不铺 attempt 级计数（失败/未配置/不覆盖明细属诊断区） */}
             {fc.canRetry ? (
               <button type="button" className="btn-ghost btn-mini" disabled={retrying} onClick={retryFailedItems}>
@@ -263,11 +273,13 @@ function BrandsInner() {
       {/* ③ 紧凑项目统计（后端同源派生；点击「需要处理」可直接筛选） */}
       <div id="coverage" className="core-stat-row" data-testid="brands-stats">
         <div className="core-stat"><span className="core-stat-num">{stats ? stats.brands : items.length}</span><span className="core-stat-label">品牌总数</span></div>
-        <div className="core-stat"><span className="core-stat-num">{stats ? stats.accumulating : 0}</span><span className="core-stat-label">已获得数据</span></div>
-        <div className="core-stat"><span className="core-stat-num">{stats ? stats.collecting : 0}</span><span className="core-stat-label">正在采集</span></div>
-        <div className={'core-stat' + (stats && stats.needsAttention > 0 ? ' is-warn' : '')}>
-          <span className="core-stat-num">{stats ? stats.needsAttention : 0}</span><span className="core-stat-label">需要处理</span>
+        <div className="core-stat"><span className="core-stat-num">{hs ? hs.established : 0}</span><span className="core-stat-label">已建立数据</span></div>
+        <div className="core-stat"><span className="core-stat-num">{hs ? hs.collecting : 0}</span><span className="core-stat-label">正在采集</span></div>
+        <div className="core-stat"><span className="core-stat-num">{hs ? hs.limited : 0}</span><span className="core-stat-label">有限覆盖</span></div>
+        <div className={'core-stat' + (hs && hs.needsHandling > 0 ? ' is-warn' : '')}>
+          <span className="core-stat-num">{hs ? hs.needsHandling : 0}</span><span className="core-stat-label">需要处理</span>
         </div>
+        <div className="core-stat"><span className="core-stat-num">{hs ? hs.limits : 0}</span><span className="core-stat-label">覆盖限制</span></div>
       </div>
 
       {/* ③ 统一工具栏 */}

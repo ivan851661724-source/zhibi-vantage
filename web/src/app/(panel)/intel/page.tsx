@@ -102,13 +102,57 @@ function changeText(ev: InboxEvent): string | null {
   return `${fmt(oldV)} → ${fmt(newV)}`;
 }
 
+// r3 §五：来源提示只占一行，默认收起；展开才看失败来源明细。
+// 主列表永远是「今天竞争品牌发生了什么变化」，采集状态不许抢戏。
+function SourceNotice({ items, notes, allBad, joinHref }: {
+  items: Array<{ brandName: string; source: string; categoryText: string; actionText: string }>;
+  notes?: Array<{ brandName: string; text: string }>;
+  allBad?: boolean;
+  joinHref: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const n = items.length;
+  const total = n + (notes ? notes.length : 0);
+  return (
+    <div className={'core-src-notice' + (allBad ? ' is-bad' : '')} data-testid="inbox-partial-banner" data-failed={n}>
+      <span className="core-src-notice-text">
+        {allBad ? '本次巡检未能完成，来源暂时都不可访问。' : '本次巡检已完成，部分来源暂未更新。'}
+      </span>
+      {total > 0 ? (
+        <button type="button" className="core-text-btn" aria-expanded={open} onClick={() => setOpen(v => !v)}>
+          {open ? '收起' : `查看来源（${total}）`}
+        </button>
+      ) : null}
+      {open ? (
+        <ul className="core-inbox-sources">
+          {items.map((it, i) => (
+            <li key={'f' + i}>
+              <span className="core-inbox-src-brand">{it.brandName}</span>
+              <span className="core-inbox-src-source">{it.source}</span>
+              <span className="core-inbox-src-cat">{it.categoryText}</span>
+              <button type="button" className="core-text-btn" onClick={() => { window.location.href = joinHref; }}>{it.actionText}</button>
+            </li>
+          ))}
+          {(notes || []).map((nt, i) => (
+            <li key={'n' + i} className="is-note">
+              <span className="core-inbox-src-brand">{nt.brandName}</span>
+              <span className="core-inbox-src-note">{nt.text}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 // ---------- 空态：三种处境 + 真实动作 ----------
-function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, lastMsg }: {
+function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, joinHref, lastMsg }: {
   st: InboxState;
   targets: WatchTargetInfo[];
   busyId: string | null;
   onInspect: (t: WatchTargetInfo) => void;
   onJumpJoin: () => void;
+  joinHref: string;
   lastMsg: string | null;
 }) {
   const active = targets.filter(t => t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded');
@@ -161,7 +205,7 @@ function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, lastMsg }: {
   if (st.state === 'source_failed') {
     return (
       <div className="core-inbox-empty" data-testid="inbox-empty-source-failed" data-empty-state="source_failed">
-        <h4>监控来源建立失败</h4>
+        <h4>监控来源尚未建立</h4>
         <p>{st.intentNote || '该品牌暂时没有可核验的公开商品来源，因此还没有进入正式监控。'}</p>
         <p className="core-brand-muted core-brand-mini">这不代表品牌没有商品；可在「竞品数据库」重新加入监控，系统会再试一次。</p>
       </div>
@@ -194,30 +238,25 @@ function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, lastMsg }: {
   // 「全部失败」不得显示成功态。列表由后端聚合（品牌/来源/类别/动作），前端只渲染。
   if (st.state === 'inspected_partial' || st.state === 'inspection_failed') {
     const allBad = st.state === 'inspection_failed';
-    const items = (st.sources && st.sources.items) || [];
     return (
       <div
         className="core-inbox-empty"
         data-testid={'inbox-empty-' + (allBad ? 'inspection-failed' : 'inspected-partial')}
         data-empty-state={st.state}
       >
-        <h4>{allBad ? '本次巡检没有成功' : '巡检已完成，但部分来源未成功'}</h4>
+        <h4>{allBad ? '本次巡检未能完成' : '本次巡检已完成，部分来源暂未更新'}</h4>
         <p>
           {allBad
-            ? '所有监控来源本次都未能成功采集，因此没有新的可核验变化。'
-            : '已完成的来源按计划记录了观察；以下来源本次未成功，它们的变化可能没有被记录。'}
+            ? '来源本次都不可访问，因此没有新的可核验变化。系统会自动重试。'
+            : '已完成的来源按计划记录了观察；未更新的来源本次可能漏掉变化。'}
           {st.historicalNote ? ' ' + st.historicalNote + '。' : ''}
         </p>
-        <ul className="core-inbox-sources">
-          {items.map((it, i) => (
-            <li key={i}>
-              <span className="core-inbox-src-brand">{it.brandName}</span>
-              <span className="core-inbox-src-source">{it.source}</span>
-              <span className="core-inbox-src-cat">{it.categoryText}</span>
-              <button type="button" className="core-text-btn" onClick={onJumpJoin}>{it.actionText}</button>
-            </li>
-          ))}
-        </ul>
+        <SourceNotice
+          items={(st.sources && st.sources.items) || []}
+          notes={st.sources && st.sources.notes}
+          allBad={allBad}
+          joinHref={joinHref}
+        />
         {common}
       </div>
     );
@@ -501,6 +540,7 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
             st={st} targets={targets} busyId={busyId}
             onInspect={doInspect}
             onJumpJoin={() => { window.location.href = joinHref; }}
+            joinHref={joinHref}
             lastMsg={actionMsg}
           />
         ) : (
@@ -508,21 +548,13 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
         )
       ) : (
         <div className="core-inbox-groups" data-testid="inbox-groups">
-          {/* r2：有事件时同样必须看到「部分来源未成功」——不得被事件列表掩盖 */}
-          {st && st.sources && (st.sources.failed || 0) > 0 ? (
-            <div className="core-inbox-src-banner" data-testid="inbox-partial-banner">
-              <strong>巡检已完成，但部分来源未成功</strong>
-              <ul className="core-inbox-sources">
-                {(st.sources.items || []).map((it, i) => (
-                  <li key={i}>
-                    <span className="core-inbox-src-brand">{it.brandName}</span>
-                    <span className="core-inbox-src-source">{it.source}</span>
-                    <span className="core-inbox-src-cat">{it.categoryText}</span>
-                    <button type="button" className="core-text-btn" onClick={() => { window.location.href = joinHref; }}>{it.actionText}</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
+          {/* r3：有事件时也只占一行（可展开），不铺成采集错误公告墙 */}
+          {st && ((st.sources && st.sources.failed > 0) || (st.sources && st.sources.notes && st.sources.notes.length)) ? (
+            <SourceNotice
+              items={(st.sources && st.sources.items) || []}
+              notes={st.sources && st.sources.notes}
+              joinHref={joinHref}
+            />
           ) : null}
           {groups.map(g => (
             <section key={g.date} className="core-inbox-day" data-date={g.date}>

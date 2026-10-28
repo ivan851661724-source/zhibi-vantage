@@ -115,6 +115,17 @@ export const RELATION_TEXT: Record<string, string> = {
 // SC-12 §三.3：品牌卡片短状态词表（与后端 brand-service.cardStatusOf 同口径）
 // 规则：只给短状态词与一句短提示；不出现 attempt / source_status / internal_error 等内部码。
 export const CARD_STATUS_TEXT: Record<string, string> = {
+  // r3：SourceHealth 十态（后端唯一投影；卡片直接显示后端给的 text，这里兜底用）
+  not_started: '尚未开始采集',
+  probing: '正在采集',
+  available: '已有可核验数据',
+  monitoring: '正式监控中',
+  limited: '仅能监控部分信号',
+  retryable: '本次未完成，会自动重试',
+  blocked: '来源拒绝访问',
+  not_configured: '数据服务暂不可用',
+  out_of_coverage: '不覆盖当前市场',
+  unsupported: '暂不支持该来源',
   updated: '已更新',
   partial: '部分数据待更新',
   collecting: '正在采集',
@@ -125,7 +136,6 @@ export const CARD_STATUS_TEXT: Record<string, string> = {
   source_parse_failed: '来源内容暂时无法解析',
   needs_attention: '采集未完成，需要重试',
   awaiting_config: '等待系统数据服务配置',
-  not_started: '尚未开始采集',
 };
 
 export function relationText(r: string | null | undefined): string {

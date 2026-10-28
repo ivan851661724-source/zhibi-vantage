@@ -3292,9 +3292,21 @@ a.core-inbox-text:hover{text-decoration:underline}
 .core-opp-basis-line{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;
   font-size:12.5px;color:var(--ink2);border:1px solid var(--line1);border-radius:10px;padding:9px 12px;margin:0 0 12px;background:var(--bg1,#fff)}
 .core-opp-basis-line b{color:var(--ink);font-size:14px}
-.core-opp-grid{display:grid;gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
-@media (max-width:1499px){.core-opp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* r3 §六：机会视图卡片网格——主图表与表格按内容比例分配，表格独占整行，
+   不再被挤成「品牌 币种 中位价 区间」连成一句话的两列窄格。 */
+.core-opp-grid{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+.core-opp-grid > .core-opp-card[data-testid="opp-price-position"]{grid-column:1 / -1}
 @media (max-width:760px){.core-opp-grid{grid-template-columns:minmax(0,1fr)}}
+/* 空维度不占与有效模块同等的面积 */
+.core-opp-card.is-empty{padding:10px 14px;background:var(--bg2);border-style:dashed}
+.core-opp-card.is-empty h4{margin:0 0 2px;color:var(--ink2)}
+.core-opp-card.is-empty p{margin:0;font-size:12px}
+/* 数字/单位/币种/样本量对齐；表格首列固定，横向滚动时品牌名不丢 */
+.core-opp-table{font-variant-numeric:tabular-nums}
+.core-opp-table th:nth-child(n+2),.core-opp-table td:nth-child(n+2){text-align:right}
+.core-opp-table th:first-child,.core-opp-table td:first-child{position:sticky;left:0;z-index:1;background:var(--bg1)}
+.core-opp-table th:first-child{background:var(--bg1)}
+.core-opp-table td:nth-child(4){white-space:nowrap}
 .core-opp-card{border:1px solid var(--line1);border-radius:12px;padding:14px 16px;background:var(--bg1,#fff);min-width:0}
 .core-opp-card h4{margin:0 0 10px;font-size:13.5px;font-weight:600;color:var(--ink)}
 .core-opp-bands,.core-opp-bars{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
@@ -3640,3 +3652,43 @@ a:hover{text-decoration:none}
 .core-inbox-src-banner{margin:0 0 14px;padding:12px 14px;border:1px solid #E7D3A9;background:#FDF7EA;border-radius:12px}
 .core-inbox-src-banner > strong{display:block;font-size:13px;color:#7A5B12;margin-bottom:8px}
 .core-inbox-src-banner .core-inbox-sources{margin:0}
+
+/* ===== r3 来源提示（紧凑一行，可展开；不复用 r2 的大条幅） ===== */
+.core-src-notice{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
+  margin:0 0 12px;padding:8px 12px;border:1px solid var(--border);border-radius:10px;
+  background:var(--bg2);font-size:12.5px;color:var(--ink2);
+}
+.core-src-notice.is-bad{border-color:#E9C9C4;background:#FDF3F1;color:#7A3327}
+.core-src-notice-text{flex:1 1 auto;min-width:0}
+.core-src-notice .core-inbox-sources{flex:1 1 100%;margin:6px 0 0}
+.core-inbox-sources li.is-note{border-color:var(--border);background:transparent;color:var(--ink3)}
+.core-inbox-src-note{color:var(--ink3)}
+.core-fc-limit{color:var(--ink3)}
+
+/* r3：工作台品牌级采集状态条（与竞品库同源） */
+.core-health-strip{
+  display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;
+  margin:0 0 14px;padding:10px 14px;border:1px solid var(--border);border-radius:12px;
+  background:var(--bg1);font-size:12.5px;color:var(--ink2);
+}
+.core-health-strip b{color:var(--ink);font-variant-numeric:tabular-nums}
+.core-health-strip .is-warn b{color:#B4472F}
+.core-health-weak{color:var(--ink3)}
+.core-health-strip .btn-mini{margin-left:auto}
+.core-health-msg{flex:1 1 100%;color:var(--ink3)}
+
+
+/* r3：数据基础与样本范围收进折叠块（同一屏只保留一份数据基础摘要） */
+.core-opp-basis-more{margin:6px 0 14px;border:1px solid var(--line1);border-radius:12px;background:var(--bg1);padding:0 14px}
+.core-opp-basis-more > summary{cursor:pointer;padding:10px 0;font-size:12.5px;color:var(--ink2);list-style:none}
+.core-opp-basis-more > summary::-webkit-details-marker{display:none}
+.core-opp-basis-more > summary::before{content:'▸ ';color:var(--ink3)}
+.core-opp-basis-more[open] > summary::before{content:'▾ '}
+.core-opp-basis-more > summary:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:6px}
+.core-opp-basis-more > ul{margin:0 0 12px;padding-left:18px;font-size:12.5px;line-height:1.6;color:var(--ink2)}
+@media (max-width:760px){
+  /* 移动端：表格容器受控横向滚动，不撑宽正文 */
+  .core-opp-table-wrap{max-width:100%;overscroll-behavior-x:contain}
+  .core-opp-table-wrap .core-opp-table{min-width:560px}
+}

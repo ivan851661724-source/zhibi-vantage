@@ -144,6 +144,19 @@ const STATE_TEXT = Object.freeze({
   cancelled: '已退出监控',
 });
 
+// r3 §一：source_failed 不能一律叫「来源建立失败」——官网明明可访问、
+// 只是没有可比较价格时，那句话是错的。按原因给准确说法（仍是失败态，不改领域终态）。
+const FAILED_STATE_TEXT = Object.freeze({
+  no_comparable_products: '官网可访问，尚未建立可监控基线',
+  insufficient_structured_fields: '官网可访问，页面结构不足以建立基线',
+  blocked: '来源拒绝访问',
+  rate_limited: '来源暂时限制访问',
+  no_official_url: '缺少可核验官网',
+  competitor_missing: '品牌已移出项目',
+  source_unavailable: '来源暂时不可访问',
+  parse_failed: '页面内容暂时无法解析',
+});
+
 function fmtAt(iso) { return String(iso).slice(0, 16).replace('T', ' '); }
 
 // 明确下一步（§一.8：禁止无后续任务的永久 establishing；失败必须给可执行下一步）
@@ -180,7 +193,9 @@ function view(intent) {
   if (!intent) return null;
   const v = Object.assign({}, intent);
   delete v.tenantId;
-  v.stateText = STATE_TEXT[intent.state] || intent.state;
+  v.stateText = intent.state === 'source_failed'
+    ? (FAILED_STATE_TEXT[intent.reasonCode] || STATE_TEXT.source_failed)
+    : (STATE_TEXT[intent.state] || intent.state);
   // 重要：非 promoted 的意向不得对外表达「监控中 / 巡检成功 / 无变化」
   v.monitoring = intent.state === 'promoted';
   v.nextStepText = nextStepText(intent);
@@ -208,15 +223,31 @@ function requestIntent({ tenantId, projectId, competitorId, brandId, reasonCode,
       // 据此跳过 scheduleFirstProbe / planForCompetitor，保证只有一条意向一个在途任务。
       return { intent: rowToIntent(existed), existed: true, establishing: true };
     }
-    // source_failed / cancelled：用户**明确重新点击**才从头建立（product_prime）；
-    // 清除旧的重试计数与失败原因，next_probe_at 由 scheduleFirstProbe 重设
+    // source_failed / cancelled：用户**明确重新点击**才重新建立。
+    // r3 §二：若该品牌已有官网成功采集（降级链的中间进度），从官网续跑而不是从商品页归零——
+    // 「重复点击不得重置已有进度」。
+    const prevReason = String(existed.reason_code || '');
+    let resumeFromSite = false;
+    let siteTries = 0;
+    if (existed.state === 'source_failed' && (prevReason === 'no_comparable_products' || prevReason === 'insufficient_structured_fields')) {
+      const sc = siteChangeEligibility(tid, pid, cid);
+      siteTries = sc.attempts || 0;
+      resumeFromSite = siteTries >= 1;
+    }
+    const nextCap = resumeFromSite ? CAP_SITE : CAP_PRODUCTS;
+    const nextPhase = resumeFromSite ? 'site_confirm' : 'product_prime';
     db.prepare(`UPDATE watch_intents SET state='establishing', reason_code=?, reason_text=?, brand_id=COALESCE(?, brand_id),
-                enabled_signals=COALESCE(?, enabled_signals), auto_retries=0, probe_count=0,
-                next_probe_at=NULL, next_probe_capability=?, probe_phase='product_prime',
+                enabled_signals=COALESCE(?, enabled_signals), auto_retries=0, probe_count=?,
+                next_probe_at=NULL, next_probe_capability=?, probe_phase=?,
                 last_probe_attempt_id=NULL, updated_at=? WHERE intent_id=?`)
       .run(reasonCode || null, reasonText || null, brandId || null, signals ? JSON.stringify(signals) : null,
-        CAP_PRODUCTS, now, existed.intent_id);
-    return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(existed.intent_id)), existed: true, reactivated: existed.state === 'cancelled', restarted: existed.state === 'source_failed' };
+        resumeFromSite ? siteTries : 0, nextCap, nextPhase,
+        now, existed.intent_id);
+    return {
+      intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(existed.intent_id)),
+      existed: true, reactivated: existed.state === 'cancelled', restarted: existed.state === 'source_failed',
+      resumedFromSite: resumeFromSite,
+    };
   }
   const id = rid('wi');
   try {
@@ -238,6 +269,35 @@ function requestIntent({ tenantId, projectId, competitorId, brandId, reasonCode,
     return { intent: rowToIntent(winner), existed: true };
   }
   return { intent: rowToIntent(db.prepare('SELECT * FROM watch_intents WHERE intent_id=?').get(id)), existed: false };
+}
+
+/**
+ * r3 §二：把「官网可访问但停在 source_failed」的意向续跑回 establishing。
+ * 只接受 no_comparable_products / insufficient_structured_fields 且已有官网成功采集；
+ * 保留 probeCount / 已产生的 attempt（资格由库里真实 attempt 重算，不重置进度）。
+ * 幂等：已 establishing/promoted 一律不动。
+ * @returns {{resumed:boolean, reason?:string, nextProbeAt?:string}}
+ */
+function resumeSiteProbe(tenantId, projectId, competitorId) {
+  ensureTable();
+  const tid = String(tenantId || ''); const pid = String(projectId || ''); const cid = String(competitorId || '');
+  const intent = findIntent(tid, pid, cid);
+  if (!intent) return { resumed: false, reason: 'no_intent' };
+  if (intent.state === 'promoted') return { resumed: false, reason: 'already_promoted' };
+  if (intent.state === 'establishing') return { resumed: false, reason: 'already_establishing' };
+  const reason = String(intent.reasonCode || '');
+  if (reason !== 'no_comparable_products' && reason !== 'insufficient_structured_fields') {
+    return { resumed: false, reason: 'not_resumable:' + (reason || 'unknown') };
+  }
+  const sc = siteChangeEligibility(tid, pid, cid);
+  if (!sc.attempts) return { resumed: false, reason: 'no_site_attempt' };
+  const now = new Date().toISOString();
+  setProbeStep(intent.intentId, Object.assign(schedule(CAP_SITE, sc.attempts >= 2 ? 'site_confirm' : 'site_confirm', Date.now()), {
+    state: 'establishing', probeCount: sc.attempts, autoRetries: 0,
+  }));
+  WS.getDb().prepare('UPDATE watch_intents SET reason_code=?, reason_text=?, updated_at=? WHERE intent_id=?')
+    .run('resumed_site_probe', '官网可访问，继续建立官网内容监控基线', now, intent.intentId);
+  return { resumed: true, siteAttempts: sc.attempts, nextProbeAt: new Date().toISOString() };
 }
 
 function getIntent(tenantId, intentId) {
@@ -944,7 +1004,7 @@ function stopScheduler() { if (_probeTimer) { clearInterval(_probeTimer); _probe
 module.exports = {
   INTENT_STATES, SOURCE_CAPABILITY, CAP_PRODUCTS, CAP_SITE, PROBE_CAPABILITIES, PROBE_PHASES, PHASE_TEXT, STATE_TEXT,
   PROBE_INTERVAL_MS, RATE_RETRY_MS, RETRY_BACKOFF_MS, MAX_AUTO_RETRIES, PROBE_PENDING_GRACE_MS,
-  requestIntent, getIntent, findIntent, listIntents, cancelIntent, setFailed,
+  requestIntent, resumeSiteProbe, getIntent, findIntent, listIntents, cancelIntent, setFailed,
   scheduleFirstProbe, runDueProbes, onProbeFinished, evaluateIntentState, reconcileStuckIntents,
   view, comparableItems, deterministicDiff, promotionEligibility, siteChangeEligibility,
   buildVerifiedBasis, tryUpgradeTargetToPrice, seedSiteBaselineFromLatestAttempt, tryPromote,

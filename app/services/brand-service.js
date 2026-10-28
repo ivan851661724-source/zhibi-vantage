@@ -16,6 +16,7 @@ const BrandStore = require('./brand-store.js');
 const Registry = require('./capability-registry.js');
 const Surface = require('./data-surface.js');
 const SurfaceStore = require('./surface-store.js');
+const SourceHealth = require('./source-health.js');
 const Readiness = require('./source-readiness.js');
 const EvidenceStore = require('../research/evidence-store.js');
 const Snapshot = require('../research/source-snapshot.js');
@@ -1060,6 +1061,37 @@ function cardStatusOf(coverage) {
   }
   return { code: 'not_started', text: '尚未开始采集', detail: null };
 }
+// r3：卡片短状态 = SourceHealth 的直译（一处定义，四页共用）。
+// 与旧 cardStatusOf 的差别：不再让「单个次要维度失败」把整张卡判成需要重试；
+// 有可用数据时优先表达「有数据 / 有限覆盖」。
+const HEALTH_CARD_TEXT = Object.freeze({
+  not_started: '尚未开始采集',
+  probing: '正在采集',
+  available: '已有可核验数据',
+  monitoring: '正式监控中',
+  limited: '仅能监控部分信号',
+  retryable: '本次未完成，会自动重试',
+  blocked: '来源拒绝访问',
+  not_configured: '数据服务暂不可用',
+  out_of_coverage: '不覆盖当前市场',
+  unsupported: '暂不支持该来源',
+});
+function cardStatusOfHealth(health) {
+  const h = health || { state: 'not_started' };
+  // 与既有卡片契约对齐（SC-12 §三.3）：有数据 → updated；有数据但最近一次失败 → stale。
+  // 其余状态直接用 SourceHealth 的十态码，前端词表已同步。
+  if (h.stale && (h.state === 'available' || h.state === 'limited')) {
+    return { code: 'stale', text: '已有历史数据，最近更新失败', detail: h.note || '数据保留，可重新检查', tone: 'warn' };
+  }
+  if (h.state === 'available') {
+    return { code: 'updated', text: '已有可核验数据', detail: h.note || null, tone: h.tone || 'ok' };
+  }
+  const text = HEALTH_CARD_TEXT[h.state] || h.stateText || '采集状态未知';
+  const detail = h.state === 'retryable' || h.state === 'blocked' ? '可在「数据覆盖与来源」查看'
+    : (h.note || null);
+  return { code: h.state, text, detail, tone: h.tone || null };
+}
+
 function listBrandViews(tenantId, projectId) {
   syncProjectBrands(tenantId, projectId);
   const state = loadProjectState(tenantId, projectId);
@@ -1068,6 +1100,7 @@ function listBrandViews(tenantId, projectId) {
   return brands.map((b) => {
     const comp = b.competitorRef ? findCompetitor(state, b.competitorRef) : null;
     const bc = buildBrandCoverage(tenantId, projectId, comp || {});
+    const health = SourceHealth.build(tenantId, projectId, comp || {}, { coverage: bc });
     const tl = BrandStore.listTimeline(tenantId, b.brandId, { limit: 5 });
     const last = tl[0] || null;
     return {
@@ -1087,8 +1120,9 @@ function listBrandViews(tenantId, projectId) {
       lastObservedAt: last ? last.at : (bc.dimensions.reduce((acc, d) => (d.lastObservedAt && (!acc || d.lastObservedAt > acc) ? d.lastObservedAt : acc), null)),
       // SC-09 §四：卡片真实摘要（商品/价格区间/评论/社媒/热度/广告覆盖/最近成功与失败）
       collectionDigest: buildCollectionDigest(tenantId, projectId, comp || {}),
-      // SC-12 §三.3：卡片短状态（首页卡片只显示这个，不显示长错误段落）
-      status: cardStatusOf(bc),
+      // r3：卡片状态改由唯一投影 SourceHealth 决定（不再用「任一维度失败 = 全卡红」的老规则）
+      status: cardStatusOfHealth(health),
+      sourceHealth: health,
     };
   });
 }
@@ -1097,20 +1131,19 @@ function listBrandViews(tenantId, projectId) {
 function buildBrandsProjectStats(views, opts) {
   const list = Array.isArray(views) ? views : [];
   const o = opts || {};
-  const accumulating = list.filter(b => b.brandCoverage && b.brandCoverage.summary.available > 0).length;
-  const collecting = list.filter(b => b.collection && (b.collection.state === 'collecting' || b.collection.state === 'queued')).length;
-  const needsAttention = list.filter(b => {
-    const bc = b.brandCoverage || { summary: {} };
-    const cs = b.collection || {};
-    // SC-08 r3 §三：「旧数据仍可用但最新采集失败」（usingPreviousData）也要计入需要处理
-    // SC-09：首采批次里任一能力失败（如公开商品页被拒）同样计入「需要处理」
-    const fc = o.fcByBrand && b.competitorId ? o.fcByBrand[b.competitorId] : null;
-    return cs.state === 'failed' || cs.state === 'source_pending' || (b.monitoring && b.monitoring.state === 'source_failed')
-      || (bc.summary && bc.summary.failed > 0)
-      || (Array.isArray(bc.dimensions) && bc.dimensions.some(d => d.usingPreviousData))
-      || !!(fc && fc.hasFailure);
-  }).length;
-  return { brands: list.length, accumulating, collecting, needsAttention };
+  // r3 §四：统计以**去重品牌**为主；维度数量只作明细，不再把同一品牌的多个能力
+  // 累加成「N 个来源失败」。有限覆盖（limited）与覆盖限制（not_configured 等）都不进重试数。
+  const healths = list.map(b => b.sourceHealth || null);
+  const sum = SourceHealth.summarize(healths);
+  return {
+    brands: list.length,
+    accumulating: sum.established,
+    collecting: sum.collecting,
+    needsAttention: sum.needsHandling,
+    limited: sum.limited,
+    coverageLimited: sum.limits,
+    byState: sum.byState,
+  };
 }
 
 // 品牌详情：显式 projectId 边界。品牌必须已关联该项目（getLink 校验），

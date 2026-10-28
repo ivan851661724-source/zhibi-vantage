@@ -59,6 +59,48 @@ export interface FirstCollectionSummary {
   totalItems: number;
   canRetry: boolean;
 }
+// r3：用户侧来源状态（唯一投影；十个状态见 app/services/source-health.js）
+export type SourceHealthState =
+  | 'not_started' | 'probing' | 'available' | 'monitoring' | 'limited'
+  | 'retryable' | 'blocked' | 'not_configured' | 'out_of_coverage' | 'unsupported';
+export interface SourceHealthGap {
+  dimension: string;
+  state: string;
+  kind?: string;
+  text: string;
+  owner?: string;
+}
+export interface SourceHealth {
+  state: SourceHealthState;
+  stateText: string;
+  tone: 'ok' | 'info' | 'warn' | 'muted';
+  note: string | null;
+  action: { kind: string; text: string | null };
+  hasData: boolean;
+  started: boolean;
+  needsHandling: boolean;
+  limited: boolean;
+  stale: boolean;
+  watching: 'none' | 'probing' | 'monitoring' | 'limited';
+  signals: string[];
+  lastSuccessAt: string | null;
+  lastAttemptAt: string | null;
+  issue: { kind: string; owner: string; retryable: boolean; text: string } | null;
+  limits: Array<{ dimension: string; state: string; text: string }>;
+  gaps: SourceHealthGap[];
+}
+// 项目级四类计数（去重品牌）
+export interface BrandsHealthSummary {
+  brands: number;
+  established: number;
+  collecting: number;
+  limited: number;
+  needsHandling: number;
+  notStarted: number;
+  limits: number;
+  byState: Record<string, number>;
+}
+
 // 逐品牌 × 逐能力首采状态（真实任务状态，不含推断）
 export interface BrandFirstCollection {
   items: Record<string, { state: string; resultCount: number | null }>;
@@ -158,7 +200,9 @@ export interface BrandListItem {
   firstObservedAt?: string | null;
   lastObservedAt: string | null;
   // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
-  status?: { code: string; text: string; detail: string | null };
+  status?: { code: string; text: string; detail: string | null; tone?: string | null };
+  // r3：唯一来源状态投影（工作台/竞品雷达/竞品库/情报库共用同一份结论）
+  sourceHealth?: SourceHealth | null;
   // SC-12 §三.3：卡片短状态（后端单一真源；不出现长错误段落与内部码）
   collectionDigest?: BrandCollectionDigest | null;
   firstCollection?: BrandFirstCollection | null;
@@ -169,6 +213,10 @@ export interface BrandsProjectStats {
   brands: number;
   accumulating: number;
   collecting: number;
+  /** r3：有限覆盖与覆盖限制（分开计，不进「需要处理」） */
+  limited?: number;
+  coverageLimited?: number;
+  byState?: Record<string, number>;
   needsAttention: number;
 }
 
@@ -597,7 +645,7 @@ export interface BrandDetail {
 }
 
 export function fetchBrands(projectId: string, signal?: AbortSignal) {
-  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; stats?: BrandsProjectStats; firstCollection?: FirstCollectionSummary | null; collectionCoverage?: CollectionCoverage | null }>(
+  return apiGet<{ projectId: string; brands: BrandListItem[]; count: number; stats?: BrandsProjectStats; firstCollection?: FirstCollectionSummary | null; collectionCoverage?: CollectionCoverage | null; healthSummary?: BrandsHealthSummary | null }>(
     `/api/brands?projectId=${encodeURIComponent(projectId)}`, signal);
 }
 // SC-09：首采进度轮询 / 失败项重试
@@ -673,6 +721,8 @@ export interface InboxSources {
   ok: number;
   failed: number;
   items: InboxSourceIssue[];
+  /** r3：非失败类说明（如「官网可访问，正在建立可监控基线」），不进红色清单 */
+  notes?: Array<{ brandName: string; text: string }>;
   latestAt: string | null;
 }
 export interface InboxState {

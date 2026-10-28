@@ -133,7 +133,7 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
         </div>
 
         {/* 产品矩阵密度 */}
-        <div className="core-opp-card" data-testid="opp-matrix">
+        <div className={'core-opp-card' + (matrix.available ? '' : ' is-empty')} data-testid="opp-matrix">
           <h4>产品矩阵密度</h4>
           {matrix.available ? (
             <>
@@ -154,7 +154,7 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
         </div>
 
         {/* 上新与库存动态 */}
-        <div className="core-opp-card" data-testid="opp-dynamics">
+        <div className={'core-opp-card' + (dyn.available ? '' : ' is-empty')} data-testid="opp-dynamics">
           <h4>上新与库存动态</h4>
           {dyn.available ? (
             <>
@@ -341,7 +341,8 @@ function UnifiedOpportunityBasis({ projectId, view }: { projectId: string; view?
     <section className="core-opp-basis">
       {/* SC-12 §六.2：机会模块按可用数据独立工作——有价格/商品就必须有分析 */}
       <FoundationModules f={v.foundation || null} />
-      <h3>数据基础与样本范围</h3>
+      <details className="core-opp-basis-more" data-testid="opp-basis-detail">
+      <summary>数据基础与样本范围（展开查看口径与限制）</summary>
       <ul>
         <li>竞争品牌数：{v.sample.brandCount}（已具备真实数据：{v.sample.brandsWithData}{v.sample.required ? ` / 至少需要 ${v.sample.required}` : ''}）</li>
         {db ? (
@@ -368,6 +369,7 @@ function UnifiedOpportunityBasis({ projectId, view }: { projectId: string; view?
         <li>机会状态：{v.statusText}</li>
         {v.note ? <li>{v.note}</li> : null}
       </ul>
+      </details>
       {/* §六.1：不可用 / 建设中维度合并为唯一区域，每个维度只出现一次 */}
       {(v.foundation && v.foundation.unavailableDimensions.length) || (db && db.notIntegrated.length) ? (
         <div className="core-building core-opp-building" data-testid="opp-missing">

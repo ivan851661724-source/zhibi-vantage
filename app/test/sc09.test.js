@@ -493,7 +493,9 @@ test('S11 前端能区分全部采集状态（尚未开始/正在采集/已检�
   const both = brands + detail;
   // 首采进度：三态 + 完成品牌数
   assert.ok(/brandsDone/.test(brands) && /brandsTotal/.test(brands), '首采进度 = 已完成/总数');
-  assert.ok(/正在采集/.test(brands) && /部分完成/.test(brands) && /需要处理/.test(brands), '首采三态文案');
+  // r3：首采块改为**品牌级**四类（已建立数据 / 正在采集 / 有限覆盖 / 需要处理）+ 覆盖限制，
+  // 同一品牌多个能力不再累加成「N 个来源失败」；四类互斥且都可区分。
+  assert.ok(/正在采集/.test(brands) && /已建立数据/.test(brands) && /有限覆盖/.test(brands) && /需要处理/.test(brands), '首采四类文案（品牌级）');
   assert.ok(/重新检查失败项/.test(brands), '失败项重试入口');
   assert.ok(/setInterval/.test(brands), '页面轮询到终态');
   // SC-12 §三/§四：六类状态改为「首页短状态 + 详情完整诊断」两处分工

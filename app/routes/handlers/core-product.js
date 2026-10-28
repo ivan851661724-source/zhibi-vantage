@@ -79,9 +79,15 @@ async function brandsList(ctx, req, res, url) {
   for (const b of items) {
     b.firstCollection = b.competitorId ? (fcByBrand[b.competitorId] || null) : null;
   }
+  // r3 §四：品牌级四类计数（已建立数据 / 正在采集 / 有限覆盖 / 真实需要处理），
+  // 由 SourceHealth 汇总，**去重品牌**；维度数量只出现在明细里。
+  let healthSummary = null;
+  try { healthSummary = require('../../services/source-health.js').summarize(items.map(b => b.sourceHealth)); }
+  catch (e) { healthSummary = null; }
   ctx.sendJSON(res, 200, {
     projectId: rp.projectId, brands: items, count: items.length,
     firstCollection,
+    healthSummary,
     // SC-08 r2 §四：首页四项统计（品牌总数 / 已开始积累 / 正在采集 / 需要处理），
     // 与卡片同源派生（后端算，禁止前端各算一套）
     stats: BrandSvc.buildBrandsProjectStats(items, { fcByBrand }),
