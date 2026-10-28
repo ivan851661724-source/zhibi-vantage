@@ -3764,10 +3764,11 @@ a:hover{text-decoration:none}
 /* ============ r4g §三：账户菜单 / 齿轮 / 退出确认 ============ */
 .user-row-btn{display:flex;align-items:center;gap:8px;background:none;border:none;padding:6px 8px;border-radius:10px;cursor:pointer;width:100%;text-align:left;color:inherit}
 .user-row-btn:hover{background:rgba(255,255,255,.06)}
-.user-row-btn .gear{width:15px;height:15px;flex-shrink:0;color:rgba(255,255,255,.55);margin-left:auto}
+.user-row-btn .gear{width:15px;height:15px;flex-shrink:0;color:var(--ink3);margin-left:auto}
 .user-row-btn .uinfo{min-width:0;flex:1}
-.user-row-btn .un{font-size:12.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
-.user-row-btn .ue{font-size:10.5px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.user-row-btn .un{font-size:12.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.user-row-btn .ue{font-size:10.5px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.user-row-btn:hover{background:rgba(0,0,0,.05)}
 .accmenu-mask{position:fixed;inset:0;z-index:1100;background:transparent}
 .accmenu{position:fixed;z-index:1101;min-width:230px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.14);padding:6px}
 .accmenu-item{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;background:none;border:none;padding:9px 12px;border-radius:8px;font-size:13px;color:var(--ink);cursor:pointer;text-align:left}
