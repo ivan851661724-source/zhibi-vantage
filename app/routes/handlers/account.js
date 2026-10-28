@@ -33,7 +33,9 @@ function me(ctx, req, res) {
   const tid = ap.payload.tid;
   const uid = ap.payload.sub;
   if (!tid || !uid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED', message: '请先登录。' }); return null; }
-  return { tid, uid };
+  // r4e 修复：请求入口解析一次身份并复用——改密成功后 tokenVersion 已提升，
+  // 此刻再调 getAuthPayload 会被凭证版本校验拒掉（旧 token 已失效）→ 空指针。
+  return { tid, uid, role: ap.payload.role };
 }
 
 async function accountGet(ctx, req, res, url, p) {
@@ -108,8 +110,7 @@ async function passwordChange(ctx, req, res, url, p) {
   }
   pwRateClear(id.uid);
   // 其他会话已随凭证版本提升失效；当前会话签发新 token（产品规则：当前会话续签）
-  const ap = ctx.getAuthPayload(req);
-  const token = auth.issueToken({ userId: id.uid, tenantId: id.tid, role: ap.payload.role, tv: r.tokenVersion });
+  const token = auth.issueToken({ userId: id.uid, tenantId: id.tid, role: id.role, tv: r.tokenVersion });
   ctx.sendJSON(res, 200, { ok: true, token, message: '密码已修改。其他设备的登录已失效，本次会话已自动续签。' });
   return true;
 }

@@ -283,3 +283,26 @@ test('r4-8 修改密码限流：连续失败后 429，且不回显密码', async
   const s = JSON.stringify(last.obj);
   assert.ok(!s.includes('wrong-pass') && !s.includes('whatever99'), '密码不出现在响应中');
 });
+
+// r4e 回归：改密成功路径不得二次解析身份——旧 token 在凭证版本提升后会被
+// getAuthPayload 拒掉（返回 null），handler 若再调一次会空指针 → 500（预览服实测）。
+test('r4-9 改密成功后用入口身份续签（不二次 getAuthPayload）', async () => {
+  const AccountH = require('../routes/handlers/account.js');
+  const email = uid('u4') + '@example.com';
+  const reg = tenant.register({ email, password: 'password44' });
+  const tid = reg.tenant.id, uidX = reg.user.id;
+  let calls = 0;
+  let last = null;
+  const ctx = {
+    readBody: async () => ({ currentPassword: 'password44', newPassword: 'newpass77a', confirmPassword: 'newpass77a' }),
+    sendJSON: (_res, code, obj) => { last = { code, obj }; return true; },
+    // 第一次调用返回有效身份（入口已通过）；此后（改密已使 tokenVersion 提升）返回 null
+    getAuthPayload: () => { calls += 1; return calls === 1 ? { kind: 'tenant', payload: { tid, sub: uidX, role: 'owner' } } : null; },
+  };
+  await AccountH.passwordChange(ctx, { method: 'POST', headers: {} }, {}, null, '/api/account/password');
+  assert.equal(last.code, 200, '改密成功路径不受二次身份解析影响');
+  assert.ok(last.obj.token, '返回续签 token');
+  // 续签 token 必须带新凭证版本
+  const re = require('../services/auth.js').verifyToken(last.obj.token);
+  assert.equal(re.tv, 1, '新 token 携带提升后的 tv');
+});
