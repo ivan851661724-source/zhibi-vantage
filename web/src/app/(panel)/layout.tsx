@@ -169,6 +169,8 @@ function SideNav() {
       <Suspense fallback={<NavGroups projectId={null} pending={pending} rivals={rivals} />}>
         <SideNavLinks pending={pending} rivals={rivals} />
       </Suspense>
+      {/* r4 §十：移动端（≤820px 侧栏转底栏）原本没有账户入口——补一个「账户」标签 */}
+      <MobileAccountButton />
       <div className="side-foot">
         <div className="plan-pill"><span className="dot"></span><span id="planStatus">雷达运行中</span></div>
         <UserRow />
@@ -185,6 +187,28 @@ function SideNavLinks({ pending, rivals }: { pending: number; rivals: number }) 
 
 // r4 §十：用户名来自当前登录账号的真实资料（displayName；无则回退邮箱 @ 前缀），
 // 不再固定显示「知彼用户」；点击打开账户抽屉（资料/用量/安全），退出入口移入抽屉。
+// 移动端底部栏的账户入口（桌面隐藏；点击打开账户抽屉）
+function MobileAccountButton() {
+  const [name, setName] = useState('');
+  const [drawer, setDrawer] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchAccount()
+      .then((a) => { if (alive) setName(a.user.displayName || '账户'); })
+      .catch(() => { if (alive) setName('账户'); });
+    return () => { alive = false; };
+  }, [drawer]);
+  return (
+    <>
+      <button type="button" className="side-account" aria-haspopup="dialog" onClick={() => setDrawer(true)}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="8" r="3.4" /><path d="M5 20c1.2-3.4 4-5 7-5s5.8 1.6 7 5" strokeLinecap="round" /></svg>
+        <span>{name || '账户'}</span>
+      </button>
+      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} onNameChanged={(n) => setName(n)} />
+    </>
+  );
+}
+
 function UserRow() {
   const [name, setName] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
