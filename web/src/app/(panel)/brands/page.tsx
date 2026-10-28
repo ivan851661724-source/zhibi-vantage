@@ -300,7 +300,7 @@ function BrandsInner() {
       {!items.length ? (
         <EmptyState
           title="还没有竞争品牌"
-          sub="先在竞品雷达发现并添加品牌，这里会为每个品牌建立长期数据档案。"
+          sub="先在竞品监控确认品牌（或从工作台发现），这里会为每个品牌建立长期数据档案。"
           action={<Link className="btn primary" href={`/radar?projectId=${encodeURIComponent(projectId)}`}>去发现竞品</Link>}
         />
       ) : allBrandsNotCollected(items) && !hasFilter && !(fc && (fc.status === 'running' || fc.brandsDone > 0)) ? (

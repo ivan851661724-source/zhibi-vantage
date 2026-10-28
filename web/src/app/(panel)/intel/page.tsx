@@ -264,7 +264,7 @@ function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, joinHref, last
   // inspected：已完成巡检但没发现变化 —— 区分「今天已巡」与「今天还没巡」
   return (
     <div className="core-inbox-empty" data-testid="inbox-empty-inspected" data-empty-state="inspected">
-      <h4>{st.todayInspected ? '今日巡检已完成，没有发现重要变化' : '今天还没有巡检'}</h4>
+      <h4>{st.todayInspected ? '近 30 天暂无已核实的重要变化。' : '今天还没有巡检'}</h4>
       <p>
         {st.todayInspected
           ? `今日已完成 ${st.todayWindowCount} 次巡检；最近一次巡检 ${fmtAt(st.lastWindowAt)}。`
@@ -483,7 +483,7 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
   return (
     <section className="core-inbox-page">
       <div className="core-inbox-head">
-        <h3>每日变化收件箱</h3>
+        <h3>每日变化</h3>
         <Link className="core-inbox-cov-link" href={`/brands?projectId=${encodeURIComponent(projectId)}#coverage`}>
           查看数据覆盖与采集状态 →
         </Link>
@@ -501,6 +501,22 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
           正式监控 {st.activeTargets} 个品牌 · 监控信号：{st.signalsText || '未启用'}
           {st.todayInspected ? ` · 今日已巡检 ${st.todayWindowCount} 次（最近 ${fmtAt(st.lastWindowAt)}）` : ' · 今日尚未巡检'}
         </p>
+      ) : null}
+
+      {/* r4 §六：最新巡检窗口不完整时如实给缺口，绝不显示「没有变化」 */}
+      {st && st.coverage && st.coverage.complete === false ? (
+        <div className="core-warn-box" data-testid="inbox-coverage-gap">
+          <b>最近一次巡检不完整（完成 {st.coverage.completed}/{st.coverage.expected}）</b>
+          {st.coverage.missingBrands && st.coverage.missingBrands.length ? (
+            <p className="hint">未覆盖品牌：{st.coverage.missingBrands.join('、')}</p>
+          ) : null}
+          {st.coverage.failures && st.coverage.failures.length ? (
+            <ul>
+              {st.coverage.failures.map((f, i) => <li key={i}>{f.brandName}：{f.categoryText}</li>)}
+            </ul>
+          ) : null}
+          <p className="hint">{st.coverage.nextRetryText || '缺失项将自动重试。'}在覆盖补齐前，这里不会显示「暂无变化」结论。</p>
+        </div>
       ) : null}
 
       <button

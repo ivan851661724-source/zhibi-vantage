@@ -3696,3 +3696,52 @@ a:hover{text-decoration:none}
   .core-opp-table-wrap{max-width:100%;overscroll-behavior-x:contain}
   .core-opp-table-wrap .core-opp-table{min-width:560px}
 }
+
+/* ================= r4 新增 ================= */
+/* 警示盒（覆盖缺口 / 来源异常） */
+.core-warn-box{border:1px solid var(--line);border-left:3px solid #B4472F;background:#FFF8F5;border-radius:10px;padding:10px 12px;margin:8px 0;font-size:12.5px;color:var(--ink2)}
+.core-warn-box b{color:var(--ink)}
+.core-warn-box ul{margin:6px 0 0;padding-left:18px}
+.core-warn-box .btn-mini{margin-top:6px}
+
+/* 竞品监控列表（/radar 监控控制台） */
+.mon-list{display:flex;flex-direction:column;gap:8px}
+.mon-row{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--panel)}
+.mon-row .mon-main{min-width:0}
+.mon-name{font-size:13.5px;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mon-sub{font-size:12px;color:var(--ink3);margin-top:4px;overflow-wrap:anywhere}
+.mon-acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+@media (max-width:560px){.mon-row{flex-direction:column}.mon-acts{justify-content:flex-start}}
+
+/* 账户抽屉 */
+.user-row-btn{display:flex;align-items:center;gap:8px;background:none;border:none;padding:6px 8px;border-radius:10px;cursor:pointer;width:100%;text-align:left;color:inherit}
+.user-row-btn:hover{background:rgba(255,255,255,.06)}
+.user-row-btn .uinfo{min-width:0}
+.user-row-btn .un{font-size:12.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}
+.user-row-btn .ue{font-size:11px;color:rgba(255,255,255,.55)}
+.account-drawer{max-width:420px}
+.acc-form .acc-row{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.acc-form .acc-row .k{font-size:12px;color:var(--ink3)}
+.acc-form input{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px;background:#fff;color:var(--ink);width:100%}
+.acc-form input.is-readonly{background:#F5F5F2;color:var(--ink3)}
+.acc-acts{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.acc-msg{color:#177A55;font-size:12.5px}
+.acc-meta{display:flex;flex-direction:column;gap:4px;font-size:12.5px;color:var(--ink2)}
+.acc-usage b{font-variant-numeric:tabular-nums;color:var(--ink)}
+.acc-logout{border-color:#B4472F;color:#B4472F}
+
+/* 工作台观察区标题 */
+.wb-sec-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin:14px 0 8px}
+.wb-sec-head h3{font-size:14px;margin:0;color:var(--ink)}
+
+/* 机会视图：移动端价格定位卡片（桌面隐藏） */
+.core-opp-price-cards{display:none}
+.core-opp-price-card{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:8px;background:var(--panel)}
+.core-opp-price-card .cc-head{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;color:var(--ink);margin-bottom:6px}
+.core-opp-price-card .cc-cur{font-size:12px;color:var(--ink3)}
+.core-opp-price-card .cc-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px;color:var(--ink3)}
+.core-opp-price-card .cc-grid b{display:block;color:var(--ink);font-variant-numeric:tabular-nums;font-weight:600}
+@media (max-width:767px){
+  .core-opp-price-position .core-opp-table-wrap{display:none}
+  .core-opp-price-cards{display:block}
+}

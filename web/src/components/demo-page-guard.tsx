@@ -10,7 +10,7 @@ export function DemoPageGuard({ label }: { label: string }) {
       <div className="big">演示模式不支持「{label}」</div>
       <div className="sub">
         该页面依赖真实账号数据（API 密钥 / 调研档案 / 服务端计算）。退出演示模式注册工作区即可体验完整功能；
-        演示数据请前往工作台 / 竞品雷达 / 情报库 / 机会视图 / 赛道档案查看。
+        演示数据请前往工作台 / 竞品监控 / 竞品数据库 / 每日变化 / 市场机会查看。
       </div>
     </div>
   );

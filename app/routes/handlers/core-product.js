@@ -303,18 +303,46 @@ function oppCacheSet(key, payload) {
   OPP_CACHE.set(key, { at: Date.now(), payload });
 }
 
+// r4 §九：载荷拆分 —— 默认 scope=summary 只保留每行/每条机会的第一条证据引用
+//（其余折叠为 evidenceCount），把约 227KB 首屏压到几十 KB；完整引用按品牌用
+// scope=detail 拉取（打开证据抽屉时才请求）。scope=full 保留旧行为（测试/审计用）。
+function trimEvidenceRefs(payload) {
+  const trimList = (list) => {
+    if (!Array.isArray(list)) return list;
+    for (const row of list) {
+      if (!row || !Array.isArray(row.evidenceRefs)) continue;
+      row.evidenceCount = Array.isArray(row.evidenceRefs) ? row.evidenceRefs.length : (row.evidenceCount || 0);
+      row.evidenceRefs = row.evidenceRefs.slice(0, 1);
+    }
+  };
+  try {
+    const f = payload.foundation;
+    if (f && f.modules) {
+      for (const k of Object.keys(f.modules)) {
+        const m = f.modules[k];
+        if (!m) continue;
+        if (Array.isArray(m.rows)) trimList(m.rows);
+        if (Array.isArray(m.groups)) for (const g of m.groups) trimList(g.rows);
+      }
+    }
+    if (Array.isArray(f && f.opportunities)) trimList(f.opportunities);
+  } catch (e) { /* 裁剪失败按原样返回（宁可大也不坏） */ }
+  return payload;
+}
+
 async function opportunities(ctx, req, res, url) {
   const tid = tidOf(ctx, req);
   if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
   const rp = resolveProject(ctx, tid, q(url, 'projectId'));
   if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
   const debug = q(url, 'debug') === '1';
+  const scope = q(url, 'scope') || 'summary'; // summary（默认）| detail | full
   const key = tid + ':' + rp.projectId;
   const hit = oppCacheGet(key);
   if (hit) {
     const payload = Object.assign({}, hit.payload);
-    payload.meta = Object.assign({}, payload.meta, { cached: true, cacheAgeMs: Date.now() - hit.at });
-    ctx.sendJSON(res, 200, payload);
+    payload.meta = Object.assign({}, payload.meta, { cached: true, scope, cacheAgeMs: Date.now() - hit.at });
+    ctx.sendJSON(res, 200, scope === 'summary' ? trimEvidenceRefs(payload) : payload);
     return true;
   }
   const t0 = process.hrtime.bigint();
@@ -333,9 +361,23 @@ async function opportunities(ctx, req, res, url) {
   const ms = (a, b) => Math.round(Number(b - a) / 1e6);
   const timings = { view: ms(t0, t1), historyBasis: ms(t1, t2), foundation: ms(t2, t3), total: ms(t0, t3) };
   const payload = Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view);
-  payload.meta = { cached: false, timings: debug ? timings : undefined };
+  payload.meta = { cached: false, scope, timings: debug ? timings : undefined };
   oppCacheSet(key, Object.assign({ projectId: rp.projectId, historyBasis, foundation }, view));
-  ctx.sendJSON(res, 200, payload);
+  // r4 §九：默认摘要口径（证据引用折叠）；detail/full 才带完整引用
+  ctx.sendJSON(res, 200, scope === 'summary' ? trimEvidenceRefs(payload) : payload);
+  return true;
+}
+
+// ---------------- 工作台观察卡（r4 §三） ----------------
+// 只消费真实观察（价格模块实抓），数据缺口进 coverage 不进行动卡。
+async function workbenchCards(ctx, req, res, url) {
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 401, { error: 'AUTH_REQUIRED' }); return true; }
+  const rp = resolveProject(ctx, tid, q(url, 'projectId'));
+  if (rp.error) { ctx.sendJSON(res, rp.error[0], { error: rp.error[1], message: rp.error[2] }); return true; }
+  const WB = require('../../services/workbench-cards.js');
+  const data = WB.buildWorkbenchCards(tid, rp.projectId, { fresh: q(url, 'fresh') === '1' });
+  ctx.sendJSON(res, 200, Object.assign({ projectId: rp.projectId }, data));
   return true;
 }
 
@@ -398,6 +440,6 @@ async function reportDetail(ctx, req, res, url, p) {
 module.exports = {
   brandsList, brandDetail, brandCoverage,
   firstCollectionStatus, firstCollectionRetry,
-  intelInbox, intelEventCorrection, intelligence, opportunities,
+  intelInbox, intelEventCorrection, intelligence, opportunities, workbenchCards,
   reportsList, reportsCreate, reportDetail,
 };

@@ -98,9 +98,10 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
         </div>
 
         {/* 品牌价格定位（§一：币种未知/混合的品牌只展示原始范围，不参与相对定位） */}
-        <div className="core-opp-card" data-testid="opp-price-position">
+        <div className="core-opp-card core-opp-price-position" data-testid="opp-price-position">
           <h4>品牌价格定位{price.multiCurrency ? '（按币种分组）' : ''}</h4>
           {(price.rows.length || price.nonComparableRows.length) ? (
+            <>
             <div className="core-opp-table-wrap">
             <table className="core-opp-table">
               <thead><tr><th>品牌</th><th>币种</th><th>中位价</th><th>价格区间</th><th>在售 SKU</th><th>证据</th></tr></thead>
@@ -129,6 +130,27 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
               </tbody>
             </table>
             </div>
+            {/* r4 §九：移动端价格定位改为卡片（不塞桌面宽表格，无需横向滑动） */}
+            <div className="core-opp-price-cards" data-testid="opp-price-cards">
+              {price.rows.map(r => (
+                <div className="core-opp-price-card" key={'m_' + r.brandId}>
+                  <div className="cc-head"><b>{r.name}</b><span className="cc-cur">{r.currency || '—'}</span></div>
+                  <div className="cc-grid">
+                    <span>中位价<b>{r.priceMedian != null ? (r.currency ? r.currency + ' ' : '') + r.priceMedian : '—'}</b></span>
+                    <span>价格区间<b>{r.priceMin != null && r.priceMax != null ? (r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax : '—'}</b></span>
+                    <span>在售 SKU<b>{r.productCount != null ? r.productCount : '—'}</b></span>
+                    <span>证据{evBtn(r.evidenceRefs)}</span>
+                  </div>
+                </div>
+              ))}
+              {price.nonComparableRows.map(r => (
+                <div className="core-opp-price-card is-nc" key={'mnc_' + r.brandId}>
+                  <div className="cc-head"><b>{r.name}</b></div>
+                  <p className="core-brand-muted">{r.note}</p>
+                </div>
+              ))}
+            </div>
+            </>
           ) : <p className="core-brand-muted">暂无可用价格数据。</p>}
         </div>
 
@@ -436,7 +458,7 @@ function UnifiedOpportunityBasis({ projectId, view }: { projectId: string; view?
               <span>{it.status || '线索（待验证）'}</span>
               {it.basis != null ? <span className="core-opp-basisline">事实依据：{typeof it.basis === 'string' ? it.basis : JSON.stringify(it.basis)}</span> : null}
               {it.caveats && it.caveats.length ? <span className="core-opp-caveat">限制与待验证：{it.caveats.join('；')}</span> : null}
-              <a className="core-opp-link" href={`/intel?projectId=${encodeURIComponent(projectId)}`}>到情报库核对 →</a>
+              <a className="core-opp-link" href={`/intel?projectId=${encodeURIComponent(projectId)}`}>到每日变化核对 →</a>
             </li>
           ))}
         </ul>
@@ -758,7 +780,7 @@ function OpportunitySkeleton() {
     <div className="core-opp-skeleton" data-testid="opp-skeleton" aria-busy="true" role="status" aria-label="正在汇总机会数据">
       <div className="page-head">
         <div>
-          <h2>机会视图</h2>
+          <h2>市场机会</h2>
           <p className="hint">正在汇总价格、商品与用户声音，先显示已就绪的维度…</p>
         </div>
       </div>
@@ -817,7 +839,7 @@ function OpportunityInner() {
       <div>
         <div className="page-head">
           <div>
-            <h2>机会视图</h2>
+            <h2>市场机会</h2>
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
@@ -857,7 +879,7 @@ function OpportunityInner() {
       <div ref={wrapRef}>
         <div className="page-head">
           <div>
-            <h2>机会视图</h2>
+            <h2>市场机会</h2>
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
@@ -894,7 +916,7 @@ function OpportunityInner() {
       <div ref={wrapRef}>
         <div className="page-head">
           <div>
-            <h2>机会视图</h2>
+            <h2>市场机会</h2>
             <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
           </div>
         </div>
@@ -947,7 +969,7 @@ function OpportunityInner() {
     <div ref={wrapRef}>
       <div className="page-head">
         <div>
-          <h2>机会视图</h2>
+          <h2>市场机会</h2>
           <p className="desc">口碑机会 · 重要但没人做好的地方；卖点空缺来自空白视图。</p>
         </div>
       </div>

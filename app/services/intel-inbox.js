@@ -193,6 +193,7 @@ function rowToEvent(r) {
     subjectId: r.subject_id,
     observedAt: r.observed_at,
     effectiveAt: r.effective_at,
+    recordedAt: r.created_at || null, // r4 §四：入库时间（区别于观察时间/实际发生时间）
     verificationStatus: r.verification_status,
     sourceKind: r.source_kind,
     origin: r.origin,
@@ -244,6 +245,14 @@ function listInbox(q) {
   const limit = Math.max(1, Math.min(Number(o.limit) || 30, 100));
   const where = ["tenant_id=?", 'project_id=?', "origin='monitoring'"]; // 回补/历史不进收件箱
   const params = [tid, pid];
+  // r4 §四.1：竞品监控首页只展示最近 30 天内的当前变化（archive/backfill/report_import
+  // 在写入层已被 origin 门拦截；这里再加观察时间窗，历史事件只进品牌时间线）。
+  // window=none 供测试/审计显式关闭；深链接旧行为（无限历史）不再默认提供。
+  if (String(o.window || '30d') !== 'none') {
+    const days = Math.max(1, Math.min(Number(o.windowDays) || 30, 365));
+    where.push('observed_at>=?');
+    params.push(new Date(Date.now() - days * 86400000).toISOString());
+  }
   if (o.brandId) { where.push('(brand_id=? OR competitor_id=?)'); params.push(String(o.brandId), String(o.brandId)); }
   if (o.dimension && DIMENSIONS.has(String(o.dimension))) { where.push('dimension=?'); params.push(String(o.dimension)); }
   if (o.eventType && EVENT_TYPES.has(String(o.eventType))) { where.push('event_type=?'); params.push(String(o.eventType)); }
@@ -362,7 +371,9 @@ function inboxState(tenantId, projectId, timeZone) {
     baselineCompleted: 0,
     windowCount: 0,
     lastWindowAt: null,
-    lastWindowStatus: null,
+    lastWindowKey: null,
+    lastWindowSlot: null,
+    coverage: null,
     lastSuccessAt: null,
     todayInspected: false,
     todayWindowCount: 0,
@@ -372,7 +383,7 @@ function inboxState(tenantId, projectId, timeZone) {
   try { db = WatchStore.getDb(); } catch (e) { out.state = 'unknown'; return out; }
   let targets = [];
   try {
-    targets = db.prepare(`SELECT watch_target_id, monitoring_status, enabled_signals, baseline_completed_at, last_success_at
+    targets = db.prepare(`SELECT watch_target_id, competitor_id, monitoring_status, enabled_signals, baseline_completed_at, last_success_at
       FROM watch_targets WHERE tenant_id=? AND project_id=?`).all(tid, pid);
   } catch (e) { out.state = 'unknown'; return out; }
   const active = targets.filter(t => t.monitoring_status === 'active' || t.monitoring_status === 'degraded');
@@ -393,12 +404,71 @@ function inboxState(tenantId, projectId, timeZone) {
   const lastSuccess = active.map(t => t.last_success_at).filter(Boolean).sort().pop() || null;
   out.lastSuccessAt = lastSuccess;
   try {
-    const w = db.prepare(`SELECT COUNT(*) AS n, MAX(ended_at) AS last_at, MAX(events_verified) AS ev
+    const w = db.prepare(`SELECT COUNT(*) AS n, MAX(events_verified) AS ev
       FROM monitoring_windows WHERE tenant_id=? AND project_id=? AND status='complete'`).get(tid, pid) || {};
     out.windowCount = Number(w.n || 0);
-    out.lastWindowAt = w.last_at || null;
-    out.lastWindowStatus = out.windowCount ? 'complete' : null;
     out.lastEventsVerified = Number(w.ev || 0);
+    // r4 §六：巡检状态必须使用「最新一个窗口」的真实状态——
+    // 06:00 不完整、后续窗口完整时，首页使用后续完整窗口，06:00 缺口只留在巡检历史；
+    // 最新窗口仍不完整时，如实给出缺口明细，绝不显示「没有变化」。
+    const latest = db.prepare(`SELECT window_key, slot, status, started_at, ended_at, attempted, succeeded, failed, partial_scan, failure_reasons, events_verified
+      FROM monitoring_windows WHERE tenant_id=? AND project_id=?
+      ORDER BY COALESCE(ended_at, scheduled_at) DESC LIMIT 1`).get(tid, pid);
+    if (latest) {
+      out.lastWindowAt = latest.ended_at || latest.started_at || null;
+      out.lastWindowKey = latest.window_key || null;
+      out.lastWindowSlot = latest.slot || null;
+      const nameOf = competitorNames(tid, pid);
+      const winRows = db.prepare(`SELECT watch_target_id, status, attempted, succeeded, failed, failure_reasons
+        FROM monitoring_windows WHERE tenant_id=? AND project_id=? AND window_key=?`).all(tid, pid, latest.window_key);
+      const doneByTarget = new Map();
+      for (const r0 of winRows) if (r0.status === 'complete' && Number(r0.failed || 0) === 0) doneByTarget.set(r0.watch_target_id, r0);
+      const activeTargets = active.map(t => t.watch_target_id);
+      const expected = activeTargets.length;
+      const completed = activeTargets.filter(id => doneByTarget.has(id)).length;
+      const missingTargets = activeTargets.filter(id => !doneByTarget.has(id));
+      const failureRows = winRows.filter(r0 => Number(r0.failed || 0) > 0 || (Number(r0.attempted || 0) > 0 && Number(r0.succeeded || 0) === 0));
+      const covered = expected > 0 && completed === expected;
+      out.lastWindowStatus = covered ? 'complete' : (latest.status !== 'complete' ? latest.status : 'partial');
+      out.lastEventsVerified = winRows.reduce((s0, r0) => s0 + Number(r0.events_verified || 0), 0);
+      if (!covered) {
+        // 缺口明细（同品牌×来源×窗口只计一次；不推断缺失原因）
+        const names = competitorNames(tid, pid);
+        const compOf = {};
+        for (const t of targets) compOf[t.watch_target_id] = t.competitor_id;
+        const missingBrands = [];
+        for (const id of missingTargets) {
+          const bn = nameOf[compOf[id]] || '未知品牌';
+          if (!missingBrands.includes(bn)) missingBrands.push(bn);
+        }
+        const failures = [];
+        for (const r0 of failureRows) {
+          const bn = names[compOf[r0.watch_target_id]] || '未知品牌';
+          if (failures.some(f0 => f0.brandName === bn)) continue;
+          const reasons = safeReasons(r0.failure_reasons);
+          failures.push({ brandName: bn, category: reasons[0].code, categoryText: reasons[0].text, action: 'retry', actionText: '重新巡检' });
+        }
+        let nextRetryAt = null;
+        try {
+          const nr = db.prepare(`SELECT MIN(next_probe_at) AS t FROM watch_intents WHERE tenant_id=? AND project_id=? AND next_probe_at IS NOT NULL`).get(tid, pid);
+          nextRetryAt = (nr && nr.t) || null;
+        } catch (e2) { /* watch_intents 未建表 */ }
+        out.coverage = {
+          complete: false,
+          expected,
+          completed,
+          missingBrands,
+          failures,
+          nextRetryAt,
+          nextRetryText: nextRetryAt ? '缺失项已安排自动重试' : '缺失项将在下一个巡检窗口自动重试',
+        };
+      } else {
+        out.coverage = { complete: true, expected, completed, missingBrands: [], failures: [], nextRetryAt: null, nextRetryText: null };
+      }
+    } else {
+      out.lastWindowAt = null;
+      out.lastWindowStatus = null;
+    }
     // 今日（按产品时区）是否有完成的巡检窗口
     const today = localDateOf(new Date().toISOString(), tz);
     const rows = db.prepare(`SELECT ended_at FROM monitoring_windows
@@ -539,6 +609,10 @@ function inboxState(tenantId, projectId, timeZone) {
     else out.state = out.pausedTargets > 0 ? 'paused' : 'no_monitoring';
   }
   else if (out.windowCount === 0) out.state = 'awaiting_comparison';
+  else if (out.coverage && out.coverage.complete === false) {
+    // r4 §六.5：覆盖不完整绝不生成「没有变化」结论——状态如实落在 partial/failed
+    out.state = out.coverage.completed === 0 ? 'inspection_failed' : 'inspected_partial';
+  }
   else if (out.allFailed) out.state = 'inspection_failed';
   else if (out.partialFailure) out.state = 'inspected_partial';
   else out.state = 'inspected';

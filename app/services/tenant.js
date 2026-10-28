@@ -45,4 +45,61 @@ function login({ email, password }) {
 function getTenant(id) { return db.getTenant(id); }
 function listUsers(tenantId) { return db.listUsers(tenantId).map(publicUser); }
 
-module.exports = { register, login, getTenant, listUsers, publicUser };
+// ---------------- r4 §十：账户资料 / 用户名 / 密码 ----------------
+// displayName 读取优先级：用户显式设置 > 邮箱 @ 前缀（回退）。租户名不冒充用户名。
+function displayNameOf(u) {
+  if (!u) return '';
+  const d = (u.displayName || '').trim();
+  if (d) return d;
+  return String(u.email || '').split('@')[0] || '用户';
+}
+function accountView(tenantId, userId) {
+  const u = db.getUser(userId);
+  if (!u || u.tenantId !== tenantId) return null; // 跨租户/不存在：null（不泄露存在性）
+  const t = db.getTenant(tenantId) || {};
+  let usage = null;
+  try {
+    const metering = require('./metering.js');
+    const daily = metering.dailyDiscoverUsage(tenantId);
+    usage = {
+      plan: t.plan || 'free',
+      dailyDiscover: daily,
+      // 额度按 UTC 日统计，UTC 00:00（北京时间 08:00）重置
+      resetsAtText: '每日 UTC 00:00（北京时间 08:00）重置',
+      note: '当前额度由系统分配', // r4 §十：无真实支付能力，不放「充值/升级」按钮
+    };
+  } catch (e) { usage = null; }
+  return {
+    user: { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt, displayName: displayNameOf(u), displayNameSet: !!(u.displayName || '').trim() },
+    tenant: { id: t.id, name: t.name || '', plan: t.plan || 'free', createdAt: t.createdAt || null },
+    usage,
+  };
+}
+function updateDisplayName(tenantId, userId, displayName) {
+  const u = db.getUser(userId);
+  if (!u || u.tenantId !== tenantId) return { error: 'NOT_FOUND' };
+  const d = String(displayName == null ? '' : displayName).trim();
+  if (!d) return { error: 'NAME_REQUIRED' };
+  if (d.length > 40) return { error: 'NAME_TOO_LONG' };
+  const updated = db.updateUserProfile(userId, { displayName: d });
+  return { ok: true, user: { id: updated.id, email: updated.email, role: updated.role, createdAt: updated.createdAt, displayName: displayNameOf(updated), displayNameSet: true } };
+}
+// 修改密码：校验当前密码 + 新密码强度；成功后凭证版本 +1（其他会话失效）。
+// 错误信息不泄露账户状态；密码本身不出现在任何返回值/日志中。
+function changePassword({ tenantId, userId, currentPassword, newPassword }) {
+  const u = db.getUser(userId);
+  if (!u || u.tenantId !== tenantId) return { error: 'NOT_FOUND' };
+  if (!auth.verifyPassword(String(currentPassword || ''), u.passwordHash)) {
+    auth.verifyPassword(String(newPassword || ''), DUMMY_HASH); // 等耗时假比较
+    return { error: 'INVALID_CREDENTIALS' };
+  }
+  const np = String(newPassword || '');
+  if (np.length < 8) return { error: 'PASSWORD_TOO_SHORT' };
+  if (!/[A-Za-z]/.test(np) || !/[0-9]/.test(np)) return { error: 'PASSWORD_WEAK' };
+  if (np.length > 128) return { error: 'PASSWORD_TOO_LONG' };
+  db.updateUserPassword(userId, auth.hashPassword(np));
+  const updated = db.bumpUserTokenVersion(userId);
+  return { ok: true, tokenVersion: Number(updated.tokenVersion || 0) };
+}
+
+module.exports = { register, login, getTenant, listUsers, publicUser, accountView, updateDisplayName, changePassword, displayNameOf };

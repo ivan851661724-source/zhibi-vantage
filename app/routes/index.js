@@ -24,7 +24,8 @@ const MonitoringH = require('./handlers/monitoring.js');
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
 const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 const DataSurfaceH = require('./handlers/data-surface.js'); // 五维数据面（SC-02）：overview/dimension/refresh/admin matrix
-const CoreH = require('./handlers/core-product.js'); // 核心产品主闭环（SC-04）：竞品库/情报库/机会/报告
+const CoreH = require('./handlers/core-product.js');
+const AccountH = require('./handlers/account.js'); // 核心产品主闭环（SC-04）：竞品库/情报库/机会/报告
 const MemH = require('./handlers/memory.js'); // Competitive Memory（SC-05）：时序事实/时间线/覆盖/回补
 
 function registerAll() {
@@ -146,6 +147,12 @@ function registerAll() {
   registry.register('GET', '/api/first-collection', 'tenant', CoreH.firstCollectionStatus);
   registry.register('POST', '/api/first-collection/retry-failed', 'tenant', CoreH.firstCollectionRetry);
   registry.register('GET', '/api/opportunities', 'tenant', CoreH.opportunities);
+  // r4 §三：工作台「竞品价格观察」卡（真实观察 + 数据覆盖区；不含伪判断）
+  registry.register('GET', '/api/workbench/cards', 'tenant', CoreH.workbenchCards);
+  // r4 §十：账户资料 / 用户名 / 修改密码（邮箱只读；无支付能力不放升级按钮）
+  registry.register('GET', '/api/account', 'tenant', AccountH.accountGet);
+  registry.register('PATCH', '/api/account', 'tenant', AccountH.accountPatch);
+  registry.register('POST', '/api/account/password', 'tenant', AccountH.passwordChange);
   registry.register('GET', '/api/reports', 'tenant', CoreH.reportsList);
   registry.register('POST', '/api/reports', 'tenant', CoreH.reportsCreate);
   registry.register('GET', '/api/reports/:reportId', 'tenant', CoreH.reportDetail);

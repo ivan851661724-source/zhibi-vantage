@@ -24,10 +24,10 @@ function ReportDetailInner() {
       <p className="hint">
         <Link href={projectId ? `/report?projectId=${encodeURIComponent(projectId)}` : '/report'}>← 返回报告列表</Link>
       </p>
-      <h2>调研报告</h2>
+      <h2>分析报告</h2>
       <ReportDetailView reportId={reportId} />
       <p className="hint">
-        发现数据有误？可在 <Link href={projectId ? `/intel?projectId=${encodeURIComponent(projectId)}` : '/intel'}>情报库</Link> 中打开对应证据并提交纠错。
+        发现数据有误？可在 <Link href={projectId ? `/intel?projectId=${encodeURIComponent(projectId)}` : '/intel'}>每日变化</Link> 中打开对应证据并提交纠错。
       </p>
     </div>
   );

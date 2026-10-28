@@ -1,6 +1,6 @@
 // 核心产品主闭环（SC-04）前端契约与请求封装
 // 只暴露用户可见字段：不含服务器路径、内部错误码、栈、密钥、原始 payload 路径。
-import { apiGet, apiPost } from '@/lib/api';
+import { apiGet, apiPatch, apiPost } from '@/lib/api';
 
 // SC-06 r2：pending_verification = 能力已实现但尚无真实成功采集（不得显示「已采集」）
 export type CoverState = 'ok' | 'partial' | 'empty' | 'stale' | 'loading' | 'failed' | 'unsupported' | 'pending_config' | 'pending_verification' | 'unknown';
@@ -696,6 +696,8 @@ export interface InboxEvent {
   subjectId: string | null;
   observedAt: string;
   effectiveAt: string | null;
+  /** r4 §四：系统入库时间（区别于观察时间/实际发生时间） */
+  recordedAt?: string | null;
   verificationStatus: 'verified' | 'pending';
   sourceKind: 'live_observation' | 'derived_event';
   origin: 'monitoring' | 'backfill' | 'history';
@@ -743,6 +745,16 @@ export interface InboxState {
   windowCount: number;
   lastWindowAt: string | null;
   lastWindowStatus: string | null;
+  /** r4 §六：最新巡检窗口覆盖（不完整时必须给缺口明细，绝不显示「没有变化」） */
+  coverage?: {
+    complete: boolean;
+    expected: number;
+    completed: number;
+    missingBrands: string[];
+    failures: Array<{ brandName: string; category: string; categoryText: string; action: string; actionText: string }>;
+    nextRetryAt: string | null;
+    nextRetryText: string | null;
+  } | null;
   lastSuccessAt: string | null;
   todayInspected: boolean;
   todayWindowCount: number;
@@ -873,4 +885,82 @@ export function priceText(o: ProductObservation): string {
   if (o.price == null) return '价格未取到';
   const cur = o.currency ? (o.currency === 'USD' ? '$' : o.currency + ' ') : '';
   return o.currency ? `${cur}${o.price}` : `${o.price}（币种待确认）`;
+}
+
+// ---------- r4 §三：工作台「竞品价格观察」卡（真实观察 + 数据覆盖区） ----------
+export interface WorkbenchEvidenceFirst {
+  evidenceId: string | null;
+  snapshotId: string | null;
+  sourceUrl: string | null;
+  observedAt: string | null;
+}
+export interface WorkbenchObservationCard {
+  cardId: string;
+  kind: 'price_observation';
+  brandId: string | null;
+  competitorId: string | null;
+  brandName: string;
+  currency: string | null;
+  currencyStatus?: string | null;
+  price: { median: number | null; min: number | null; max: number | null };
+  productCount: number;
+  availableCount: number;
+  soldOutCount: number;
+  observedAt: string | null;
+  usingPreviousData: boolean;
+  lastSuccessAt: string | null;
+  source: { label: string; measurementMethod: string };
+  evidence: { count: number; first: WorkbenchEvidenceFirst | null };
+}
+export interface WorkbenchCardsResponse {
+  projectId: string;
+  cards: WorkbenchObservationCard[];
+  market: { currency: string; symbol?: string; min: number; max: number; brandCount: number; basis: string } | null;
+  coverage: {
+    totalBrands: number;
+    observedBrands: number;
+    missingPriceBrands: string[];
+    usingPreviousDataBrands: string[];
+    note: string | null;
+  };
+  error?: string;
+  generatedAt: string;
+}
+export function fetchWorkbenchCards(projectId: string, opts: { fresh?: boolean; signal?: AbortSignal } = {}) {
+  const q = new URLSearchParams();
+  q.set('projectId', projectId);
+  if (opts.fresh) q.set('fresh', '1');
+  return apiGet<WorkbenchCardsResponse>(`/api/workbench/cards?${q.toString()}`, opts.signal);
+}
+
+// ---------- r4 §十：账户资料 / 用户名 / 修改密码 ----------
+export interface AccountView {
+  user: { id: string; email: string; role: string; createdAt: string | null; displayName: string; displayNameSet: boolean };
+  tenant: { id: string; name: string; plan: string; createdAt: string | null };
+  usage: {
+    plan: string;
+    dailyDiscover: { used: number; limit: number; enabled: boolean };
+    resetsAtText: string;
+    note: string;
+  } | null;
+}
+export function fetchAccount(signal?: AbortSignal) {
+  return apiGet<AccountView>('/api/account', signal);
+}
+export function updateDisplayName(displayName: string) {
+  return apiPatch<{ ok: true; user: AccountView['user'] }>('/api/account', { displayName });
+}
+export function changePassword(body: { currentPassword: string; newPassword: string; confirmPassword: string }) {
+  return apiPost<{ ok: true; token: string; message: string }>('/api/account/password', body);
+}
+
+// ---------- r4 §十一：竞品监控（正式监控对象的暂停/恢复/重新检查） ----------
+export function monitoringPause(watchTargetId: string) {
+  return apiPost<{ target?: unknown }>('/api/monitoring/pause', { watchTargetId });
+}
+export function monitoringResume(watchTargetId: string) {
+  return apiPost<{ target?: unknown }>('/api/monitoring/resume', { watchTargetId });
+}
+export function monitoringRecheck(watchTargetId: string) {
+  return apiPost<{ accepted: boolean; duplicate?: boolean }>('/api/monitoring/recheck', { watchTargetId });
 }

@@ -209,12 +209,15 @@ export function wbSignalOf(m: WbMaterial): 'down' | 'up' | 'crisis' | 'new' | 'p
 
 export function wbTypeLabel(m: WbMaterial): string {
   const t = (m.type || '').toLowerCase();
+  // r4 §三：观察/变化材料使用中性标题（「价格观察」不预判涨跌）
+  if (t === 'price-observation') return '价格观察';
+  if (t === 'price-change') return '价格变化';
   if (t.includes('down')) return '跟价 · 降价';
   if (t.includes('up')) return '跟价 · 涨价';
   if (t.includes('launch')) return '上新';
   if (t.includes('channel')) return '新渠道';
   if (t.includes('crisis')) return '口碑 · 差评暴涨';
-  if (t.includes('price')) return '跟价';
+  if (t.includes('price')) return '价格观察';
   return (m.typeLabel as string) || m.type || '信号';
 }
 

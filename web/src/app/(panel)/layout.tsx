@@ -12,10 +12,12 @@ import { wbLoad } from '@/lib/wb';
 import { isDemoMode } from '@/lib/demo';
 import { AlertsCenter } from '@/components/alerts-center';
 import { ProjectPicker } from '@/components/core-ui';
+import { AccountDrawer } from '@/components/account-drawer';
+import { fetchAccount } from '@/lib/core-api';
 
 const NAV_GROUPS: {
   sec: string;
-  items: { href: string; label: string; icon: React.ReactNode }[];
+  items: { href: string; label: string; desc?: string; icon: React.ReactNode }[];
 }[] = [
   {
     sec: 'DAILY OPS · 日常',
@@ -23,13 +25,15 @@ const NAV_GROUPS: {
       {
         href: '/',
         label: '工作台',
+        desc: '今天需要关注和处理的事项',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M3 5h18v14H3zM3 9h18" /><path d="M7 13h4M7 16h4" /></svg>
         ),
       },
       {
         href: '/radar',
-        label: '竞品雷达',
+        label: '竞品监控',
+        desc: '监控哪些品牌、哪些信号、巡检是否完整',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1.6" fill="currentColor" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3" strokeLinecap="round" /></svg>
         ),
@@ -48,21 +52,22 @@ const NAV_GROUPS: {
       },
       {
         href: '/intel',
-        label: '情报库',
+        label: '每日变化',
+        desc: '今天及近期真实发生的竞争变化',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 20V9l8-5 8 5v11" /><path d="M9 20v-6h6v6M9 11h.01M15 11h.01M12 11h.01" strokeLinecap="round" /></svg>
         ),
       },
       {
         href: '/opportunity',
-        label: '机会视图',
+        label: '市场机会',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>
         ),
       },
       {
         href: '/report',
-        label: '调研报告',
+        label: '分析报告',
         icon: (
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 2h9l5 5v15H6z" /><path d="M9 12h6M9 16h6M9 8h2" strokeLinecap="round" /></svg>
         ),
@@ -95,11 +100,11 @@ const NAV_GROUPS: {
 
 const PANEL_TITLES: Record<string, string> = {
   '/': '工作台',
-  '/radar': '竞品雷达',
+  '/radar': '竞品监控',
   '/brands': '竞品数据库',
-  '/intel': '情报库',
-  '/opportunity': '机会视图',
-  '/report': '调研报告',
+  '/intel': '每日变化',
+  '/opportunity': '市场机会',
+  '/report': '分析报告',
   '/sector': '赛道档案',
   '/history': '历史调研',
   '/assets': '算法资产',
@@ -125,7 +130,12 @@ function NavGroups({ projectId, pending, rivals }: { projectId: string | null; p
           {g.items.map((it) => {
             const active = pathname === it.href;
             return (
-              <Link key={it.href} href={withPid(it.href)} className={'nav-item' + (active ? ' active' : '')}>
+              <Link
+                key={it.href}
+                href={withPid(it.href)}
+                className={'nav-item' + (active ? ' active' : '')}
+                title={it.desc || undefined}
+              >
                 {it.icon}
                 <span>{it.label}</span>
                 {it.href === '/' && (
@@ -173,22 +183,37 @@ function SideNavLinks({ pending, rivals }: { pending: number; rivals: number }) 
   return <NavGroups projectId={projectId || null} pending={pending} rivals={rivals} />;
 }
 
+// r4 §十：用户名来自当前登录账号的真实资料（displayName；无则回退邮箱 @ 前缀），
+// 不再固定显示「知彼用户」；点击打开账户抽屉（资料/用量/安全），退出入口移入抽屉。
 function UserRow() {
-  const router = useRouter();
+  const [name, setName] = useState<string | null>(null);
+  const [drawer, setDrawer] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchAccount()
+      .then((a) => { if (alive) setName(a.user.displayName || ''); })
+      .catch(() => { if (alive) setName(null); });
+    return () => { alive = false; };
+  }, [drawer]);
+  const shown = name && name.trim() ? name.trim() : '已登录';
+  const initial = shown && shown !== '已登录' ? shown.slice(0, 1).toUpperCase() : 'V';
   return (
     <div className="user-row">
-      <div className="avatar">V</div>
-      <div className="uinfo"><div className="un">知彼用户</div><div className="ue">已登录</div></div>
       <button
-        className="logout"
         type="button"
-        onClick={() => {
-          clearToken();
-          router.replace('/login');
-        }}
+        className="user-row-btn"
+        aria-haspopup="dialog"
+        aria-expanded={drawer}
+        onClick={() => setDrawer(true)}
+        title="账户设置"
       >
-        退出
+        <div className="avatar">{initial}</div>
+        <div className="uinfo">
+          <div className="un" id="userDisplayName">{shown}</div>
+          <div className="ue">账户设置</div>
+        </div>
       </button>
+      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} onNameChanged={(n) => setName(n)} />
     </div>
   );
 }

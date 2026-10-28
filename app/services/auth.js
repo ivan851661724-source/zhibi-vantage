@@ -90,10 +90,12 @@ function getJwtSecret() {
 }
 
 // ---------------- 会话签发/校验 ----------------
-function issueToken({ userId, tenantId, role, ghost }) {
+// r4 §十：tv = 用户凭证版本（tokenVersion）。修改密码后 +1，
+// 旧 token（其他会话）一律失效；旧 token 无 tv 视为 0，不误伤存量会话。
+function issueToken({ userId, tenantId, role, ghost, tv }) {
   const now = Math.floor(Date.now() / 1000);
   return signJWT(
-    { sub: userId, tid: tenantId, role: role || 'member', ghost: !!ghost, iat: now, exp: now + TOKEN_TTL_SEC },
+    { sub: userId, tid: tenantId, role: role || 'member', ghost: !!ghost, tv: Number(tv || 0), iat: now, exp: now + TOKEN_TTL_SEC },
     getJwtSecret()
   );
 }

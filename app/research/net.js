@@ -89,8 +89,11 @@ function testAssetPath(rawUrl) {
   try { u = new URL(String(rawUrl)); } catch (e) { return null; }
   const host = String(u.hostname || '').toLowerCase();
   if (!host.endsWith(TEST_ASSET_SUFFIX)) return null;
-  const rel = String(u.pathname || '').replace(/^\/+/, '');
-  if (!rel || rel.indexOf('..') >= 0) return null;
+  let rel = String(u.pathname || '').replace(/^\/+/, '');
+  if (rel.indexOf('..') >= 0) return null;
+  // r4 §八：根路径「/」必须可用——否则 website_changed 端到端（两次观察官网首页
+  // HTML 变化）无法在受控资产上穿透。目录路径映射到 index.html。
+  if (!rel || rel.endsWith('/')) rel += 'index.html';
   return require('path').join(root, host, rel);
 }
 function testAssetResponse(rawUrl) {
@@ -100,7 +103,11 @@ function testAssetResponse(rawUrl) {
   try {
     if (!fs.existsSync(fp)) return { status: 404, headers: { 'content-type': 'text/plain' }, buffer: Buffer.from('not found') };
     const buf = fs.readFileSync(fp);
-    return { status: 200, headers: { 'content-type': 'application/json' }, buffer: buf, headersRaw: null };
+    // r4 §八：按扩展名给 content-type（官网首页探测要按 HTML 解析，不能一律 application/json）
+    const ct = /\.json$/i.test(fp) ? 'application/json'
+      : (/\.html?$/i.test(fp) ? 'text/html; charset=utf-8'
+        : (/\.xml$/i.test(fp) ? 'application/xml' : 'application/octet-stream'));
+    return { status: 200, headers: { 'content-type': ct }, buffer: buf, headersRaw: null };
   } catch (e) {
     return { status: 500, headers: { 'content-type': 'text/plain' }, buffer: Buffer.from('test asset read error') };
   }
@@ -136,7 +143,10 @@ async function fetchPage(url, timeoutMs, opts) {
   const tenant = tenantOf(o);
   // SC-06：includeHtml 参与缓存键——先有普通缓存命中再要 HTML 会拿不到原始字节
   const ck = (tenant ? 't:' + tenant + '|' : '') + (o.includeHtml ? 'h1|' : '') + url;
-  const hit = Cache.get('fetch-page', ck);
+  // r4 §八：受控测试资产（*.zb.test）不读也不写缓存——两次观察之间改资产文件
+  // 是 website_changed 端到端的既定测试路径；真实站点语义不变。
+  const noCache = !!testAssetPath(url);
+  const hit = noCache ? null : Cache.get('fetch-page', ck);
   if (hit) return Snapshot.decorateCacheHit(hit);
   const fetchedAt = new Date().toISOString();
   // 旁路记录失败观察（00 §38：fetch_failed ≠ no_change）；业务返回值原样
@@ -211,7 +221,7 @@ async function fetchPage(url, timeoutMs, opts) {
     // 声明 includeHtml；默认不返回（控制既有调用方的内存足迹）。上限 2MB。
     const out = { ok: true, url: current || url, text: stripHtml(html).slice(0, 9000), htmlLower: html.toLowerCase().slice(0, 200000), snapshotId: sid, _prov: prov };
     if (o.includeHtml) out.html = html.slice(0, 2 * 1024 * 1024);
-    Cache.set('fetch-page', ck, out);
+    if (!noCache) Cache.set('fetch-page', ck, out);
     return out;
   } catch (e) {
     const cls = Snapshot.classifyError(e);

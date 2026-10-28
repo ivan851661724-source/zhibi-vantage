@@ -24,7 +24,7 @@ interface ProjectItem {
 function fmtMeta(p: ProjectItem): string {
   const when = p.discoveredAt ? new Date(p.discoveredAt).toLocaleString('zh-CN') : '时间未知';
   const counts = `${p.total != null ? p.total : '—'} 个品牌（${p.done != null ? p.done : '—'} 家已深研）`;
-  return `${when} · ${counts}${p.hasBrief ? ' · 已生成调研报告' : ''}`;
+  return `${when} · ${counts}${p.hasBrief ? ' · 已生成分析报告' : ''}`;
 }
 
 export default function HistoryPage() {

@@ -1,5 +1,5 @@
 'use client';
-// 调研报告页（PRD R6.2）：顶部诚实条（三色横条，点击展开字段清单）+ 报告正文。
+// 分析报告页（r4 §十一）：顶部诚实条（三色横条，点击展开字段清单）+ 报告正文。
 // 数据源：state.brief（POST /api/brief 生成，lib/report 管线产出 evidenceDist + markdown）。
 // F-2（B-4 异步契约）：POST /api/brief 立即回 202 {ok,status:'running'}（401 NO_KEYS /
 // 404 NO_STATE 同步错误仍同步抛）→ 前端轮询 GET /api/state 按 s.briefStatus 分派：
@@ -20,7 +20,7 @@ import type { ZhibiState } from '@/types/state';
 import { ReportPanel } from '@/components/brand/report-panel';
 import { useRouter } from 'next/navigation';
 
-// 正式调研报告（SC-04）：用户显式触发生成；任务持久化可恢复；报告含版本、
+// 正式分析报告（SC-04）：用户显式触发生成；任务持久化可恢复；报告含版本、
 // 生成范围、数据覆盖、事实引用、机会与限制、纠错入口。
 // 🔴 projectId 以 URL 为第一来源（深链接/跳转上下文），state 当前档案兜底。
 function CoreReportsSection({ projectId }: { projectId: string }) {
@@ -28,7 +28,7 @@ function CoreReportsSection({ projectId }: { projectId: string }) {
   if (!projectId) return null;
   return (
     <section className="core-reports-section">
-      <h3>调研报告（正式版）</h3>
+      <h3>分析报告</h3>
       <ReportPanel projectId={projectId} onOpen={(id) => router.push(`/report/${id}?projectId=${encodeURIComponent(projectId)}`)} />
     </section>
   );
@@ -49,7 +49,7 @@ interface Brief {
 
 export default function ReportPage() {
   return (
-    <Suspense fallback={<p className="hint">加载调研报告…</p>}>
+    <Suspense fallback={<p className="hint">加载分析报告…</p>}>
       <ReportInner />
     </Suspense>
   );
@@ -94,13 +94,13 @@ function ReportInner() {
         stopPoll();
         if (!patch(s, operation)) return;
         setBusy(false);
-        setErr(s.briefError || '报告生成失败，请点击「生成调研报告」重试');
+        setErr(s.briefError || '报告生成失败，请点击「生成分析报告」重试');
       } else if (Date.now() - Math.max(Number(s.briefStartedAt) || 0, acceptRef.current) > BRIEF_STALE_MS) {
         // 僵尸态自愈：后端 15 分钟判定只在下一次 POST 时触发，轮询侧先自判——
         // 停轮 + 放开按钮提示重试。不 patch running 态，避免挂载恢复 effect 重启轮询。
         stopPoll();
         setBusy(false);
-        setErr('报告生成超过 15 分钟无结果，疑似中断——请点击「生成调研报告」重试');
+        setErr('报告生成超过 15 分钟无结果，疑似中断——请点击「生成分析报告」重试');
       }
       // running → 继续轮（不 patch，避免每 3s 无谓重渲染）
     } catch {
@@ -147,12 +147,12 @@ function ReportInner() {
   return (
     <div className="report-page">
       <div className="report-head">
-        <h2 className="report-title">调研报告{state && typeof state.track === 'string' && state.track ? <span className="crumb"> / {state.track}</span> : null}</h2>
+        <h2 className="report-title">分析报告{state && typeof state.track === 'string' && state.track ? <span className="crumb"> / {state.track}</span> : null}</h2>
         {brief && brief.generatedAt && (
           <span className="hint">生成于 {new Date(brief.generatedAt).toLocaleString('zh-CN')} · as-of {brief.asOf || '—'}</span>
         )}
         <button className="btn primary" type="button" onClick={generate} disabled={busy || !hasTrack}>
-          {busy ? '生成中…（约 30-60 秒）' : brief ? '重新生成报告' : '生成调研报告'}
+          {busy ? '生成中…（约 30-60 秒）' : brief ? '重新生成报告' : '生成分析报告'}
         </button>
       </div>
 
@@ -165,7 +165,7 @@ function ReportInner() {
       {err && <p className="hint">⚠ {err}</p>}
       {!hasTrack && !loading && <p className="hint">还没有调研数据——先在工作台发起一次赛道调研。</p>}
       {hasTrack && !brief && !busy && !err && (
-        <p className="hint">报告尚未生成。点击上方「生成调研报告」，基于已查实的字段与空白清单装配（每句可溯源，无据不写）。</p>
+        <p className="hint">报告尚未生成。点击上方「生成分析报告」，基于已查实的字段与空白清单装配（每句可溯源，无据不写）。</p>
       )}
 
       {brief && brief.markdown && (

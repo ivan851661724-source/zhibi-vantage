@@ -100,13 +100,26 @@ function computeGroupSignals(competitors, opts) {
   const signals = [];
   Object.keys(byType).forEach(t => {
     const arr = byType[t];
-    if (arr.length >= TH) {
+    // r4 §五：按项目内稳定 competitorId 去重——同一品牌同一趋势类型的
+    // 多条事实只计一个品牌；标题中的「N 家」必须等于去重后的品牌数；
+    // 名称相同但 competitorId 不同的主体不误合并；展开可见该品牌的多条事实。
+    const byBrand = new Map();
+    for (const x of arr) {
+      const key = String(x.competitorId || x.name);
+      if (!byBrand.has(key)) byBrand.set(key, { competitorId: x.competitorId, name: x.name, facts: [] });
+      byBrand.get(key).facts.push({ desc: x.desc || '', when: x.when || null });
+    }
+    const brands = [...byBrand.values()];
+    if (brands.length >= TH) {
       signals.push({
         type: t,
         label: GROUP_LABEL[t] || `${t}动作集中`,
-        count: arr.length,
-        competitors: arr.map(x => x.name),
-        note: `${arr.length} 家同时出现「${TYPE_LABEL[t] || t}」类动作，可能反映赛道级趋势`,
+        count: brands.length,
+        brandCount: brands.length,
+        factCount: arr.length,
+        competitors: brands.map(b => b.name),
+        brands: brands.map(b => ({ competitorId: b.competitorId, name: b.name, factCount: b.facts.length, facts: b.facts })),
+        note: `${brands.length} 家品牌出现「${TYPE_LABEL[t] || t}」类动作（共 ${arr.length} 条事实），可能反映赛道级趋势`,
         kind: 'verified'            // 群体异动由实抓 recentMoves 聚簇，属准
       });
     }

@@ -10,7 +10,10 @@ import { GuideTour, guideNeeded } from '@/components/guide-tour';
 import { WaitlistForm } from '@/components/waitlist-form';
 import { MaterialDrawer } from '@/components/wb-drawer';
 import { apiPost } from '@/lib/api';
-import { fetchBrands, retryFirstCollection, type BrandsHealthSummary } from '@/lib/core-api';
+import {
+  fetchBrands, fetchWorkbenchCards, retryFirstCollection,
+  type BrandsHealthSummary, type WorkbenchCardsResponse, type WorkbenchObservationCard,
+} from '@/lib/core-api';
 import {
   useWbDecisions,
   wbDayGroups,
@@ -69,7 +72,7 @@ function PriceHTML({ m }: { m: WbMaterial }) {
       ) : null}
       {p.range ? (
         <span className="mp-range">
-          市场区间 {wbMoney(p.range.min, cur)} – {wbMoney(p.range.max, cur)}
+          观察到的价格范围 {wbMoney(p.range.min, cur)} – {wbMoney(p.range.max, cur)}
         </span>
       ) : null}
     </div>
@@ -134,17 +137,6 @@ function MaterialCard({
             </div>
           </div>
         ) : null}
-        {m.missingFields && m.missingFields.length ? (
-          <div className="mat-facts">
-            <span className="ev ev-unk" title="这一条判断缺少下列字段；不代表该品牌未采集">
-              这条判断缺：
-              {m.missingFields
-                .map((x) => (x === 'history:60d' ? '历史价 60 天' : x === 'priceRange' ? '价格' : x))
-                .join(' / ')}
-              未采集（≠ 确认没有）
-            </span>
-          </div>
-        ) : null}
       </div>
       <div className="mat-acts">
         <button className="btn-act act-keep" type="button" onClick={() => onSet(m.id, 'keep')}>✓ 收录</button>
@@ -159,6 +151,143 @@ function MaterialCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+// ---------------- r4 §三：竞品价格观察卡（真实观察；无伪判断） ----------------
+function obsMoney(v: number | null | undefined, cur: string | null): string {
+  if (v == null) return '—';
+  const sym = ({ GBP: '£', USD: '$', CNY: '¥', EUR: '€' } as Record<string, string>)[cur || ''] || (cur || '') + ' ';
+  return sym + Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+function obsWhen(iso: string | null | undefined): string {
+  if (!iso) return '时间未记录';
+  try {
+    const mins = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (mins < 60) return mins + ' 分钟前';
+    const h = Math.round(mins / 60);
+    if (h < 24) return h + ' 小时前';
+    return Math.round(h / 24) + ' 天前';
+  } catch { return String(iso).slice(0, 10); }
+}
+
+function ObsCard({ c, decision, onSet, onOpen }: {
+  c: WorkbenchObservationCard;
+  decision: WbAction | undefined;
+  onSet: (id: string, act: WbAction | '') => void;
+  onOpen: (id: string) => void;
+}) {
+  const done = !!decision;
+  const ev = c.evidence;
+  return (
+    <div className={'mat obs' + (done ? ' done' : '')}>
+      <div className="mat-body" style={{ cursor: 'pointer' }} onClick={() => onOpen(c.cardId)}>
+        <div className="mat-top">
+          <span className="mtype mt-price">价格观察</span>
+          <span className="mat-brand">
+            {c.brandName}
+            {c.usingPreviousData ? <span className="burl">沿用上次采集</span> : null}
+          </span>
+          <span className="mat-when">{obsWhen(c.observedAt)}</span>
+        </div>
+        <div className="mat-price">
+          <span className="mp-new num">{obsMoney(c.price.median, c.currency)}</span>
+          {c.price.min != null && c.price.max != null && c.price.min !== c.price.max ? (
+            <span className="mp-range num">{obsMoney(c.price.min, c.currency)} – {obsMoney(c.price.max, c.currency)}</span>
+          ) : null}
+          <span className="mp-range">在售 {c.availableCount} / {c.productCount} 款</span>
+        </div>
+        <div className="mat-facts">
+          <span className="src">{c.source.label}</span>
+          {ev && ev.count ? (
+            <span className="ev ev-ok">已核实{ev.count > 1 ? `（${ev.count} 条观察）` : ''}</span>
+          ) : (
+            <span className="ev ev-unk">未探测</span>
+          )}
+        </div>
+      </div>
+      <div className="mat-acts">
+        <button className="btn-act act-keep" type="button" onClick={() => onSet(c.cardId, 'keep')}>✓ 收录</button>
+        <button className="btn-act act-later" type="button" onClick={() => onSet(c.cardId, 'later')}>稍后处理</button>
+        <button className="btn-act act-drop" type="button" onClick={() => onSet(c.cardId, 'ignore')}>忽略</button>
+      </div>
+      {done ? (
+        <div className="mat-donebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 13l4 4 10-10" strokeLinecap="round" /></svg>
+          <span className="db-text">{decision === 'keep' ? '收录' : decision === 'ignore' ? '忽略' : '稍后'}</span>
+          <span className="undo" role="button" tabIndex={0} onClick={() => onSet(c.cardId, '')}>撤销</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// 观察抽屉：只渲染实际有内容的章节；不展示内部 ID / 内部词表；证据行含来源页/URL/时间/核验。
+function ObsDrawer({ c, onClose }: { c: WorkbenchObservationCard; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const ev = c.evidence;
+  const first = ev && ev.first ? ev.first : null;
+  return (
+    <>
+      <div className="drawer-mask on" onClick={onClose} />
+      <div className="drawer on" aria-hidden="false">
+        <div className="dr-head">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="dr-title">
+              <span className="mtype mt-price">价格观察</span>
+              {c.brandName} <span className="ev ev-ok">已核实</span>
+            </div>
+            <div className="dr-sub">观察于 {obsWhen(c.observedAt)} · 来源 {c.source.label}</div>
+          </div>
+          <button className="dr-close" aria-label="关闭" type="button" onClick={onClose}>✕</button>
+        </div>
+        <div className="dr-body">
+          <div className="sec">
+            <div className="sec-h"><span className="n">1</span>当前价格</div>
+            <div className="sec-b">
+              <div className="price-cmp">
+                <div className="pc-new">
+                  <div className="k">在售商品价格中位数{c.currency ? `（${c.currency}）` : ''}</div>
+                  <div className="v num">{obsMoney(c.price.median, c.currency)}</div>
+                </div>
+              </div>
+              {c.price.min != null && c.price.max != null ? (
+                <p className="hint">观察到的价格范围：{obsMoney(c.price.min, c.currency)} – {obsMoney(c.price.max, c.currency)}（{c.productCount} 款在售商品的实际标价，非市场判断）</p>
+              ) : null}
+              <p className="hint">在售 {c.availableCount} 款 · 缺货/下架 {c.soldOutCount} 款。单次观察不构成涨跌判断。</p>
+            </div>
+          </div>
+          {first ? (
+            <div className="sec">
+              <div className="sec-h"><span className="n">2</span>证据来源 · 逐条可验</div>
+              <div className="sec-b">
+                <div className="src-list">
+                  <div className="src-row">
+                    <span className="ev ev-ok">实抓</span>
+                    <div className="txt">
+                      {first.sourceUrl ? (
+                        <a href={first.sourceUrl} target="_blank" rel="noopener" className="core-text-link">来源页面 ↗</a>
+                      ) : '来源页面'}
+                      <br />
+                      <span className="u">{first.sourceUrl || ''}</span>
+                    </div>
+                    <span className="tier">{first.observedAt ? '观察于 ' + obsWhen(first.observedAt) : ''}</span>
+                  </div>
+                </div>
+                <p className="hint">本次观察共 {ev.count} 条商品级记录，均来自公开商品页实抓（含快照与核验状态）。</p>
+              </div>
+            </div>
+          ) : null}
+        </div>
+        <div className="dr-foot">
+          <button className="btn-act act-keep" type="button" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -184,6 +313,9 @@ function WorkbenchInner() {
   const [stFilter, setStFilter] = useState<(typeof STATE_FILTERS)[number]>('all');
   const [tpFilter, setTpFilter] = useState<string | null>(null);
   const [drawerId, setDrawerId] = useState<string | null>(null);
+  // r4 §三：竞品价格观察卡（真实观察；数据缺口只进「数据覆盖」区）
+  const [wbCards, setWbCards] = useState<WorkbenchCardsResponse | null>(null);
+  const [obsId, setObsId] = useState<string | null>(null);
   const searchParams = useSearchParams();
   const forceOb = searchParams.get('new') === '1';
   // r3 §三：进入工作台即做一次轻量对账（补缺失首采 + 续跑卡住的来源），
@@ -196,6 +328,9 @@ function WorkbenchInner() {
     if (!projectId) return;
     let alive = true;
     apiPost('/api/data-surface/reconcile', { projectId }).catch(() => { /* 对账失败不阻断页面 */ });
+    fetchWorkbenchCards(projectId)
+      .then(r => { if (alive) setWbCards(r); })
+      .catch(() => { /* 观察卡失败不阻断页面；状态保留上一次 */ });
     const load = () => {
       fetchBrands(projectId)
         .then(r => { if (alive) setHealth(r.healthSummary || null); })
@@ -262,6 +397,7 @@ function WorkbenchInner() {
   const groups = useMemo(() => wbDayGroups(ms), [ms]);
   const liveCards = Object.values(discover.cards);
   const drawerMat = drawerId ? msAll.find((m) => m.id === drawerId) : undefined;
+  const obsCard = obsId && wbCards ? wbCards.cards.find((c) => c.cardId === obsId) || null : null;
 
   async function onLookup(name: string) {
     // 移植 app.js lookup()：POST /api/lookup 同步返回最终 state 后刷新
@@ -392,6 +528,34 @@ function WorkbenchInner() {
         </div>
       )}
 
+      {/* r4 §三：竞品价格观察（真实观察卡）+ 数据覆盖（缺口不进行动卡） */}
+      {wbCards && (wbCards.cards.length > 0 || wbCards.coverage.missingPriceBrands.length > 0) ? (
+        <>
+          <div className="wb-sec-head" data-testid="wb-observations">
+            <h3>竞品价格观察</h3>
+            <span className="hint">
+              来自官网在售商品页实抓；单次观察不构成涨跌或趋势判断。
+              {wbCards.market ? `（${wbCards.market.currency} 观察 ${wbCards.market.brandCount} 家：${obsMoney(wbCards.market.min, wbCards.market.currency)} – ${obsMoney(wbCards.market.max, wbCards.market.currency)}）` : ''}
+            </span>
+          </div>
+          <div className="pano-cards">
+            {wbCards.cards.map((c) => (
+              <ObsCard key={c.cardId} c={c} decision={decisions[c.cardId]} onSet={setDecision} onOpen={setObsId} />
+            ))}
+          </div>
+        </>
+      ) : null}
+      {wbCards && wbCards.coverage.missingPriceBrands.length > 0 ? (
+        <div className="core-warn-box" data-testid="wb-coverage" style={{ margin: '8px 0 16px' }}>
+          <b>数据覆盖</b>
+          <p className="hint">{wbCards.coverage.note}</p>
+          <p className="hint">
+            已观察到价格的品牌 {wbCards.coverage.observedBrands} / 项目品牌 {wbCards.coverage.totalBrands}。
+            这些是采集缺口说明，不是判断卡。
+          </p>
+        </div>
+      ) : null}
+
       {/* 材料流 */}
       <div className="workbench-wrap" id="workbenchWrap">
         {msAll.length === 0 ? (
@@ -421,7 +585,10 @@ function WorkbenchInner() {
         )}
       </div>
 
-      {/* 材料详情抽屉（五段式，复刻 openWbDrawer） */}
+      {/* 材料详情抽屉（仅当存在真实材料；观察卡用专用抽屉） */}
+      {obsCard ? (
+        <ObsDrawer c={obsCard} onClose={() => setObsId(null)} />
+      ) : null}
       {drawerMat ? (
         <MaterialDrawer m={drawerMat} decision={decisions[drawerMat.id]} onSet={setDecision} onClose={() => setDrawerId(null)} />
       ) : null}

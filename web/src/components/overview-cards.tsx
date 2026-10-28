@@ -137,8 +137,8 @@ export function OverviewCards({
         <div className="ov-radar-row">持续监测</div>
         <div className="ov-radar-row">数据本地处理 · 结论带来源</div>
         <div className="ov-radar-actions">
-          <Link href="/radar" className="ov-link">竞品雷达 →</Link>
-          <Link href="/intel" className="ov-link">情报库 →</Link>
+          <Link href="/radar" className="ov-link">竞品监控 →</Link>
+          <Link href="/intel" className="ov-link">每日变化 →</Link>
         </div>
       </div>
     </section>

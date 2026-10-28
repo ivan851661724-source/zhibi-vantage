@@ -81,31 +81,70 @@ t('A3 mock/materials.json：用户可见字符串无「对手」', () => {
 });
 
 // ---------- B. 后端生成文案 ----------
-t('B1 material-engine：材料标题用「竞争品牌」，材料契约字段不变', () => {
-  const priceVerdict = {
+// r4 §三 收口：材料引擎只消费真实价格点——
+//   · 无价格点（旧版凭 LLM 区间 + history:60d 缺口出「跟价推算」卡）→ 不出卡；
+//   · 单价格点 → 中性「竞品价格观察」卡；两可比点 → 价格变化卡（old/new/涨跌）；
+//   · missingFields 不再携带 history:60d；id 不用 mat_*；标题不得出现「对手」。
+t('B1 material-engine：数据缺口不出判断卡；真实价格点出观察/变化卡；文案无「对手」', () => {
+  // ① 无价格点 → 0 张卡（旧版会产出 2 张伪卡）
+  const emptyVerdict = {
     missing: false,
     items: [
       { subjectId: 'c1', claim: 'A 价格区间 $20-$40', confidence: 'medium', basis: 'inferred' },
       { subjectId: 'c2', claim: 'B 当前价 $55', confidence: 'low', basis: 'unverified' },
     ],
   };
-  const priceHistory = { c1: [{ at: '2026-10-01T00:00:00Z', display: '$50' }] };
-  const mats = ME.priceFollowRecipe(priceVerdict, { priceHistory });
-  assert.equal(mats.length, 2);
-  assert.equal(mats[0].title, '竞争品牌价格变动', 'changed → 竞争品牌价格变动');
-  assert.equal(mats[1].title, '竞争品牌当前价格', 'unchanged → 竞争品牌当前价格');
-  // 契约不变：schema + 关键字段
-  mats.forEach(m => {
-    assert.equal(m.schema, 'Material@1');
-    assert.equal(m.type, 'price-follow');
-    assert.equal(m.domain, 'price');
+  const emptyMats = ME.priceFollowRecipe(emptyVerdict, { priceHistory: {} });
+  assert.equal(emptyMats.length, 0, '没有真实价格点 → 不产出工作台卡');
+
+  // ② 单价格点 → 价格观察卡
+  const onePoint = {
+    missing: false,
+    items: [
+      { subjectId: 'c1', claim: 'A 当前价 $30', confidence: 'medium', basis: 'inferred',
+        price: { new: 30, old: null, currency: 'USD' }, sources: [{ label: '官网在售商品', url: 'https://a.example.com', tier: 1 }], observedAt: '2026-10-28T06:00:00Z' },
+    ],
+  };
+  const obs = ME.priceFollowRecipe(onePoint, { priceHistory: {} });
+  assert.equal(obs.length, 1);
+  assert.equal(obs[0].type, 'price-observation');
+  assert.equal(obs[0].title, '竞品价格观察');
+  assert.ok(!String(obs[0].id).startsWith('mat_'), 'id 不再用 mat_* 前缀');
+  assert.ok(!obs[0].missingFields.includes('history:60d'), 'history:60d 缺口不进用户载荷');
+  assert.equal(obs[0].inference, null, '无完整输入不渲染推算');
+  assert.equal(obs[0].price.old, null, '单点价格不编造涨跌');
+  assert.equal(obs[0].price.range, null, '单品牌价格不生成市场区间');
+
+  // ③ 两个可比价格点 → 价格变化卡
+  const withHist = {
+    missing: false,
+    items: [Object.assign({}, onePoint.items[0], { price: { new: 24, old: null, currency: 'USD' } })],
+  };
+  const chg = ME.priceFollowRecipe(withHist, {
+    priceHistory: { c1: [{ at: '2026-10-01T00:00:00Z', display: 30, currency: 'USD' }] },
+  });
+  assert.equal(chg.length, 1);
+  assert.equal(chg[0].type, 'price-change');
+  assert.ok(chg[0].title.includes('竞争品牌'), '变化标题以「竞争品牌」开头（禁「对手」）');
+  assert.equal(chg[0].price.old, 30);
+  assert.equal(chg[0].price.new, 24);
+  assert.ok(chg[0].price.deltaPct < 0, '降价 → 负涨幅');
+
+  // ④ 市场区间只在 ≥2 家同币种实抓价时透传
+  const withMarket = ME.priceFollowRecipe(onePoint, { marketContext: { brandCount: 3, currency: 'USD', min: 10, max: 89 } });
+  assert.ok(withMarket[0].price.range && withMarket[0].price.range.marketBrandCount === 3, '≥2 家 → 附市场区间');
+  const noMarket = ME.priceFollowRecipe(onePoint, { marketContext: { brandCount: 1, currency: 'USD', min: 10, max: 10 } });
+  assert.equal(noMarket[0].price.range, null, '单品牌 → 无市场区间');
+
+  // 用户可见文案：标题/正文不出现「对手」
+  const allMats = [].concat(obs, chg);
+  for (const m of allMats) {
+    assert.ok(!String(m.title || '').includes('对手'), '标题无「对手」');
+    assert.ok(!String(m.body || '').includes('对手'), '正文无「对手」');
     for (const k of ['id', 'subjectId', 'title', 'body', 'confidence', 'basis', 'evidenceIds', 'missingFields', 'brand', 'price', 'sources', 'inference', 'at']) {
       assert.ok(k in m, '材料契约字段保留: ' + k);
     }
-  });
-  // 业务结果不变：有历史才标 changed（missingFields 逻辑不动）
-  assert.ok(!mats[0].missingFields.includes('history:60d'), '有历史价不标缺域');
-  assert.ok(mats[1].missingFields.includes('history:60d'), '无历史价仍标缺域');
+  }
 });
 
 // SC-06 r2：机会算法输入改为「统一评论事实链合格条目」（带 polarity + sentimentBasis +
@@ -118,7 +157,6 @@ function qualifiedVoice(competitorId, text, polarity) {
     text, polarity, field: 'public_reviews.verified_item',
     sentimentBasis: 'deterministic_rule', sentimentBasisNote: '来源页面公开评分 + 固定词表规则',
     url: 'https://example.com/reviews/' + competitorId, observedAt: '2026-10-01T00:00:00.000Z',
-    evidenceId: 'ev_' + competitorId, snapshotId: 'snap_' + competitorId,
   };
 }
 

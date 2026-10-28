@@ -37,6 +37,11 @@ function resolveIdentity(req, config, url) {
     if (!payload.ghost) {
       const t = db.getTenant(payload.tid);
       if (t && t.status === 'suspended') return { error: 403, reason: 'TENANT_SUSPENDED' };
+      // r4 §十：修改密码后凭证版本提升 → 其他会话（旧 token）全部失效。
+      const u = db.getUser(payload.sub);
+      if (u && Number(u.tokenVersion || 0) !== Number(payload.tv || 0)) {
+        return { error: 401, reason: 'SESSION_REVOKED' };
+      }
     }
     return { tenantId: payload.tid, userId: payload.sub, role: payload.role, ghost: !!payload.ghost };
   }

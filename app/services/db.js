@@ -98,6 +98,17 @@ function getDb() {
       try { console.error('[db] projects.lastSweepAt 迁移失败:', e && e.message || e); } catch (e2) {}
     }
   }
+  // r4 §十：用户资料（displayName）与凭证版本（tokenVersion）——幂等迁移
+  try { db.exec('ALTER TABLE users ADD COLUMN displayName TEXT'); } catch (e) {
+    if (!/duplicate column|already exists/i.test(String(e && e.message))) {
+      try { console.error('[db] users.displayName 迁移失败:', e && e.message || e); } catch (e2) {}
+    }
+  }
+  try { db.exec('ALTER TABLE users ADD COLUMN tokenVersion INTEGER NOT NULL DEFAULT 0'); } catch (e) {
+    if (!/duplicate column|already exists/i.test(String(e && e.message))) {
+      try { console.error('[db] users.tokenVersion 迁移失败:', e && e.message || e); } catch (e2) {}
+    }
+  }
   // users.email 唯一约束（未来"邀请成员"场景防同邮箱多账号致登录不可分辨；存量有重复时跳过不阻塞启动）
   try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email)'); } catch (e) {
     try { console.warn('[db] users.email 唯一索引未建立（存量数据可能有重复邮箱）:', e && e.message || e); } catch (e2) {}
@@ -182,6 +193,25 @@ function getUserByEmail(email) {
 function listUsers(tenantId) {
   const db = getDb();
   return db.prepare('SELECT * FROM users WHERE tenantId = ?').all(tenantId);
+}
+// r4 §十：用户名（displayName）修改——持久化、按用户隔离，重启不丢
+function updateUserProfile(id, patch) {
+  const p = patch || {};
+  if (p.displayName === undefined) return getUser(id);
+  const db = getDb();
+  db.prepare('UPDATE users SET displayName = ? WHERE id = ?').run(String(p.displayName), String(id || ''));
+  return getUser(id);
+}
+// r4 §十：修改密码后使其他会话失效（凭证版本 +1）
+function bumpUserTokenVersion(id) {
+  const db = getDb();
+  db.prepare('UPDATE users SET tokenVersion = COALESCE(tokenVersion, 0) + 1 WHERE id = ?').run(String(id || ''));
+  return getUser(id);
+}
+function updateUserPassword(id, passwordHash) {
+  const db = getDb();
+  db.prepare('UPDATE users SET passwordHash = ? WHERE id = ?').run(String(passwordHash || ''), String(id || ''));
+  return getUser(id);
 }
 
 // ---------------- projects（按 tenant 硬隔离） ----------------
@@ -316,7 +346,7 @@ module.exports = {
   STORE_PATH,
   bumpDaily, getDaily,
   createTenant, getTenant, getTenantByEmail, setPlan,
-  createUser, getUser, getUserByEmail, listUsers,
+  createUser, getUser, getUserByEmail, listUsers, updateUserProfile, bumpUserTokenVersion, updateUserPassword,
   createProject, listProjects, getProject, saveProject,
   bumpMetering, getMetering,
   listAllTenants, listAllProjects, getProjectById, setTenantStatus,
