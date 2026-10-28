@@ -3635,3 +3635,8 @@ a:hover{text-decoration:none}
 .core-sk-card{height:120px;border-radius:14px}
 .core-sk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:12px}
 @media (prefers-reduced-motion: reduce){.core-sk{animation:none}}
+
+/* r2：有事件时的「部分来源未成功」提示条 */
+.core-inbox-src-banner{margin:0 0 14px;padding:12px 14px;border:1px solid #E7D3A9;background:#FDF7EA;border-radius:12px}
+.core-inbox-src-banner > strong{display:block;font-size:13px;color:#7A5B12;margin-bottom:8px}
+.core-inbox-src-banner .core-inbox-sources{margin:0}

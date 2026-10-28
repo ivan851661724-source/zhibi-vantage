@@ -508,6 +508,22 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
         )
       ) : (
         <div className="core-inbox-groups" data-testid="inbox-groups">
+          {/* r2：有事件时同样必须看到「部分来源未成功」——不得被事件列表掩盖 */}
+          {st && st.sources && (st.sources.failed || 0) > 0 ? (
+            <div className="core-inbox-src-banner" data-testid="inbox-partial-banner">
+              <strong>巡检已完成，但部分来源未成功</strong>
+              <ul className="core-inbox-sources">
+                {(st.sources.items || []).map((it, i) => (
+                  <li key={i}>
+                    <span className="core-inbox-src-brand">{it.brandName}</span>
+                    <span className="core-inbox-src-source">{it.source}</span>
+                    <span className="core-inbox-src-cat">{it.categoryText}</span>
+                    <button type="button" className="core-text-btn" onClick={() => { window.location.href = joinHref; }}>{it.actionText}</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {groups.map(g => (
             <section key={g.date} className="core-inbox-day" data-date={g.date}>
               <h4 className="core-inbox-day-title">{dayLabel(g.date)} <span className="core-inbox-day-raw">{g.date}</span></h4>
