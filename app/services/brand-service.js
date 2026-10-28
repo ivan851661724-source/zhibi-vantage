@@ -1086,7 +1086,11 @@ function cardStatusOfHealth(health) {
   if (h.state === 'available') {
     return { code: 'updated', text: '已有可核验数据', detail: h.note || null, tone: h.tone || 'ok' };
   }
-  const text = HEALTH_CARD_TEXT[h.state] || h.stateText || '采集状态未知';
+  // limited / monitoring 用投影自带的具体说法（如「已加入监控，目前监控官网内容变化」），
+  // 避免卡片只写「仅能监控部分信号」而不说清监控的是什么。
+  const text = (h.state === 'limited' || h.state === 'monitoring')
+    ? (h.stateText || HEALTH_CARD_TEXT[h.state] || '采集状态未知')
+    : (HEALTH_CARD_TEXT[h.state] || h.stateText || '采集状态未知');
   const detail = h.state === 'retryable' || h.state === 'blocked' ? '可在「数据覆盖与来源」查看'
     : (h.note || null);
   return { code: h.state, text, detail, tone: h.tone || null };

@@ -3296,6 +3296,10 @@ a.core-inbox-text:hover{text-decoration:underline}
    不再被挤成「品牌 币种 中位价 区间」连成一句话的两列窄格。 */
 .core-opp-grid{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
 .core-opp-grid > .core-opp-card[data-testid="opp-price-position"]{grid-column:1 / -1}
+/* 主图表独占整行（宽度优先）：半宽时右侧会留出同高的空白，读起来像「少了一块」 */
+.core-opp-grid > .core-opp-card[data-testid="opp-price-bands"]{grid-column:1 / -1}
+/* 空维度压成整行细条，不占用与有效模块同等的格子 */
+.core-opp-grid > .core-opp-card.is-empty{grid-column:1 / -1}
 @media (max-width:760px){.core-opp-grid{grid-template-columns:minmax(0,1fr)}}
 /* 空维度不占与有效模块同等的面积 */
 .core-opp-card.is-empty{padding:10px 14px;background:var(--bg2);border-style:dashed}
