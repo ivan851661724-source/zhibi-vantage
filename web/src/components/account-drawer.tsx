@@ -5,6 +5,7 @@
 // · 修改密码：当前密码 + 强度校验 + 确认新密码；限流提示；成功后用返回的新 token 续签；
 // · Escape / 点击遮罩关闭；焦点圈禁在抽屉内；375/390/1440 不产生横向滚动。
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { clearToken, setToken } from '@/lib/api';
 import { changePassword, fetchAccount, updateDisplayName, type AccountView } from '@/lib/core-api';
 
@@ -112,7 +113,9 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
   const usage = account && account.usage ? account.usage : null;
   const remaining = usage ? Math.max(0, usage.dailyDiscover.limit - usage.dailyDiscover.used) : null;
 
-  return (
+  // r4：经 portal 挂到 body——移动端底栏（fixed + 变换上下文）内的 fixed 抽屉
+  // 会被裁剪成一条细条，portal 根治。
+  return createPortal(
     <>
       <div className="drawer-mask on" onClick={onClose} />
       <div className="drawer on account-drawer" role="dialog" aria-modal="true" aria-label="账户设置">
@@ -202,6 +205,7 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
           ) : null}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
