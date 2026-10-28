@@ -307,11 +307,15 @@ input,select,textarea{font-family:inherit}
 }
 .mat:hover{border-color:var(--line2);transform:translateX(2px)}
 .mat-body{flex:1;min-width:0;cursor:pointer}
-.mat-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+/* r4g §二：标题行单行布局，禁止文字重叠——
+   · mtype 固定不收缩；品牌名 flex:1 + min-width:0 + 单行省略；
+   · 时间 nowrap + flex-shrink:0，与品牌名至少 8px 间距（gap 保证）。 */
+.mat-top{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0}
+.mat-top .mtype{flex-shrink:0}
 .mat-brand{font-size:14.5px;font-weight:700}
-.mat-top .mat-brand{min-width:0;flex:1}
+.mat-top .mat-brand{min-width:0;flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .mat-brand .burl{font-size:11px;color:var(--ink4);font-weight:400;display:block;margin:2px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mat-when{font-size:11px;color:var(--ink4);margin-left:auto;white-space:nowrap}
+.mat-when{font-size:11px;color:var(--ink4);margin-left:8px;white-space:nowrap;flex-shrink:0;min-width:52px;text-align:right}
 .mat-title{font-size:13px;color:var(--ink2);margin-top:5px;line-height:1.55}
 .mat-top .mat-title{margin-top:0}
 .mat-title b{color:var(--ink);font-weight:600}
@@ -326,7 +330,7 @@ input,select,textarea{font-family:inherit}
 .mat-risk{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;color:var(--warn);margin-top:9px;line-height:1.55}
 .mat-risk .rwhy{color:var(--ink4);font-size:11px;font-style:normal}
 .mat-risk svg{width:13px;height:13px;flex-shrink:0;margin-top:2px}
-.mat-acts{display:flex;flex-direction:column;gap:8px;justify-content:center;flex-shrink:0}
+.mat-acts{display:flex;flex-direction:column;gap:8px;justify-content:center;flex-shrink:0;min-width:96px}
 .btn-act{
   display:flex;align-items:center;gap:7px;justify-content:center;font-size:12.5px;font-weight:700;
   padding:8px 16px;border-radius:var(--r-md);border:1px solid transparent;min-width:96px;transition:all .13s;
@@ -3756,3 +3760,26 @@ a:hover{text-decoration:none}
   .side-account svg{width:18px;height:18px}
   .side-account span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 }
+
+/* ============ r4g §三：账户菜单 / 齿轮 / 退出确认 ============ */
+.user-row-btn{display:flex;align-items:center;gap:8px;background:none;border:none;padding:6px 8px;border-radius:10px;cursor:pointer;width:100%;text-align:left;color:inherit}
+.user-row-btn:hover{background:rgba(255,255,255,.06)}
+.user-row-btn .gear{width:15px;height:15px;flex-shrink:0;color:rgba(255,255,255,.55);margin-left:auto}
+.user-row-btn .uinfo{min-width:0;flex:1}
+.user-row-btn .un{font-size:12.5px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.user-row-btn .ue{font-size:10.5px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+.accmenu-mask{position:fixed;inset:0;z-index:1100;background:transparent}
+.accmenu{position:fixed;z-index:1101;min-width:230px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.14);padding:6px}
+.accmenu-item{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;background:none;border:none;padding:9px 12px;border-radius:8px;font-size:13px;color:var(--ink);cursor:pointer;text-align:left}
+.accmenu-item:hover{background:#F4F6F3}
+.accmenu-item .accmenu-hint{font-size:11px;color:var(--ink3)}
+.accmenu-item.is-danger{color:#B4472F;font-weight:600}
+.accmenu-sep{height:1px;background:var(--line);margin:4px 6px}
+.acc-confirm{position:fixed;z-index:1201;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:18px 20px;min-width:280px}
+.acc-confirm p{margin:0 0 14px;font-size:13.5px;color:var(--ink)}
+.acc-confirm-acts{display:flex;gap:8px;justify-content:flex-end}
+
+/* r4g §六.1：监控覆盖摘要条 */
+.mon-totals{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink2);border:1px solid var(--line);border-radius:12px;padding:9px 12px;margin:8px 0;background:var(--panel)}
+.mon-totals b{color:var(--ink);font-variant-numeric:tabular-nums}
+.mon-totals.mon-signals{padding-top:7px;padding-bottom:7px}

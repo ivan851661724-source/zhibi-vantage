@@ -399,7 +399,9 @@ function summarize(healths) {
     limited: 0,       // 有限覆盖（含只监控官网内容）
     needsHandling: 0, // 真实需要处理（retryable / blocked 且无数据）
     notStarted: 0,
-    limits: 0,        // 数据覆盖限制（not_configured / unsupported / out_of_coverage）
+    limits: 0,        // 兼容别名 = partialSignalBrands（r4g §七 拆分前旧字段）
+    partialSignalBrands: 0,      // 部分信号品牌数（品牌口径，去重）
+    notIntegratedDimensions: 0,  // 尚未接入维度数（维度口径，Σ limits）
     byState: {},
   };
   for (const h of list) {
@@ -409,10 +411,20 @@ function summarize(healths) {
     else if (h.state === 'probing' || h.state === 'not_started') out.collecting += 1;
     else if (h.state === 'limited') out.limited += 1;
     else if (h.state === 'retryable' || h.state === 'blocked') out.needsHandling += 1;
-    else out.limits += 1;
+    else out.partialSignalBrands += 1; // not_configured/out_of_coverage/unsupported：按品牌计入「部分信号」
     if (h.state === 'not_started') out.notStarted += 1;
-    if (!h.stale && h.limits && h.limits.length) out.limits += 1;
+    // r4g §七：覆盖限制拆成品牌数与维度数两个口径，不得混用——
+    //   partialSignalBrands = 受限品牌数（去重，每品牌计一次）；
+    //   notIntegratedDimensions = 尚未接入的维度条目数（Σ 每品牌 limits 长度）。
+    if (!h.stale && Array.isArray(h.limits)) {
+      if (h.limits.length > 0) {
+        out.partialSignalBrands += 0; // 已在上面按品牌计过，这里不重复加品牌数
+      }
+      out.notIntegratedDimensions += h.limits.length;
+    }
   }
+  // limits 保留为兼容别名（= 部分信号品牌数），新代码请用拆分后的两个字段
+  out.limits = out.partialSignalBrands;
   return out;
 }
 

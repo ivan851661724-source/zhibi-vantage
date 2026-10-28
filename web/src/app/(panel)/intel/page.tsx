@@ -23,7 +23,7 @@ import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
 import type { SurfaceEvidenceRef } from '@/components/data-surface/types';
 import { EmptyState } from '@/components/core-ui';
 import {
-  fetchBrands, fetchIntelInbox, fetchWatchTargets, inspectWatchTarget,
+  fetchBrands, fetchIntelInbox, fetchWatchTargets, inspectAllTargets, inspectWatchTarget,
   reportIntelEvent, type InboxEvent, type InboxGroup, type InboxState, type InboxSummary,
   type WatchTargetInfo,
 } from '@/lib/core-api';
@@ -146,30 +146,30 @@ function SourceNotice({ items, notes, allBad, joinHref }: {
 }
 
 // ---------- 空态：三种处境 + 真实动作 ----------
-function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, joinHref, lastMsg }: {
+function InboxEmpty({ st, targets, busyId, onInspectAll, onJumpJoin, joinHref, lastMsg, coverageAware }: {
   st: InboxState;
   targets: WatchTargetInfo[];
   busyId: string | null;
-  onInspect: (t: WatchTargetInfo) => void;
+  onInspectAll: () => void;
   onJumpJoin: () => void;
   joinHref: string;
   lastMsg: string | null;
+  coverageAware?: { coveredBrands: number; totalBrands: number; signalCount: number; uncovered: string[] } | null;
 }) {
+  // r4g §六.5：只保留一个项目级巡检按钮（一次巡检全部监控品牌；运行期间禁用）。
+  // 单品牌巡检只保留在竞品监控的对应品牌行。
   const active = targets.filter(t => t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded');
   const common = (
     <div className="core-empty-actions">
       {active.length ? (
-        active.map(t => (
-          <button
-            key={t.watchTargetId}
-            type="button"
-            className="btn-mini"
-            disabled={busyId === t.watchTargetId}
-            onClick={() => onInspect(t)}
-          >
-            {busyId === t.watchTargetId ? '正在巡检…' : '立即巡检'}
-          </button>
-        ))
+        <button
+          type="button"
+          className="btn-mini"
+          disabled={!!busyId}
+          onClick={() => onInspectAll()}
+        >
+          {busyId ? '正在巡检全部监控品牌…' : `立即巡检全部监控品牌（${active.length}）`}
+        </button>
       ) : (
         <button type="button" className="btn-mini" onClick={onJumpJoin}>加入监控</button>
       )}
@@ -265,6 +265,12 @@ function InboxEmpty({ st, targets, busyId, onInspect, onJumpJoin, joinHref, last
   return (
     <div className="core-inbox-empty" data-testid="inbox-empty-inspected" data-empty-state="inspected">
       <h4>{st.todayInspected ? '近 30 天暂无已核实的重要变化。' : '今天还没有巡检'}</h4>
+      {coverageAware ? (
+        <p className="core-brand-muted">
+          在已覆盖的 {coverageAware.coveredBrands}/{coverageAware.totalBrands} 个品牌、{coverageAware.signalCount} 类监控信号中，近 30 天暂无已核实的重要变化。
+          {coverageAware.uncovered && coverageAware.uncovered.length ? `未覆盖：${coverageAware.uncovered.join('、')}——这些来源中的动作可能尚未被观察到。` : '未覆盖来源中的动作可能尚未被观察到。'}
+        </p>
+      ) : null}
       <p>
         {st.todayInspected
           ? `今日已完成 ${st.todayWindowCount} 次巡检；最近一次巡检 ${fmtAt(st.lastWindowAt)}。`
@@ -414,7 +420,35 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
     setDrawerRefs(refs);
   }
 
-  // 立即巡检：真实触发一次监控窗口（后端 202 + 后台执行），完成后重载
+  // r4g §六.5：项目级巡检——一次创建一个批次，对全部 active WatchTarget 排队；
+  // 后端幂等（IN_PROGRESS 沿用同一批次），运行期间按钮禁用并轮询进度。
+  async function doInspectAll() {
+    if (busyId) return;
+    setBusyId('__inspect_all__');
+    setActionMsg(null);
+    try {
+      const r = await inspectAllTargets(projectId);
+      setActionMsg(r.message || '已开始巡检全部监控品牌。');
+      for (let i = 0; i < 12; i++) {
+        await new Promise(res => setTimeout(res, 4000));
+        try {
+          const rr = await load();
+          setSummary(rr.summary || { today: 0, verified: 0, pending: 0, brandsChanged: 0 });
+          setSt(rr.state || null);
+          setTotal(rr.total || 0);
+          mergeGroups(rr.groups || []);
+        } catch (e) { /* 单次失败继续等 */ }
+      }
+      setActionMsg('巡检批次已完成；如发现可核验变化会显示在下方。');
+    } catch (e) {
+      setActionMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+      reloadTargets();
+    }
+  }
+
+  // 单品牌巡检：仅保留给监控页品牌行（intel 页不再逐品牌按钮）
   async function doInspect(t: WatchTargetInfo) {
     if (busyId) return;
     setBusyId(t.watchTargetId);
@@ -460,14 +494,30 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
 
   const hasFilter = !!(brandId || dimension || status || from || to);
   const [brandOptions, setBrandOptions] = useState<[string, string][]>([]);
+  const [brandCount, setBrandCount] = useState(0);
   useEffect(() => {
     if (!projectId) return;
     let alive = true;
     fetchBrands(projectId)
-      .then(r => { if (alive) setBrandOptions((r.brands || []).map(b => [b.brandId, b.name] as [string, string])); })
+      .then(r => {
+        if (!alive) return;
+        setBrandOptions((r.brands || []).map(b => [b.brandId, b.name] as [string, string]));
+        setBrandCount((r.brands || []).length);
+      })
       .catch(() => { /* 品牌清单失败不阻塞收件箱 */ });
     return () => { alive = false; };
   }, [projectId]);
+  // r4g §六.4：空态覆盖感知——已覆盖品牌/项目品牌、信号类别、未覆盖品牌名
+  const coverageAware = useMemo(() => {
+    if (!st) return null;
+    const activeT = (targets || []).filter(t => t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded');
+    const signals = new Set<string>();
+    for (const t of activeT) for (const sg of (t.enabledSignals || [])) signals.add(sg);
+    const coveredIds = new Set(activeT.map(t => t.competitorId));
+    const total = Math.max(brandCount || (targets || []).length, coveredIds.size);
+    const uncovered = (targets || []).filter(t => !(t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded')).map(t => t.competitorId);
+    return { coveredBrands: coveredIds.size, totalBrands: total, signalCount: signals.size, uncovered };
+  }, [st, targets, brandCount]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const activeFilterCount = [brandId, dimension, status, from, to].filter(Boolean).length;
   const joinHref = useMemo(
@@ -554,10 +604,11 @@ function IntelInboxBody({ projectId }: { projectId: string }) {
         ) : st ? (
           <InboxEmpty
             st={st} targets={targets} busyId={busyId}
-            onInspect={doInspect}
+            onInspectAll={doInspectAll}
             onJumpJoin={() => { window.location.href = joinHref; }}
             joinHref={joinHref}
             lastMsg={actionMsg}
+            coverageAware={coverageAware}
           />
         ) : (
           <EmptyState title="正在读取监控状态…" sub="稍后会自动更新。" />

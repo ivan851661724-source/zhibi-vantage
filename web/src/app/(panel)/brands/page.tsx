@@ -165,7 +165,7 @@ function BrandsInner() {
     : fcExecRunning ? '结果会自动更新，无需刷新页面'
       : hs && hs.needsHandling > 0 ? `首轮检查已完成，${hs.needsHandling} 个品牌需要处理`
         : hs && hs.limited > 0 ? `首轮检查已完成，${hs.limited} 个品牌仅能监控部分信号`
-          : hs && hs.limits > 0 ? `首轮检查已完成，${hs.limits} 个品牌受数据覆盖限制`
+          : hs && (hs.partialSignalBrands ?? hs.limits) > 0 ? `首轮检查已完成，${hs.partialSignalBrands ?? hs.limits} 个品牌存在部分信号限制、${hs.notIntegratedDimensions ?? 0} 个维度尚未接入`
             : '数据已齐全';
   useEffect(() => {
     if (!projectId || (!inFlight && !fcRunning)) return;
@@ -258,7 +258,7 @@ function BrandsInner() {
             <span>正在采集 <b>{hs ? hs.collecting : 0}</b></span>
             <span>有限覆盖 <b>{hs ? hs.limited : 0}</b></span>
             <span className={hs && hs.needsHandling > 0 ? 'is-warn' : ''}>需要处理 <b>{hs ? hs.needsHandling : 0}</b></span>
-            <span className="core-fc-limit">覆盖限制 <b>{hs ? hs.limits : 0}</b></span>
+            <span className="core-fc-limit">部分信号品牌 <b>{hs ? (hs.partialSignalBrands ?? hs.limits) : 0} 个</b> · 尚未接入维度 <b>{hs ? (hs.notIntegratedDimensions ?? 0) : 0} 个</b></span>
             {/* SC-12 §四：首页不铺 attempt 级计数（失败/未配置/不覆盖明细属诊断区） */}
             {fc.canRetry ? (
               <button type="button" className="btn-ghost btn-mini" disabled={retrying} onClick={retryFailedItems}>
@@ -279,7 +279,8 @@ function BrandsInner() {
         <div className={'core-stat' + (hs && hs.needsHandling > 0 ? ' is-warn' : '')}>
           <span className="core-stat-num">{hs ? hs.needsHandling : 0}</span><span className="core-stat-label">需要处理</span>
         </div>
-        <div className="core-stat"><span className="core-stat-num">{hs ? hs.limits : 0}</span><span className="core-stat-label">覆盖限制</span></div>
+        <div className="core-stat"><span className="core-stat-num">{hs ? (hs.partialSignalBrands ?? hs.limits) : 0}</span><span className="core-stat-label">部分信号品牌</span></div>
+        <div className="core-stat"><span className="core-stat-num">{hs ? (hs.notIntegratedDimensions ?? 0) : 0}</span><span className="core-stat-label">尚未接入维度</span></div>
       </div>
 
       {/* ③ 统一工具栏 */}

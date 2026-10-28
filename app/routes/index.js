@@ -22,7 +22,8 @@ const DemoH = require('./handlers/demo.js'); // M0-05 Demo 最小 REST
 const IntelligenceH = require('./handlers/intelligence.js');
 const MonitoringH = require('./handlers/monitoring.js');
 const ObsH = require('./handlers/observability.js'); // Phase 1 真实基线：管理统计 + 产品行为事件
-const WatchH = require('./handlers/watch.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
+const WatchH = require('./handlers/watch.js');
+const MonSummaryH = require('./handlers/monitoring-summary.js'); // 正式监控基础：WatchTarget + Coverage + 三态日报
 const DataSurfaceH = require('./handlers/data-surface.js'); // 五维数据面（SC-02）：overview/dimension/refresh/admin matrix
 const CoreH = require('./handlers/core-product.js');
 const AccountH = require('./handlers/account.js'); // 核心产品主闭环（SC-04）：竞品库/情报库/机会/报告
@@ -123,6 +124,10 @@ function registerAll() {
   registry.register('DELETE', '/api/watch-intents/:id', 'tenant', WatchH.deleteIntent);
   registry.register('GET', '/api/digests/daily', 'tenant', WatchH.dailyDigest);
   registry.register('GET', '/api/watch-targets/coverage', 'tenant', WatchH.coverageDay);
+  // r4g §四：监控首页唯一首屏摘要（只读投影；不做外部采集；20s 硬超时 partial）
+  registry.register('GET', '/api/monitoring/summary', 'tenant', MonSummaryH.summary);
+  registry.register('POST', '/api/monitoring/inspect-all', 'tenant', WatchH.inspectAll);
+  registry.register('POST', '/api/monitoring/plan-reconcile', 'tenant', WatchH.planReconcile);
   // —— 五维数据面（SC-02 / 03 §7 扩展；admin 端点对租户 403） ——
   registry.register('GET', '/api/data-surface/overview', 'tenant', DataSurfaceH.overview);
   registry.register('GET', '/api/data-surface/dimension', 'tenant', DataSurfaceH.dimension);

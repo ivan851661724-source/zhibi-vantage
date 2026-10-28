@@ -98,6 +98,9 @@ export interface BrandsHealthSummary {
   needsHandling: number;
   notStarted: number;
   limits: number;
+  /** r4g §七：覆盖限制拆分——品牌数与维度数不得混用 */
+  partialSignalBrands?: number;
+  notIntegratedDimensions?: number;
   byState: Record<string, number>;
 }
 
@@ -457,7 +460,9 @@ export interface OpportunityPriceRow {
   priceComparable?: boolean;
   observedAt: string | null; evidenceIds: string[];
   usingPreviousData?: boolean; lastSuccessAt?: string | null; latestFailureText?: string | null;
-  evidenceRefs?: OpportunityEvidenceRef[];
+  evidenceRefs?: OpportunityEvidenceRef[];  /** r4g §八：是否参与市场统计（ ineligible 行保留展示与证据，不进统计） */
+  priceEligible?: boolean;
+  priceIneligibleReason?: string | null;
 }
 
 export interface OpportunityLead {
@@ -482,7 +487,7 @@ export interface OpportunityFoundation {
     priceBands: {
       available: boolean;
       // §一.5：按币种分组
-      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
+      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; /** r4g §八：原始观察范围（含异常标价行，未参与市场统计） */ rawObservation?: { min: number; max: number; brandCount: number; note: string } | null; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
       bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[];
       currency: string | null;
       multiCurrency: boolean;
@@ -963,4 +968,76 @@ export function monitoringResume(watchTargetId: string) {
 }
 export function monitoringRecheck(watchTargetId: string) {
   return apiPost<{ accepted: boolean; duplicate?: boolean }>('/api/monitoring/recheck', { watchTargetId });
+}
+
+// ---------- r4g §四：监控首页唯一首屏摘要（只读投影；后端 20s 硬超时 partial） ----------
+export interface MonitoringSummaryRow {
+  competitorId: string;
+  name: string;
+  state: 'active' | 'paused' | 'establishing' | 'source_failed' | 'none';
+  signals: string[];
+  signalsText: string;
+  lastSuccessAt: string | null;
+  watchTargetId: string | null;
+  intentId: string | null;
+  note: string | null;
+}
+export interface MonitoringSummary {
+  projectId: string;
+  partial: boolean;
+  partialReason?: string;
+  totals: {
+    projectBrands: number;
+    active: number;
+    paused: number;
+    establishing: number;
+    sourceFailed: number;
+    unmonitored: number;
+    signalCoverage: Record<string, number>;
+  } | null;
+  coverage: {
+    activeTargets: number;
+    pausedTargets: number;
+    signalsText: string;
+    lastWindowAt: string | null;
+    todayInspected: boolean;
+    todayWindowCount: number;
+    coverage: {
+      complete: boolean;
+      expected: number;
+      completed: number;
+      missingBrands: string[];
+      failures: Array<{ brandName: string; category: string; categoryText: string; action: string; actionText: string }>;
+      nextRetryAt: string | null;
+      nextRetryText: string | null;
+    } | null;
+    windowCount: number;
+    sources?: { total: number; ok: number; failed: number; items: Array<{ brandName: string; source: string; categoryText: string; actionText: string }>; notes: Array<{ brandName: string; text: string }>; latestAt: string | null };
+  } | null;
+  healthSummary: {
+    brands: number;
+    accumulating: number;
+    collecting: number;
+    needsAttention: number;
+    limited: number;
+    partialSignalBrands: number;
+    notIntegratedDimensions: number;
+  } | null;
+  rows: MonitoringSummaryRow[];
+  unmonitored: string[];
+  generatedAt: string;
+  elapsedMs?: number;
+}
+export function fetchMonitoringSummary(projectId: string, signal?: AbortSignal) {
+  return apiGet<MonitoringSummary>(`/api/monitoring/summary?projectId=${encodeURIComponent(projectId)}`, signal);
+}
+
+// r4g §六.5：项目级巡检批次（一次巡检全部监控品牌；重复点击幂等）
+export function inspectAllTargets(projectId: string) {
+  return apiPost<{ accepted: number; inProgress: number; skipped: number; batchId: string | null; totalTargets: number; message: string }>('/api/monitoring/inspect-all', { projectId });
+}
+
+// r4g §六.1：监控覆盖计划收敛（把项目内全部竞品纳入监控计划；幂等）
+export function planMonitoringReconcile(projectId: string) {
+  return apiPost<{ ok: boolean; totalBrands: number; createdCount: number; skippedCount: number; failed: number; message: string }>('/api/monitoring/plan-reconcile', { projectId });
 }

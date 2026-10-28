@@ -304,4 +304,141 @@ async function inspectTarget(ctx, req, res, url, p) {
   return true;
 }
 
-module.exports = { createTarget, listTargets, patchTarget, deleteTarget, deleteIntent, dailyDigest, coverageDay, inspectTarget };
+// ---------- POST /api/monitoring/inspect-all（r4g §六.5：项目级巡检批次） ----------
+// 一次对项目全部 active WatchTarget 排队；重复点击时 IN_PROGRESS 目标复用进行中
+// 的窗口（幂等，不重复建批次）。单品牌巡检按钮只保留在竞品监控对应品牌行。
+async function inspectAll(ctx, req, res, url, p) {
+  if (p !== '/api/monitoring/inspect-all' || req.method !== 'POST') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可发起巡检。' }); return true; }
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const projectId = typeof body.projectId === 'string' ? body.projectId.trim().slice(0, 80) : '';
+  if (!projectId) { const e = send400('EMPTY', '缺少 projectId。'); ctx.sendJSON(res, e.code, e.body); return true; }
+  const WS = require('../../services/watch-store.js');
+  const Manual = require('../../services/watch-manual.js');
+  const targets = (WS.listWatchTargets(tid, projectId) || []).filter(t => t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded');
+  if (!targets.length) { ctx.sendJSON(res, 409, { error: 'NO_ACTIVE_TARGETS', message: '项目内还没有正式监控中的品牌，请先加入监控。' }); return true; }
+  let accepted = 0, inProgress = 0, firstWindowKey = null;
+  const windowKeys = [];
+  for (const t of targets) {
+    const r = Manual.startInspect({ tenantId: tid, watchTargetId: t.watchTargetId });
+    if (r.accepted) { accepted++; windowKeys.push(r.windowKey); if (!firstWindowKey) firstWindowKey = r.windowKey; }
+    else if (r.reason === 'IN_PROGRESS') { inProgress++; windowKeys.push(r.windowKey); if (!firstWindowKey) firstWindowKey = r.windowKey; }
+  }
+  ctx.sendJSON(res, 202, {
+    accepted,
+    inProgress,
+    skipped: targets.length - accepted - inProgress,
+    batchId: firstWindowKey || null,
+    totalTargets: targets.length,
+    message: accepted > 0
+      ? `已开始巡检 ${accepted} 个监控品牌${inProgress ? `（${inProgress} 个正在巡检中，沿用同一批次）` : ''}；完成后这里会自动更新。`
+      : '全部监控品牌正在巡检中（同一批次），请稍候。',
+  });
+  return true;
+}
+
+// ---------- POST /api/monitoring/plan-reconcile（r4g §六.1：监控覆盖计划收敛） ----------
+// 对项目内全部竞品确保监控计划存在：已有目标/意向的跳过（不重复创建）；
+// 未覆盖的按真实采集能力派信号（有价格/商品成功采集 → price/launch/stock；
+// 否则走默认建立链，由来源建立过程决定降级），用户移除（inactive）的除外。
+// 只写意向/目标记录，不做外部采集；真实建立由后台任务执行。
+async function planReconcile(ctx, req, res, url, p) {
+  if (p !== '/api/monitoring/plan-reconcile' || req.method !== 'POST') return false;
+  const tid = tidOf(ctx, req);
+  if (!tid) { ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅登录用户可操作。' }); return true; }
+  let body = {};
+  try { body = await ctx.readBody(req) || {}; } catch (e) { body = {}; }
+  const projectId = typeof body.projectId === 'string' ? body.projectId.trim().slice(0, 80) : '';
+  if (!projectId) { const e = send400('EMPTY', '缺少 projectId。'); ctx.sendJSON(res, e.code, e.body); return true; }
+  const fs = require('fs');
+  const { projFile } = require('../../core/state-store.js');
+  const WS = require('../../services/watch-store.js');
+  const WIntent = require('../../services/watch-intent.js');
+  const SurfaceStore = require('../../services/surface-store.js');
+  let comps = [];
+  try {
+    const f = projFile(projectId, tid);
+    const st = JSON.parse(fs.readFileSync(f, 'utf8'));
+    comps = (st.competitors || []).filter(c => c && c.id && !c.removed);
+  } catch (e) { comps = []; }
+  if (!comps.length) { ctx.sendJSON(res, 409, { error: 'NO_COMPETITORS', message: '项目内还没有竞品。' }); return true; }
+  const targets = WS.listWatchTargets(tid, projectId) || [];
+  const targetByComp = new Map(targets.map(t => [t.competitorId, t]));
+  const intents = WIntent.listIntents(tid, projectId) || [];
+  const intentByComp = new Map();
+  for (const i of intents) { if (i.state !== 'cancelled' && i.state !== 'promoted') intentByComp.set(i.competitorId, i); }
+  const BRAND_LINKS = (() => { try { return require('../../services/brand-store.js').listBrandLinksForProject(tid, projectId) || []; } catch (e) { return []; } })();
+  const brandIdOf = new Map(BRAND_LINKS.map(b => [b.competitorRef, b.brandId]));
+
+  // 能力判定：以已有真实采集为准（不猜）
+  const hasCapability = (cid, caps) => {
+    try {
+      const rows = SurfaceStore.listAttemptsByCompetitor(tid, projectId, cid, 30) || [];
+      return caps.some(cap => rows.some(a => a.capability === cap && a.status === 'success' && (a.observations || []).length > 0));
+    } catch (e) { return false; }
+  };
+  // r4g §五：动态 Shopify 平台识别——档案 isShopify=false 不再一票否决。
+  // 实测教训：某项目 15 个品牌全部未判定（实为 13 个 Shopify 店，products.json
+  // 返回真实价格），导致 shopify catalog 全被拒、全部降级 site_change。
+  // 这里对未判定品牌轻量探测一次 /products.json?limit=1（12s 超时）；命中即
+  // 写回品牌档案持久化——之后的采集调度（bootstrapProject）自然按 Shopify 入队，
+  // 同一品牌不再重复探测。探测失败不阻断计划收敛（本次按非 Shopify 处理）。
+  const Net = require('../../research/net.js');
+  const fsMod = require('fs');
+  let identified = 0;
+  try {
+    const statePath = projFile(projectId, tid);
+    let stateDirty = false;
+    for (const c of comps) {
+      if (c.isShopify || !c.url) continue;
+      const probe = await Net.probeShopifyCatalog(c.url, { tenantId: tid });
+      if (probe && probe.ok && probe.shopify) {
+        c.isShopify = true; stateDirty = true; identified += 1;
+      }
+    }
+    if (stateDirty) {
+      const st = JSON.parse(fsMod.readFileSync(statePath, 'utf8'));
+      const byId = new Map(comps.map(c => [c.id, c]));
+      for (const sc of (st.competitors || [])) {
+        const m = byId.get(sc.id);
+        if (m && m.isShopify && !sc.isShopify) sc.isShopify = true;
+      }
+      fsMod.writeFileSync(statePath, JSON.stringify(st));
+    }
+  } catch (e) { /* 识别失败不影响计划收敛；下次再探测 */ }
+
+  const created = []; const skipped = []; let failed = 0;
+  for (const c of comps) {
+    const t = targetByComp.get(c.id);
+    if (t) { skipped.push({ competitorId: c.id, reason: t.monitoringStatus === 'active' || t.monitoringStatus === 'degraded' ? 'already_active' : 'already_tracked' }); continue; }
+    if (intentByComp.has(c.id)) { skipped.push({ competitorId: c.id, reason: 'intent_in_progress' }); continue; }
+    const priceCapable = hasCapability(c.id, ['shopify_catalog', 'public_site_products']) || !!c.isShopify;
+    const signals = priceCapable ? ['price', 'launch', 'stock'] : ['site_change'];
+    try {
+      const r = WIntent.requestIntent({
+        tenantId: tid, projectId, competitorId: c.id, brandId: brandIdOf.get(c.id) || null,
+        reasonCode: 'monitoring_plan_reconcile', reasonText: '监控计划收敛：把项目内竞品纳入正式监控',
+        signals,
+      });
+      if (r && r.error) { failed++; continue; }
+      created.push({ competitorId: c.id, signals });
+    } catch (e) { failed++; }
+  }
+  ctx.sendJSON(res, 200, {
+    ok: true,
+    totalBrands: comps.length,
+    shopifyIdentified: identified,
+    createdCount: created.length,
+    skippedCount: skipped.length,
+    failed,
+    created, skipped,
+    message: (created.length || identified)
+      ? `${identified ? `识别出 ${identified} 个 Shopify 店并已更新采集能力；` : ''}${created.length ? `已把 ${created.length} 个品牌加入监控建立计划，来源建立完成后自动转为正式监控。` : '监控计划已收敛。'}`
+      : '全部竞品都已在监控计划中。',
+  });
+  return true;
+}
+
+module.exports = { createTarget, listTargets, patchTarget, deleteTarget, deleteIntent, dailyDigest, coverageDay, inspectTarget, inspectAll, planReconcile };

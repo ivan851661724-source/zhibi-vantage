@@ -665,4 +665,23 @@ async function fetchShopifyCollections(siteUrl, opts) {
 // 关闭「robots 阶段先于校验形成连接」的 SSRF 绕过（未注入时 fetch-gate 返回 null 即 fail-open）。
 try { FetchGate.setRobotsFetcher(safeRequest); } catch (e) { /* 注入失败不阻断模块加载 */ }
 
-module.exports = { domainOf, stripHtml, isPrivateIp, assertPublicUrl, safeLookup, safeRequest, safeRequestOnce, fetchPage, mapShopifyItems, variantMedian, fetchShopifyProducts, fetchShopifyCollections, COLLECTOR_VERSION, COLLECTIONS_STORE_CAP };
+// r4g §五：轻量平台识别——GET /products.json?limit=1；返回 JSON 且带 products 数组 = Shopify 店。
+// 只在后台采集路径调用（页面 GET 绝不调用）；结果由调用方写回品牌档案持久化，
+// 之后同一品牌不再重复探测。
+async function probeShopifyCatalog(siteUrl, opts) {
+  const o = opts || {};
+  let d;
+  try { d = domainOf(siteUrl); } catch (e) { d = ''; }
+  if (!d) return { ok: false, reason: 'no_domain' };
+  try {
+    await assertPublicUrl(`https://${d}/products.json`);
+    const r = await safeRequest(`https://${d}/products.json?limit=1`, { timeoutMs: 12000 });
+    if (!r || r.status < 200 || r.status >= 300) return { ok: false, reason: 'http:' + (r && r.status) };
+    let j = null;
+    try { j = JSON.parse((r.buffer || Buffer.alloc(0)).toString('utf8')); } catch (e) { return { ok: false, reason: 'not_json' }; }
+    if (j && Array.isArray(j.products)) return { ok: true, shopify: true, sampleCount: j.products.length };
+    return { ok: false, reason: 'no_products' };
+  } catch (e) { return { ok: false, reason: String((e && e.message) || e).slice(0, 60) }; }
+}
+
+module.exports = { domainOf, stripHtml, isPrivateIp, assertPublicUrl, safeLookup, safeRequest, safeRequestOnce, fetchPage, mapShopifyItems, variantMedian, fetchShopifyProducts, fetchShopifyCollections, probeShopifyCatalog, COLLECTOR_VERSION, COLLECTIONS_STORE_CAP };

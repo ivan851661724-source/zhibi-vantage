@@ -10,10 +10,10 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { apiPost } from '@/lib/api';
 import {
-  createWatchTarget, fetchBrands, fetchIntelInbox, fetchWatchTargets,
+  createWatchTarget, fetchMonitoringSummary, planMonitoringReconcile,
   inspectWatchTarget, monitoringPause, monitoringResume,
   retryFirstCollection,
-  type BrandsHealthSummary, type InboxResponse,
+  type MonitoringSummary,
 } from '@/lib/core-api';
 
 const SIGNAL_ZH: Record<string, string> = { price: '价格', launch: '上新', stock: '库存', site_change: '官网内容' };
@@ -48,6 +48,16 @@ function StateBadge({ r }: { r: Row }) {
   }
 }
 
+// r4g §四：summary 的宽松本地类型（后端已组装同口径行，前端不再拼接三接口）
+type InboxLike = {
+  activeTargets?: number; pausedTargets?: number; signalsText?: string;
+  lastWindowAt?: string | null; todayInspected?: boolean; todayWindowCount?: number;
+  coverage?: CovGap | null; windowCount?: number;
+  sources?: { total?: number; ok?: number; failed?: number; items?: Array<{ brandName: string; source: string; categoryText: string; actionText: string }>; notes?: Array<{ brandName: string; text: string }>; latestAt?: string | null };
+};
+type HealthLike = { needsHandling?: number; brands?: number; accumulating?: number; collecting?: number; limited?: number; partialSignalBrands?: number; notIntegratedDimensions?: number };
+type InboxResponse = { state: InboxLike };
+type BrandsHealthSummary = HealthLike;
 interface CovGap {
   complete: boolean;
   expected: number;
@@ -69,8 +79,11 @@ function MonitoringInner() {
   const searchParams = useSearchParams();
   const projectId = searchParams.get('projectId') || '';
   const [rows, setRows] = useState<Row[] | null>(null);
-  const [coverage, setCoverage] = useState<InboxResponse['state'] | null>(null);
-  const [health, setHealth] = useState<BrandsHealthSummary | null>(null);
+  const [coverage, setCoverage] = useState<InboxLike | null>(null);
+  const [health, setHealth] = useState<HealthLike | null>(null);
+  const [partial, setPartial] = useState(false);
+  const [totals, setTotals] = useState<MonitoringSummary['totals']>(null);
+  const [planBusy, setPlanBusy] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -79,61 +92,14 @@ function MonitoringInner() {
     if (!projectId) { setErr('请先选择项目。'); return; }
     setErr(null);
     try {
-      const [wt, brands, inbox] = await Promise.all([
-        fetchWatchTargets(projectId),
-        fetchBrands(projectId),
-        fetchIntelInbox({ projectId, limit: 1 }),
-      ]);
-      setCoverage(inbox.state);
-      setHealth(brands.healthSummary || null);
-      const nameByComp = new Map<string, string>();
-      for (const b of brands.brands || []) {
-        if (b.competitorId) nameByComp.set(b.competitorId, b.name);
-      }
-      const intentByComp = new Map<string, (typeof wt.intents)[number]>();
-      for (const i of wt.intents || []) {
-        if (i.state === 'cancelled') continue;
-        const prev = intentByComp.get(i.competitorId);
-        if (!prev || i.state === 'establishing') intentByComp.set(i.competitorId, i);
-      }
-      const inComp = new Set<string>();
-      const list: Row[] = [];
-      for (const t of wt.targets || []) {
-        inComp.add(t.competitorId);
-        const intent = intentByComp.get(t.competitorId);
-        const st = t.monitoringStatus;
-        const state: Row['state'] = st === 'active' || st === 'degraded' ? 'active' : st === 'paused' ? 'paused' : 'none';
-        list.push({
-          competitorId: t.competitorId,
-          name: nameByComp.get(t.competitorId) || t.competitorId,
-          state,
-          signals: t.enabledSignals || [],
-          signalsText: (t.enabledSignals || []).map(s => SIGNAL_ZH[s] || s).join('、') || '未启用',
-          lastSuccessAt: t.lastSuccessAt || null,
-          watchTargetId: t.watchTargetId,
-          intentId: intent ? intent.intentId : null,
-          note: null,
-        });
-      }
-      for (const i of wt.intents || []) {
-        if (inComp.has(i.competitorId) || i.state === 'cancelled' || i.state === 'promoted') continue;
-        list.push({
-          competitorId: i.competitorId,
-          name: nameByComp.get(i.competitorId) || i.competitorId,
-          state: i.state === 'source_failed' ? 'source_failed' : 'establishing',
-          signals: [],
-          signalsText: '',
-          lastSuccessAt: null,
-          watchTargetId: null,
-          intentId: i.intentId,
-          note: i.reasonText || null,
-        });
-      }
-      list.sort((a, b) => {
-        const rank = (r: Row) => (r.state === 'active' ? 0 : r.state === 'establishing' ? 1 : r.state === 'source_failed' ? 2 : r.state === 'paused' ? 3 : 4);
-        return rank(a) - rank(b) || a.name.localeCompare(b.name);
-      });
-      setRows(list);
+      // r4g §四：首屏只拉一个只读摘要（rows + coverage + healthCounts，~8KB）。
+      // 不再串 brands(122KB) 全量档案；来源详情/历史窗口延迟到点开行时再取。
+      const sum = await fetchMonitoringSummary(projectId);
+      setPartial(!!sum.partial);
+      setCoverage(sum.coverage as unknown as InboxLike);
+      setHealth(sum.healthSummary as unknown as HealthLike);
+      setRows((sum.rows || []) as Row[]);
+      setTotals(sum.totals || null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : '监控状态暂时无法加载。');
     }
@@ -142,6 +108,19 @@ function MonitoringInner() {
   useEffect(() => { load(); }, [load]);
 
   const cov: CovGap | null = (coverage as { coverage?: CovGap | null } | null)?.coverage ?? null;
+
+  // r4g §六.1：把项目内全部竞品纳入监控计划（幂等；来源建立走后台链）
+  const runPlan = async () => {
+    if (planBusy) return;
+    setPlanBusy(true); setMsg(null); setErr(null);
+    try {
+      const r = await planMonitoringReconcile(projectId);
+      setMsg(r.message || '监控计划已收敛。');
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '监控计划收敛未完成，请稍后再试。');
+    } finally { setPlanBusy(false); }
+  };
 
   const act = async (id: string, fn: () => Promise<unknown>, okText: string) => {
     if (busyId) return;
@@ -168,6 +147,28 @@ function MonitoringInner() {
         </div>
       </div>
 
+      {partial ? <p className="hint" data-testid="mon-partial">监控摘要暂时只返回了部分数据（后台仍在汇总），稍后会自动补全。</p> : null}
+      {totals ? (
+        <div className="mon-totals" data-testid="mon-totals">
+          <span>项目品牌 <b>{totals.projectBrands}</b></span>
+          <span>正式监控 <b>{totals.active}</b></span>
+          <span>已暂停 <b>{totals.paused}</b></span>
+          <span>建立中 <b>{totals.establishing}</b></span>
+          <span>来源异常 <b>{totals.sourceFailed}</b></span>
+          {totals.unmonitored > 0 ? (
+            <button type="button" className="btn-mini" disabled={planBusy} onClick={runPlan}>
+              {planBusy ? '正在收敛监控计划…' : `把其余 ${totals.unmonitored} 个品牌纳入监控`}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {totals && totals.signalCoverage && Object.keys(totals.signalCoverage).length ? (
+        <div className="mon-totals mon-signals" data-testid="mon-signals">
+          {Object.entries(totals.signalCoverage).map(([sg, n]) => (
+            <span key={sg}>{SIGNAL_ZH[sg] || sg}信号 <b>{n}</b> 个品牌</span>
+          ))}
+        </div>
+      ) : null}
       {err ? <p className="core-err">{err}</p> : null}
       {msg ? <p className="acc-msg" role="status">{msg}</p> : null}
 
@@ -182,8 +183,8 @@ function MonitoringInner() {
           </span>
           {health ? (
             <>
-              <span>需要处理 <b>{health.needsHandling}</b></span>
-              {health.needsHandling > 0 ? (
+              <span>需要处理 <b>{health.needsHandling ?? 0}</b></span>
+              {(health.needsHandling ?? 0) > 0 ? (
                 <button
                   type="button"
                   className="btn-mini"
@@ -304,12 +305,12 @@ function MonitoringInner() {
         ) : null}
 
         {/* 当前来源异常（真实失败；limited/not_configured 不列失败） */}
-        {coverage && coverage.sources && (coverage.sources.items.length || (coverage.sources.notes || []).length) ? (
+        {coverage && coverage.sources && ((coverage.sources.items || []).length || (coverage.sources.notes || []).length) ? (
           <div className="core-warn-box" data-testid="mon-source-issues" style={{ marginTop: 12 }}>
             <b>当前来源状态</b>
-            {coverage.sources.items.length ? (
+            {(coverage.sources.items || []).length ? (
               <ul>
-                {coverage.sources.items.map((it, i) => (
+                {(coverage.sources.items || []).map((it, i) => (
                   <li key={i}>{it.brandName} · {it.source}：{it.categoryText}（{it.actionText}）</li>
                 ))}
               </ul>

@@ -495,6 +495,10 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
       currency: comparable ? currency : null,
       currencyStatus,
       priceComparable: comparable,
+      // r4g §八：市场统计 eligibility——明确可售 + 币种明确 + 非疑似配件/赠品/异常标价。
+      // 不合格行仍完整进入品牌档案与证据（priceEligible=false 只是排除出市场统计）。
+      priceEligible: false,
+      priceIneligibleReason: null,
       observedAt: (p && p.observedAt) || (c && c.observedAt) || null,
       evidenceRefs: [...(p ? p.evidenceRefs : []), ...(c ? c.evidenceRefs : [])],
       observationCount: p ? p.count : 0,
@@ -504,10 +508,24 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     };
   }).filter(r => r.productCount != null || r.priceMin != null || r.priceMax != null);
 
+  // r4g §八：逐行 eligibility。规则（保守，只排除明确异常）：
+  //   · 明确在售（available 不为 false）；
+  //   · 币种明确（priceComparable）；
+  //   · 非疑似配件/附加商品/异常标价：主价格全部 < $1（或等值）视为异常标价
+  //     （真实手机壳市场不存在 <1 的主商品价；原始观察保留进证据与档案）。
+  for (const r of priceRows) {
+    const lo = r.priceMin != null ? r.priceMin : r.priceMax;
+    const hi = r.priceMax != null ? r.priceMax : r.priceMin;
+    if (r.available === false) { r.priceEligible = false; r.priceIneligibleReason = 'no_active_listing'; continue; }
+    if (!r.priceComparable) { r.priceEligible = false; r.priceIneligibleReason = 'currency_unknown'; continue; }
+    if (lo != null && hi != null && hi < 1) { r.priceEligible = false; r.priceIneligibleReason = 'suspected_accessory_or_abnormal'; continue; }
+    r.priceEligible = true;
+  }
+
   // ---------------- 按币种分组（§一.5） ----------------
   const groupsByCurrency = {};
   for (const r of priceRows) {
-    if (!r.priceComparable || !r.currency) continue;
+    if (!r.priceComparable || !r.currency || !r.priceEligible) continue; // r4g §八：市场统计只吃 eligible 行
     if (!groupsByCurrency[r.currency]) groupsByCurrency[r.currency] = [];
     groupsByCurrency[r.currency].push(r);
   }
@@ -531,9 +549,20 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     const medians = rows.filter(r => r.priceMedian != null).map(r => r.priceMedian).sort((a, b) => a - b);
     // §一：只有**同币种**且 ≥3 个品牌才允许计算项目中位数
     const median = medians.length >= 3 ? medianOfSorted(medians) : null;
+    // r4g §八：原始观察范围（含未参与统计的异常行）如实保留展示，不删除事实
+    const allCur = priceRows.filter(r => r.currency === currency && r.priceComparable);
+    const rawVals = allCur.flatMap(r => [r.priceMin, r.priceMax].filter(v => v != null));
+    const rawMin = rawVals.length ? Math.min(...rawVals) : null;
+    const rawMax = rawVals.length ? Math.max(...rawVals) : null;
+    const rawCount = allCur.length;
+    const statCount = rows.length;
     return {
       currency, symbol: currencySymbol(currency),
-      brandCount: rows.length,
+      brandCount: statCount,
+      rawObservation: (rawCount > statCount && rawMin != null && rawMax != null) ? {
+        min: rawMin, max: rawMax, brandCount: rawCount,
+        note: `原始观察范围：${currencySymbol(currency)}${rawMin.toFixed(2)}–${currencySymbol(currency)}${rawMax.toFixed(2)}。其中包含疑似配件、附加商品或异常标价，尚未用于市场机会结论。`,
+      } : null,
       rows, bands,
       medianPrice: median,
       medianSampleSize: medians.length,

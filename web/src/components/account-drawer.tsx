@@ -25,7 +25,9 @@ function fmtDate(iso: string | null | undefined): string {
   try { return new Date(iso).toLocaleDateString('zh-CN'); } catch { return String(iso).slice(0, 10); }
 }
 
-export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean; onClose: () => void; onNameChanged?: (name: string) => void }) {
+export type AccSection = 'profile' | 'usage' | 'security';
+
+export function AccountDrawer({ open, onClose, onNameChanged, focusSection }: { open: boolean; onClose: () => void; onNameChanged?: (name: string) => void; focusSection?: AccSection }) {
   const [account, setAccount] = useState<AccountView | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -38,6 +40,8 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
   const [pwErr, setPwErr] = useState<string | null>(null);
   const [pwBusy, setPwBusy] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // r4g §三：从账户菜单进入时滚动/聚焦到对应区块（同一抽屉，无第二套设置页）
+  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
     if (!open) return;
@@ -46,6 +50,14 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
       .then((a) => { setAccount(a); setName(a.user.displayName || ''); })
       .catch(() => setLoadErr('账户资料暂时无法加载，请稍后重试。'));
   }, [open]);
+  useEffect(() => {
+    if (!open || !focusSection) return;
+    const t = setTimeout(() => {
+      const el = sectionRefs.current[focusSection];
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
+    return () => clearTimeout(t);
+  }, [open, focusSection]);
 
   // Escape 关闭 + 简易焦点圈禁（Tab 循环在抽屉内）
   useEffect(() => {
@@ -130,7 +142,7 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
           {loadErr ? <p className="core-err">{loadErr}</p> : null}
           {account ? (
             <>
-              <div className="sec">
+              <div className="sec" ref={(el) => { sectionRefs.current['profile'] = el; }}>
                 <div className="sec-h"><span className="n">1</span>账户资料</div>
                 <div className="sec-b acc-form">
                   <label className="acc-row">
@@ -155,7 +167,7 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
                 </div>
               </div>
 
-              <div className="sec">
+              <div className="sec" ref={(el) => { sectionRefs.current['usage'] = el; }}>
                 <div className="sec-h"><span className="n">2</span>用量与套餐</div>
                 <div className="sec-b">
                   {usage ? (
@@ -172,7 +184,7 @@ export function AccountDrawer({ open, onClose, onNameChanged }: { open: boolean;
                 </div>
               </div>
 
-              <div className="sec">
+              <div className="sec" ref={(el) => { sectionRefs.current['security'] = el; }}>
                 <div className="sec-h"><span className="n">3</span>账户安全</div>
                 <div className="sec-b acc-form">
                   <label className="acc-row">

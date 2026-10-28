@@ -73,7 +73,10 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
             <>
               {price.groups.map(g => (
                 <div key={g.currency} className="core-opp-cur-group">
-                  <p className="core-opp-cur-title">{g.currency} · {g.brandCount} 个品牌{g.medianPrice != null ? ` · 中位价 ${g.medianPrice}` : ''}</p>
+                  <p className="core-opp-cur-title">{g.currency} · {g.brandCount} 个品牌参与统计{g.medianPrice != null ? ` · 中位价 ${g.medianPrice}` : ''}</p>
+                  {g.rawObservation ? (
+                    <p className="hint" data-testid="opp-raw-observation">{g.rawObservation.note}</p>
+                  ) : null}
                   {g.bandsAvailable ? (
                     <ul className="core-opp-bands">
                       {g.bands.map(b => {

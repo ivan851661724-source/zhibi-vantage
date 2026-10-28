@@ -25,6 +25,7 @@ const { DatabaseSync } = require('node:sqlite');
 const SurfaceStore = require('./surface-store.js');
 const Registry = require('./capability-registry.js');
 const Adapters = require('./source-adapter.js');
+const Net = require('../research/net.js');
 
 // SC-05：采集成功后追加写入 Competitive Memory。
 // 🔴 只在「attempt 已落终态、Evidence/Snapshot 已齐备」之后调用——复用既有真值，
@@ -287,7 +288,6 @@ async function executeJob(job) {
     trigger: job.trigger, attemptId: job.attemptId, fence,
   };
   const brandCtx = { url: comp.url || '', isShopify: !!comp.isShopify };
-
   // 🔴 复审 §二/§七：统一 provider-run 执行器。
   //   provider 运行（suppressTerminal=true）只产出结构化结果，**不写 attempt 终态、
   //   不升级 identity**；执行器是唯一终态写入者：

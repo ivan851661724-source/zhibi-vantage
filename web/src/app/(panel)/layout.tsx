@@ -3,7 +3,8 @@
 // 复刻 index.html：side-nav（logo + DAILY OPS/INTELLIGENCE/SYSTEM 三组导航 + 用户区）+ topbar。
 // 徽章：navRivals = competitors.length（对齐 app.js updateWbBadges L1665-1666）；
 //       navPending = 未决策材料数（三动作 localStorage 记录属 Phase 2 工作台，暂以材料总数展示）。
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { clearToken, getToken } from '@/lib/api';
@@ -12,7 +13,7 @@ import { wbLoad } from '@/lib/wb';
 import { isDemoMode } from '@/lib/demo';
 import { AlertsCenter } from '@/components/alerts-center';
 import { ProjectPicker } from '@/components/core-ui';
-import { AccountDrawer } from '@/components/account-drawer';
+import { AccountDrawer, type AccSection } from '@/components/account-drawer';
 import { fetchAccount } from '@/lib/core-api';
 
 const NAV_GROUPS: {
@@ -171,6 +172,7 @@ function SideNav() {
       </Suspense>
       {/* r4 §十：移动端（≤820px 侧栏转底栏）原本没有账户入口——补一个「账户」标签 */}
       <MobileAccountButton />
+
       <div className="side-foot">
         <div className="plan-pill"><span className="dot"></span><span id="planStatus">雷达运行中</span></div>
         <UserRow />
@@ -187,60 +189,138 @@ function SideNavLinks({ pending, rivals }: { pending: number; rivals: number }) 
 
 // r4 §十：用户名来自当前登录账号的真实资料（displayName；无则回退邮箱 @ 前缀），
 // 不再固定显示「知彼用户」；点击打开账户抽屉（资料/用量/安全），退出入口移入抽屉。
-// 移动端底部栏的账户入口（桌面隐藏；点击打开账户抽屉）
+// 移动端底部栏「账户」入口（§三.7：固定文字，不显示截断用户名；点击打开账户抽屉）
 function MobileAccountButton() {
-  const [name, setName] = useState('');
   const [drawer, setDrawer] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    fetchAccount()
-      .then((a) => { if (alive) setName(a.user.displayName || '账户'); })
-      .catch(() => { if (alive) setName('账户'); });
-    return () => { alive = false; };
-  }, [drawer]);
   return (
     <>
       <button type="button" className="side-account" aria-haspopup="dialog" onClick={() => setDrawer(true)}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="8" r="3.4" /><path d="M5 20c1.2-3.4 4-5 7-5s5.8 1.6 7 5" strokeLinecap="round" /></svg>
-        <span>{name || '账户'}</span>
+        <span>账户</span>
       </button>
-      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} onNameChanged={(n) => setName(n)} />
+      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} />
     </>
   );
 }
 
+// ---------------- r4g §三：侧栏账户入口（常见 SaaS 模式） ----------------
+// 整行：头像 + displayName + 邮箱次级文字 + 设置齿轮；点击在入口上方弹出菜单
+//（账户设置 / 用量与套餐 / 修改密码 / 退出登录），菜单项打开同一账户抽屉（无第二套设置页）。
 function UserRow() {
-  const [name, setName] = useState<string | null>(null);
+  const [acc, setAcc] = useState<{ name: string; email: string } | null>(null);
+  const [menu, setMenu] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [focusSection, setFocusSection] = useState<AccSection | undefined>(undefined);
+  const [confirmOut, setConfirmOut] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const [anchor, setAnchor] = useState<{ left: number; bottom: number } | null>(null);
   useEffect(() => {
     let alive = true;
     fetchAccount()
-      .then((a) => { if (alive) setName(a.user.displayName || ''); })
-      .catch(() => { if (alive) setName(null); });
+      .then((a) => { if (alive) setAcc({ name: a.user.displayName || '', email: a.user.email || '' }); })
+      .catch(() => { if (alive) setAcc(null); });
     return () => { alive = false; };
-  }, [drawer]);
-  const shown = name && name.trim() ? name.trim() : '已登录';
-  const initial = shown && shown !== '已登录' ? shown.slice(0, 1).toUpperCase() : 'V';
+  }, [menu, drawer]);
+  const shown = acc && acc.name.trim() ? acc.name.trim() : '已登录';
+  const initial = shown !== '已登录' ? shown.slice(0, 1).toUpperCase() : 'V';
+  const openSection = (sec: AccSection) => { setMenu(false); setFocusSection(sec); setDrawer(true); };
   return (
-    <div className="user-row">
+    <div className="user-row" style={{ position: 'relative' }}>
       <button
+        ref={btnRef}
         type="button"
         className="user-row-btn"
-        aria-haspopup="dialog"
-        aria-expanded={drawer}
-        onClick={() => setDrawer(true)}
-        title="账户设置"
+        aria-haspopup="menu"
+        aria-expanded={menu}
+        title={acc ? (shown + ' · ' + acc.email) : '账户菜单'}
+        onClick={() => {
+          const r = btnRef.current ? btnRef.current.getBoundingClientRect() : null;
+          setAnchor(r ? { left: Math.max(8, Math.min(r.left, (window.innerWidth || 1440) - 246)), bottom: (window.innerHeight || 900) - r.top + 8 } : null);
+          setMenu((v) => !v);
+        }}
       >
         <div className="avatar">{initial}</div>
         <div className="uinfo">
-          <div className="un" id="userDisplayName">{shown}</div>
-          <div className="ue">账户设置</div>
+          <div className="un">{shown}</div>
+          <div className="ue">{acc ? acc.email : '已登录'}</div>
         </div>
+        <svg className="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1z" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
-      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} onNameChanged={(n) => setName(n)} />
+      {menu ? (
+        <AccountMenu
+          anchor={anchor}
+          onSection={openSection}
+          onLogout={() => { setMenu(false); setConfirmOut(true); }}
+          onClose={() => setMenu(false)}
+        />
+      ) : null}
+      {confirmOut ? (
+        <LogoutConfirm
+          onCancel={() => setConfirmOut(false)}
+          onOk={() => { clearToken(); window.location.href = '/login'; }}
+        />
+      ) : null}
+      <AccountDrawer open={drawer} onClose={() => setDrawer(false)} onNameChanged={(n) => setAcc((a) => a ? { ...a, name: n } : a)} focusSection={focusSection} />
     </div>
   );
 }
+
+// 入口上方弹出的账户菜单（portal 到 body，Escape/遮罩关闭）
+function AccountMenu({ anchor, onSection, onLogout, onClose }: {
+  anchor: { left: number; bottom: number } | null;
+  onSection: (s: AccSection) => void;
+  onLogout: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const item = (label: string, hint: string, act: () => void, k: string) => (
+    <button key={k} type="button" className="accmenu-item" onClick={act}>
+      <span>{label}</span>
+      <span className="accmenu-hint">{hint}</span>
+    </button>
+  );
+  return createPortal(
+    <>
+      <div className="accmenu-mask" onClick={onClose} />
+      <div className="accmenu" ref={ref} role="menu" aria-label="账户菜单"
+        style={anchor ? { left: anchor.left, bottom: anchor.bottom } : undefined}>
+        {item('账户设置', '资料与团队', () => onSection('profile'), 'a')}
+        {item('用量与套餐', '当前额度', () => onSection('usage'), 'b')}
+        {item('修改密码', '账户安全', () => onSection('security'), 'c')}
+        <div className="accmenu-sep" />
+        <button type="button" className="accmenu-item is-danger" onClick={onLogout}>
+          <span>退出登录</span>
+        </button>
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+// 退出确认（防误触）：小对话框，明确两次操作
+function LogoutConfirm({ onOk, onCancel }: { onOk: () => void; onCancel: () => void }) {
+  return createPortal(
+    <div className="accmenu-mask" onClick={onCancel} style={{ zIndex: 1200 }}>
+      <div className="acc-confirm" role="alertdialog" aria-label="退出登录确认" onClick={(e) => e.stopPropagation()}>
+        <p>确定要退出登录吗？</p>
+        <div className="acc-confirm-acts">
+          <button type="button" className="btn-mini" onClick={onCancel}>取消</button>
+          <button type="button" className="btn-mini acc-logout" onClick={onOk}>退出</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 
 function TopBar() {
   const pathname = usePathname();
