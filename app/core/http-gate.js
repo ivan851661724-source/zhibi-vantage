@@ -16,7 +16,15 @@ function getAuthPayload(req, url, pathname) {
     if (m) {
       const token = m[1].trim();
       const t = Auth.verifyToken(token);
-      if (t) return { kind: 'tenant', payload: t };
+      if (t) {
+        // r4 §十：凭证版本校验（与 tenantScope.resolveIdentity 同口径）——
+        // 修改密码后 tokenVersion 提升，旧 token（其他会话）在此处一律失效。
+        try {
+          const dbu = require('../services/db.js').getUser(t.sub);
+          if (dbu && Number(dbu.tokenVersion || 0) !== Number(t.tv || 0)) return null;
+        } catch (e) { /* db 不可用时按验签结果放行（与旧行为一致） */ }
+        return { kind: 'tenant', payload: t };
+      }
       const a = Auth.verifyAdminToken(token);
       if (a) return { kind: 'admin', payload: a };
       return null;
@@ -28,7 +36,13 @@ function getAuthPayload(req, url, pathname) {
     const qt = url.searchParams.get('token') || url.searchParams.get('access_token');
     if (qt) {
       const t = Auth.verifyToken(String(qt).trim());
-      if (t) return { kind: 'tenant', payload: t };
+      if (t) {
+        try {
+          const dbu = require('../services/db.js').getUser(t.sub);
+          if (dbu && Number(dbu.tokenVersion || 0) !== Number(t.tv || 0)) return null;
+        } catch (e) { /* 同上 */ }
+        return { kind: 'tenant', payload: t };
+      }
     }
   }
   return null;
