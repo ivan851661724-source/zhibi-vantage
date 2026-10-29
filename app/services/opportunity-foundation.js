@@ -108,6 +108,23 @@ function medianOfSorted(sorted) {
   return sorted.length % 2 ? sorted[m] : round2((sorted[m - 1] + sorted[m]) / 2);
 }
 
+// 市场统计只排除明确异常的单条标价，原始观察仍保留在 Snapshot/Evidence 和品牌档案。
+// 这与“删除异常数据”不同：调用方同时拿到 raw 与 eligible 两套计数和范围。
+function priceSampleStats(values) {
+  const raw = (Array.isArray(values) ? values : []).map(num).filter(v => v != null).sort((a, b) => a - b);
+  const eligible = raw.filter(v => v >= 1);
+  return {
+    raw,
+    eligible,
+    rawMin: raw.length ? raw[0] : null,
+    rawMax: raw.length ? raw[raw.length - 1] : null,
+    min: eligible.length ? eligible[0] : null,
+    median: eligible.length ? medianOfSorted(eligible) : null,
+    max: eligible.length ? eligible[eligible.length - 1] : null,
+    excludedCount: raw.length - eligible.length,
+  };
+}
+
 // user-safe：把内部失败分类映射为可展示短状态（不出现内部码）
 const FAILURE_USER_TEXT = Object.freeze({
   blocked: '来源拒绝了本次访问',
@@ -210,14 +227,18 @@ function collectBrandFacts(tenantId, projectId, compId, brandId) {
   const pa = pairP.lastUsable;
   if (pa) {
     const obs = Array.isArray(pa.observations) ? pa.observations : [];
-    const prices = obs.map(o => num(o && o.price)).filter(v => v != null);
+    const rawPrices = obs.map(o => num(o && o.price)).filter(v => v != null);
+    // 已明确售罄的商品不进入“当前市场价格”统计，但原始标价仍保留。
+    const prices = obs.filter(o => o && o.available !== false).map(o => num(o.price)).filter(v => v != null);
     // §一.1：价格必须保留并校验明确 ISO 币种；多币种/未知币种不拼成 "USD/EUR"
     const cs = currencyStatusOf(obs.map(o => (o && o.currency) || null));
     out.products = {
       count: obs.length,
       available: obs.filter(o => o && o.available === true).length,
       soldOut: obs.filter(o => o && o.available === false).length,
+      availabilityObserved: obs.some(o => o && typeof o.available === 'boolean'),
       prices: cs.status === 'confirmed' ? prices : [],   // 币种不明时不参与价格计算
+      rawPrices: cs.status === 'confirmed' ? rawPrices : [],
       currency: cs.currency,
       currencyStatus: cs.status,
       observedAt: pa.endedAt || pa.startedAt || null,
@@ -482,16 +503,30 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
 
     const comparable = currencyStatus === 'confirmed' && isIsoCurrency(currency);
     const prices = p && p.currencyStatus === 'confirmed' ? p.prices : [];
+    const rawPrices = p && p.currencyStatus === 'confirmed' ? (p.rawPrices || p.prices || []) : [];
+    const samples = priceSampleStats(prices);
+    const rawSamples = priceSampleStats(rawPrices);
+    // 有逐商品观察时，市场统计必须以逐商品样本为准；目录级 min/max 仅作为没有明细时的回退。
+    const hasObservedPrices = rawSamples.raw.length > 0;
+    const fallbackMin = c && c.priceMin != null ? c.priceMin : null;
+    const fallbackMedian = c && c.priceMedian != null ? c.priceMedian : null;
+    const fallbackMax = c && c.priceMax != null ? c.priceMax : null;
     return {
       brandId: b.brandId, name: b.name, competitorId: b.competitorId,
       productCount: c && c.productCount != null ? c.productCount : (p ? p.count : null),
       available: p ? p.available : null,
       soldOut: p ? p.soldOut : null,
+      availabilityObserved: !!(p && p.availabilityObserved),
       // 币种不明确 → 价格三值一律 null（不猜测、不换算）
-      priceMin: comparable ? (c && c.priceMin != null ? c.priceMin : (prices.length ? Math.min(...prices) : null)) : null,
-      priceMedian: comparable ? (c && c.priceMedian != null ? c.priceMedian
-        : (prices.length ? medianOfSorted(prices.slice().sort((x, y) => x - y)) : null)) : null,
-      priceMax: comparable ? (c && c.priceMax != null ? c.priceMax : (prices.length ? Math.max(...prices) : null)) : null,
+      priceMin: comparable ? (hasObservedPrices ? samples.min : fallbackMin) : null,
+      // 目录中位数是既有时序 Metric；单条异常低价只影响边界，不覆盖这项已核验聚合值。
+      priceMedian: comparable ? (fallbackMedian != null ? fallbackMedian : samples.median) : null,
+      priceMax: comparable ? (hasObservedPrices ? samples.max : fallbackMax) : null,
+      rawPriceMin: comparable ? (hasObservedPrices ? rawSamples.rawMin : fallbackMin) : null,
+      rawPriceMax: comparable ? (hasObservedPrices ? rawSamples.rawMax : fallbackMax) : null,
+      rawPriceCount: comparable && hasObservedPrices ? rawSamples.raw.length : 0,
+      eligiblePriceCount: comparable && hasObservedPrices ? samples.eligible.length : 0,
+      excludedPriceCount: comparable && hasObservedPrices ? rawSamples.raw.filter(v => v < 1).length : 0,
       currency: comparable ? currency : null,
       currencyStatus,
       priceComparable: comparable,
@@ -516,9 +551,11 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
   for (const r of priceRows) {
     const lo = r.priceMin != null ? r.priceMin : r.priceMax;
     const hi = r.priceMax != null ? r.priceMax : r.priceMin;
-    if (r.available === false) { r.priceEligible = false; r.priceIneligibleReason = 'no_active_listing'; continue; }
+    if (r.availabilityObserved && r.available === 0) { r.priceEligible = false; r.priceIneligibleReason = 'no_active_listing'; continue; }
     if (!r.priceComparable) { r.priceEligible = false; r.priceIneligibleReason = 'currency_unknown'; continue; }
+    if (r.rawPriceCount > 0 && r.eligiblePriceCount === 0) { r.priceEligible = false; r.priceIneligibleReason = 'suspected_accessory_or_abnormal'; continue; }
     if (lo != null && hi != null && hi < 1) { r.priceEligible = false; r.priceIneligibleReason = 'suspected_accessory_or_abnormal'; continue; }
+    if (lo == null && hi == null) { r.priceEligible = false; r.priceIneligibleReason = 'price_missing'; continue; }
     r.priceEligible = true;
   }
 
@@ -551,17 +588,20 @@ function buildOpportunityFoundation(tenantId, projectId, opts) {
     const median = medians.length >= 3 ? medianOfSorted(medians) : null;
     // r4g §八：原始观察范围（含未参与统计的异常行）如实保留展示，不删除事实
     const allCur = priceRows.filter(r => r.currency === currency && r.priceComparable);
-    const rawVals = allCur.flatMap(r => [r.priceMin, r.priceMax].filter(v => v != null));
+    const rawVals = allCur.flatMap(r => [r.rawPriceMin, r.rawPriceMax].filter(v => v != null));
     const rawMin = rawVals.length ? Math.min(...rawVals) : null;
     const rawMax = rawVals.length ? Math.max(...rawVals) : null;
     const rawCount = allCur.length;
     const statCount = rows.length;
+    const excludedItemCount = allCur.reduce((n, r) => n + (r.excludedPriceCount || 0), 0);
+    const eligibleItemCount = allCur.reduce((n, r) => n + (r.eligiblePriceCount || 0), 0);
     return {
       currency, symbol: currencySymbol(currency),
       brandCount: statCount,
-      rawObservation: (rawCount > statCount && rawMin != null && rawMax != null) ? {
+      rawObservation: ((rawCount > statCount || excludedItemCount > 0) && rawMin != null && rawMax != null) ? {
         min: rawMin, max: rawMax, brandCount: rawCount,
-        note: `原始观察范围：${currencySymbol(currency)}${rawMin.toFixed(2)}–${currencySymbol(currency)}${rawMax.toFixed(2)}。其中包含疑似配件、附加商品或异常标价，尚未用于市场机会结论。`,
+        excludedItemCount, eligibleItemCount,
+        note: `原始观察范围：${currencySymbol(currency)}${rawMin.toFixed(2)}–${currencySymbol(currency)}${rawMax.toFixed(2)}。${excludedItemCount > 0 ? `其中 ${excludedItemCount} 个低于 ${currencySymbol(currency)}1 的公开标价未进入市场统计；` : ''}原始证据仍可核验。`,
       } : null,
       rows, bands,
       medianPrice: median,
@@ -1007,6 +1047,7 @@ module.exports = {
   currencySymbol,
   isIsoCurrency,
   currencyStatusOf,
+  priceSampleStats,
   priceBandsFor,
   LIVE_STATE_TEXT,
 };

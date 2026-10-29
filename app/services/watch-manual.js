@@ -22,6 +22,55 @@ const WS = require('./watch-store.js');
 const INFLIGHT = new Map();
 // 冷却：同 target 两次手动巡检的最小间隔（真实采集有成本，防连点）
 const MIN_GAP_MS = 20 * 1000;
+const STALE_INFLIGHT_MS = 30 * 60 * 1000;
+// 项目级「立即巡检」会一次提交多个品牌。此前每个 target 都 setImmediate，
+// 15 个品牌会在同一秒打向公开站点，既容易触发 429，也会制造不完整覆盖。
+// 这里只约束手动批量入口；定时监控仍由 watch-monitor 按既有调度语义执行。
+const QUEUE = [];
+let ACTIVE = 0;
+let LAST_START_AT = 0;
+let DRAIN_TIMER = null;
+
+function manualConcurrency() {
+  const n = Number(process.env.ZB_MANUAL_INSPECT_CONCURRENCY || 2);
+  return Math.max(1, Math.min(4, Number.isFinite(n) ? Math.floor(n) : 2));
+}
+
+function manualStartGapMs() {
+  const n = Number(process.env.ZB_MANUAL_INSPECT_START_GAP_MS || 500);
+  return Math.max(0, Math.min(5000, Number.isFinite(n) ? Math.floor(n) : 500));
+}
+
+function scheduleDrain(delayMs) {
+  if (DRAIN_TIMER) return;
+  DRAIN_TIMER = setTimeout(() => {
+    DRAIN_TIMER = null;
+    drainQueue();
+  }, Math.max(0, delayMs || 0));
+}
+
+function drainQueue() {
+  while (ACTIVE < manualConcurrency() && QUEUE.length) {
+    const gap = manualStartGapMs();
+    const wait = Math.max(0, gap - (Date.now() - LAST_START_AT));
+    if (wait > 0) {
+      scheduleDrain(wait);
+      return;
+    }
+    const job = QUEUE.shift();
+    ACTIVE += 1;
+    LAST_START_AT = Date.now();
+    Promise.resolve()
+      .then(() => runInspect(job.target, job.windowKey, job.nowMs, job.deps))
+      .catch(() => {
+        INFLIGHT.delete(job.key);
+      })
+      .finally(() => {
+        ACTIVE = Math.max(0, ACTIVE - 1);
+        drainQueue();
+      });
+  }
+}
 
 function keyOf(tenantId, watchTargetId) { return String(tenantId) + '|' + String(watchTargetId); }
 
@@ -48,16 +97,31 @@ function startInspect(opts) {
   if (!target) return { accepted: false, reason: 'NOT_MONITORING' };
   const k = keyOf(tid, wtid);
   const cur = INFLIGHT.get(k);
-  if (cur && Date.now() - cur.startedAt < MIN_GAP_MS) {
+  // 排队时间可能超过 20 秒；只要任务仍在队列或执行中，就必须保持单飞。
+  // 30 分钟仅作为进程内异常残留护栏，正常任务会在 finally 中清理。
+  if (cur && Date.now() - cur.startedAt < STALE_INFLIGHT_MS) {
     return { accepted: false, reason: 'IN_PROGRESS', windowKey: cur.windowKey };
+  }
+  if (cur) {
+    INFLIGHT.delete(k);
+    for (let i = QUEUE.length - 1; i >= 0; i--) if (QUEUE[i].key === k) QUEUE.splice(i, 1);
   }
   const nowMs = Date.now();
   const windowKey = manualWindowKey(nowMs);
   INFLIGHT.set(k, { startedAt: nowMs, windowKey });
   const deps = o.deps || {};
-  // 后台执行：不阻塞 HTTP（采集可能十几秒）
-  setImmediate(() => { runInspect(target, windowKey, nowMs, deps).catch(() => { /* 已记入窗口状态 */ }); });
-  return { accepted: true, windowKey, targetId: wtid, signals: target.enabledSignals };
+  // 后台排队：HTTP 立即返回，但不会把项目内全部品牌同时打向公开站点。
+  QUEUE.push({ key: k, target, windowKey, nowMs, deps });
+  const queuePosition = QUEUE.length;
+  scheduleDrain(0);
+  return {
+    accepted: true,
+    queued: true,
+    queuePosition,
+    windowKey,
+    targetId: wtid,
+    signals: target.enabledSignals,
+  };
 }
 
 async function runInspect(target, windowKey, nowMs, deps) {
@@ -95,5 +159,25 @@ async function runInspect(target, windowKey, nowMs, deps) {
 }
 
 function inflightCount() { return INFLIGHT.size; }
+function queueState() {
+  return {
+    active: ACTIVE,
+    queued: QUEUE.length,
+    inflight: INFLIGHT.size,
+    concurrency: manualConcurrency(),
+    startGapMs: manualStartGapMs(),
+  };
+}
 
-module.exports = { startInspect, runInspect, findTarget, manualWindowKey, inflightCount, MIN_GAP_MS };
+module.exports = {
+  startInspect,
+  runInspect,
+  findTarget,
+  manualWindowKey,
+  inflightCount,
+  queueState,
+  manualConcurrency,
+  manualStartGapMs,
+  MIN_GAP_MS,
+  STALE_INFLIGHT_MS,
+};

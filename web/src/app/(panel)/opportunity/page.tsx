@@ -115,7 +115,8 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
                     <td>{r.currency || '—'}</td>
                     <td>{r.priceMedian != null ? (r.currency ? r.currency + ' ' : '') + r.priceMedian : '—'}</td>
                     <td>{r.priceMin != null && r.priceMax != null
-                      ? (r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax
+                      ? <>{(r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax}
+                        {(r.excludedPriceCount || 0) > 0 ? <small className="core-brand-muted">（已排除 {r.excludedPriceCount} 个异常低价）</small> : null}</>
                       : '—'}</td>
                     <td>{r.productCount != null ? r.productCount : '—'}</td>
                     <td>{evBtn(r.evidenceRefs)}</td>
@@ -140,7 +141,7 @@ function FoundationModules({ f }: { f: OpportunityFoundation | null }) {
                   <div className="cc-head"><b>{r.name}</b><span className="cc-cur">{r.currency || '—'}</span></div>
                   <div className="cc-grid">
                     <span>中位价<b>{r.priceMedian != null ? (r.currency ? r.currency + ' ' : '') + r.priceMedian : '—'}</b></span>
-                    <span>价格区间<b>{r.priceMin != null && r.priceMax != null ? (r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax : '—'}</b></span>
+                    <span>价格区间<b>{r.priceMin != null && r.priceMax != null ? (r.currency ? r.currency + ' ' : '') + r.priceMin + '–' + r.priceMax : '—'}</b>{(r.excludedPriceCount || 0) > 0 ? <small className="core-brand-muted">已排除 {r.excludedPriceCount} 个异常低价</small> : null}</span>
                     <span>在售 SKU<b>{r.productCount != null ? r.productCount : '—'}</b></span>
                     <span>证据{evBtn(r.evidenceRefs)}</span>
                   </div>

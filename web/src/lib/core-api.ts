@@ -455,7 +455,10 @@ export interface OpportunityEvidenceRef {
 export interface OpportunityPriceRow {
   brandId: string; name: string; competitorId: string | null;
   productCount: number | null; available: number | null; soldOut: number | null;
+  availabilityObserved?: boolean;
   priceMin: number | null; priceMedian: number | null; priceMax: number | null;
+  rawPriceMin?: number | null; rawPriceMax?: number | null;
+  rawPriceCount?: number; eligiblePriceCount?: number; excludedPriceCount?: number;
   currency: string | null; currencyStatus?: 'confirmed' | 'mixed' | 'unknown';
   priceComparable?: boolean;
   observedAt: string | null; evidenceIds: string[];
@@ -487,7 +490,7 @@ export interface OpportunityFoundation {
     priceBands: {
       available: boolean;
       // §一.5：按币种分组
-      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; /** r4g §八：原始观察范围（含异常标价行，未参与市场统计） */ rawObservation?: { min: number; max: number; brandCount: number; note: string } | null; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
+      groups: { currency: string; brandCount: number; medianPrice: number | null; medianText?: string | null; bandsAvailable: boolean; positioningAvailable: boolean; /** 原始观察范围保留，但异常条目不进入市场统计 */ rawObservation?: { min: number; max: number; brandCount: number; excludedItemCount?: number; eligibleItemCount?: number; note: string } | null; bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[]; rows: OpportunityPriceRow[] }[];
       bands: { key: string; label: string; min: number | null; max: number | null; brandCount: number; brandIds: string[]; brandNames: string[]; covered: boolean }[];
       currency: string | null;
       multiCurrency: boolean;
