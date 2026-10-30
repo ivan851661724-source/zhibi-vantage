@@ -13,6 +13,12 @@ services:
     image: zhibi-vantage:1.5.0
     container_name: zhibi-vantage
     restart: always                      # 崩溃/重启自动拉起
+    # 容器 stdout 日志封顶（json-file 默认无上限；应用自身日志在 zhibi_data 卷内另行管理）
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # Phase 5：宿主机 3300 映射已移除（旧静态前端删除，纯 API 后端）。
     # 容器内 3300 仍监听，仅供 zhibi-web 反代（容器网络）；诊断可临时加回 "3300:3300"。
     ports: []
@@ -59,6 +65,12 @@ services:
     image: zhibi-web:0.2.0
     container_name: zhibi-web
     restart: always
+    # 同后端：stdout 日志封顶
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       zhibi-vantage:
         condition: service_healthy    # 后端健康后前端才起（避免启动期代理 502）

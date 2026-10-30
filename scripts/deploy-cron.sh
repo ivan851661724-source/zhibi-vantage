@@ -178,6 +178,44 @@ archive_prune() {
   echo "静态归档修剪: 清理 ${n:-0} 个超过 60 天的文件（保留总量 $(du -sh "$STATIC_ARCHIVE" 2>/dev/null | cut -f1)）"
 }
 
+# ---------- 历史版本保留策略（防无界增长） ----------
+# 每个 release 会新增 cand-<sha>/deployed-<sha> 两组镜像标签 + 一份 release manifest，
+# 构建缓存随构建累积——此前只清 48h 前的悬空层，带标签的历史版本与构建缓存无限累积
+# （2026-10-30 审计：悬空镜像约 1.2GB、构建缓存 3.7GB 可回收）。保留策略：
+#   - 镜像标签：保留最近 KEEP_TAG_RELEASES 个 release + 当前部署版（state.json 锚点）+
+#     本次候选，其余 cand-*/deployed-* 标签删除；rollback 与版本号标签（1.5.0/0.2.0）永不删除；
+#   - 悬空镜像层：删标签后立即回收（不带 until 过滤——until=48h 会把近期垃圾留两天）；
+#   - 构建缓存：--keep-storage 封顶，超出按 LRU 回收（保留近期缓存，增量构建不明显变慢）；
+#   - release manifest：保留最近 KEEP_MANIFESTS 份供审计回溯。
+# 只操作 zhibi-vantage / zhibi-web 两个镜像仓库的 cand-*/deployed-* 标签，
+# 同机其他项目（cartback/geovue 等）镜像不受影响；被容器引用的镜像 docker rmi 自然失败跳过。
+KEEP_TAG_RELEASES=5
+KEEP_MANIFESTS=20
+BUILDER_CACHE_KEEP=3gb
+history_prune() {
+  local keep cur sha f repo tag short
+  keep=" "
+  cur=$(state_get deployed_sha); [ -n "$cur" ] && keep="${keep}${cur:0:7} "
+  [ -n "${SHORT:-}" ] && keep="${keep}${SHORT} "
+  for f in $(ls -t "$STATE_DIR"/release-*.json 2>/dev/null | head -n "$KEEP_TAG_RELEASES"); do
+    sha=$(state_get commit "$f"); [ -n "$sha" ] && keep="${keep}${sha:0:7} "
+  done
+  for repo in zhibi-vantage zhibi-web; do
+    while IFS= read -r tag; do
+      [ -n "$tag" ] || continue
+      short=${tag#*-}
+      case "$keep" in
+        *" $short "*) : ;;
+        *) echo "  清理历史镜像标签: $repo:$tag"; docker rmi "$repo:$tag" >/dev/null 2>&1 || true ;;
+      esac
+    done < <(docker images "$repo" --format '{{.Tag}}' 2>/dev/null | grep -E '^(cand|deployed)-' || true)
+  done
+  docker image prune -f >/dev/null 2>&1 || true
+  docker builder prune -f --keep-storage "$BUILDER_CACHE_KEEP" >/dev/null 2>&1 || true
+  ls -t "$STATE_DIR"/release-*.json 2>/dev/null | tail -n +$((KEEP_MANIFESTS + 1)) | xargs -r rm -f
+  echo "历史清理完成：镜像标签保留最近 ${KEEP_TAG_RELEASES} 个 release + 当前版本；构建缓存上限 ${BUILDER_CACHE_KEEP}；manifest 保留 ${KEEP_MANIFESTS} 份"
+}
+
 # ---------- 回滚（仅 COMMITTED=0 时允许到达） ----------
 rollback() {
   [ "$ROLLBACK_DONE" = "1" ] && return 0
@@ -774,5 +812,5 @@ echo "旧槽已停止（zhibi-web:rollback 镜像保留）"
 
 STAGE="归档修剪与镜像清理"
 archive_prune || true
-docker image prune -f --filter "until=48h" >/dev/null 2>&1 || true
+history_prune || true
 echo "$(date '+%F %T') deploy done: $REMOTE (slot=$NEXT_SLOT web=$NEW_WEB_IMG api=$NEW_API_IMG)"
