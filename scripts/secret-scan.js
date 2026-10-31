@@ -62,6 +62,27 @@ const WHITELIST_HASH_PREFIXES = [
   '28c7287fbe39', // demo-fixture.test.js 固定模拟凭据（LLM.call 已 stub，非真实密钥）
   '38437a47c991', // PRD v1.4.0 review 附录：git blob 标识（spec/01 PRD v1.3.3 @ GitHub main）
   '74c9433973c5', // PRD v1.4.0 review 附录：git commit 标识（本地 HEAD ed3e237）
+  // ---- 2026-10-31 全量核查登记（29 处误报逐一人工核过源行，均为代码标识符/测试假值/git SHA）----
+  // 注：下列注释刻意避免「key/token/secret/password + 冒号等号 + 长值」写法，防止扫描器自命中。
+  '38e543795f8f', // SERPER_API_KEY 取假值 test-key-not-real（回归统一假 key，sc07/sc08/sc11 等 9 处）
+  'b7bc89e74092', // sc10-r2 断言假值 SECRET-SHOULD-NOT-LEAK（防泄漏用例，×2）
+  '944e702fadbf', // source-adapter.js 运行时变量 tiktokTokenCache（×2）
+  'fbd9f7f1eb55', // tiktok-facts-r4 测试假值 TEST-ACCESS-TOKEN-r4
+  'dcb7f6c156e0', // account.js:99 表单字段 body.confirmPassword（读取，非字面量）
+  'db68a0904b70', // STAGING-RUNBOOK git commit 示例标识（「例如 1c459cba…」）
+  'ca6b9eeccd34', // readiness-r2 YOUTUBE_API_KEY 假值 test-key-value-r2（测试用）
+  'c3c9823621fb', // account.js:97 表单字段 body.currentPassword（读取，非字面量）
+  '95311f7f0a09', // account.js:98 表单字段 body.newPassword（读取，非字面量）
+  '7f37fedfd5f8', // provider-contract-r3 测试假值 TEST-CLIENT-SECRET-r3
+  '76533915c78b', // SC-02 git commit 基线标识（64b4ee6c…，分支创建基线）
+  '6ffdd123ddc3', // sc07-r2 假 sk 格式 sk-env-only-SECRET（验证 env 优先级）
+  '69fe74b80ba5', // tiktok-market-r5 测试假值 TEST-ACCESS-TOKEN-r5
+  '5fabb72e7c3e', // sc10-r2-http 测试注册密码（Passw0rd-tenantC）
+  '48aa340cbc7e', // sc07-r2:574 测试注册密码（register 用例）
+  '39e8df66c6ea', // tiktok-market-r5 测试假值 TEST-CLIENT-SECRET-r5
+  '276c9b4e63f4', // tiktok-facts-r4 测试假值 TEST-CLIENT-SECRET-r4
+  '1700ac24c73b', // readiness-r2 防泄漏断言假值 real-value-should-not-leak
+  '044e92b70b22', // provider-contract-r3 测试假值 TEST-ACCESS-TOKEN-r3
 ];
 
 const real = findings.filter((x) => x.class === 'potentially real' && !WHITELIST_HASH_PREFIXES.some((p) => x.hash.startsWith(p)));

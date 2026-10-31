@@ -73,15 +73,6 @@ CAND_NAME=""; CAND_PORT=""; ACTIVE_NAME=""; ACTIVE_PORT=""; NEXT_SLOT=""
 OLD_API_IMG=""; OLD_WEB_RB_IMG=""; NEW_WEB_IMG=""; NEW_API_IMG=""
 BASE_WEB_ID=""; BASE_API_ID=""
 
-INFLIGHT=$STATE_DIR/inflight.json
-NGX_UPSTREAM=/etc/nginx/conf.d/zhibi-upstream.conf
-NGX_MAINT=/etc/nginx/zhibi_maintenance
-STATIC_ARCHIVE=/var/lib/zhibi-static
-WEB_PORT=3002
-SLOT_BLUE_PORT=3102
-SLOT_GREEN_PORT=3202
-FEISHU_WEBHOOK="${FEISHU_WEBHOOK:-}"
-
 mkdir -p "$STATIC_ARCHIVE/_next/static"
 [ -f "$STATE" ] || printf '{"deployed_sha":"","deployed_web_image_id":"","deployed_api_image_id":"","active_web_slot":"blue","failed_sha":"","deployed_at":""}\n' > "$STATE"
 
