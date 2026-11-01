@@ -8,7 +8,7 @@ const { activeSearchKey } = require('../core/config.js');
 const { DATA } = require('../core/paths.js');
 const { requestScope } = require('../core/als.js');
 const { emitSSE } = require('../core/sse-hub.js');
-const { getCurrentId, loadState, mirrorProjectToDb, newProjectId, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
+const { getCurrentId, loadState, mirrorProjectToDb, newProjectId, readProject, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
 const { fanoutSearch } = require('./search.js');
 const { domainOf } = require('./net.js'); // B-6：域级去重用
 const { dedupeByDomain } = require('./dedupe.js'); // B-6 修订版：纯函数去重（可单测）
@@ -140,7 +140,12 @@ async function harvestCandidates(track, intent, fanout, dsKey, labels) {
 }
 
 // 步骤1 主流程：知识枚举 + 两轮迭代搜索 + 合并验证，返回骨架卡（不等待深研）
-async function runDiscover(track, intent, config, emit, projectId, runId) {
+// r2 追加 opts.reuse：复用既有项目重跑（重新识别）。语义差异只有两条：
+//   ① 绝不先用空态覆盖旧档案（旧品牌结果在成功前一直原样保留）；
+//   ② 旧结果存在时，新结果只留在内存，全链路成功后一次性原子替换（atomic）。
+async function runDiscover(track, intent, config, emit, projectId, runId, opts) {
+  const o = opts || {};
+  const reuse = !!o.reuse;
   const sKey = activeSearchKey(config);
   const dsKey = llmApiKey(config);
   if (!sKey || !dsKey) throw new Error('NO_KEYS');
@@ -148,29 +153,54 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
   // 审核整改 §一：runId 每次执行独立生成（不可碰撞）；projectId 仅作关联键
   const _runId = runId || Telemetry.newRunId();
   const _t0 = Date.now();
+  const _tenantId = resolveTenantId();
+  // 复用：读盘上旧档案（只读，不写）。读不到则按新项目处理（不会凭空产生空档案）
+  const prev = reuse ? (readProject(pid, _tenantId) || null) : null;
+  const prevComps = Array.isArray(prev && prev.competitors) ? prev.competitors : [];
+  const hadBrands = prevComps.length > 0;
+  // 内部运行序号（不新增业务枚举）：同一项目每次执行 attemptNo+1，用户可见项目始终只有一个
+  const attemptNo = ((prev && prev.discoverRun && Number(prev.discoverRun.attemptNo)) || 0) + 1;
+  // 原子替换：旧结果存在 → 本次新结果先留在内存，成功后整体替换；失败则旧结果一行不动
+  const atomic = !!(prev && hadBrands);
   // ▶ 加固（0812 体验报告）：发现启动即落空状态——即使后续外部调用全失败（密钥失效等），
   // 项目也已落库、state.track 立即可见、/api/projects 立即可列出、轮询兜底恒有数据，杜绝「永久空白」。
-  const _initState = {
+  // r2：复用模式以旧档案为基底叠加，绝不把 competitors 清空。
+  const _initState = Object.assign({}, prev || {}, {
     projectId: pid,
     track,
     intent: normalizeIntent(intent),
-    competitors: [],
-    discoveredAt: new Date().toISOString(),
-    progress: { total: 0, done: 0 },
-    excluded: [], excludedReasons: {}, suppressed: [], addedCompetitors: [],
-    ruleDecisions: {}, fieldCorrections: [], signals: {}, whiteSpace: null, brief: null,
+    competitors: prev ? prevComps : [],
+    discoveredAt: (prev && prev.discoveredAt) || new Date().toISOString(),
+    progress: prev
+      ? { total: prevComps.length, done: prevComps.filter(c => c && c.status === 'done').length }
+      : { total: 0, done: 0 },
+    excluded: (prev && Array.isArray(prev.excluded)) ? prev.excluded : [],
+    excludedReasons: (prev && prev.excludedReasons) || {},
+    suppressed: (prev && Array.isArray(prev.suppressed)) ? prev.suppressed : [],
+    addedCompetitors: (prev && Array.isArray(prev.addedCompetitors)) ? prev.addedCompetitors : [],
+    ruleDecisions: (prev && prev.ruleDecisions) || {},
+    fieldCorrections: (prev && Array.isArray(prev.fieldCorrections)) ? prev.fieldCorrections : [],
+    signals: (prev && prev.signals) || {},
+    whiteSpace: (prev && prev.whiteSpace) || null,
+    brief: (prev && prev.brief) || null,
     discoverDone: false,
+    discovering: true, // 进行中标记：读态据此区分「正在更新」与「历史未完成」
     runId: _runId, // 审核整改 §一：runId 随 state 持久化，深研队列/报告/指定品牌后续段沿用同一 run
-  };
+    discoverRun: { runId: _runId, attemptNo, status: 'running', startedAt: new Date().toISOString(), reuse: !!prev },
+  });
+  // 注意：清标记必须显式写 null——saveState 是「磁盘为基底 + 本态覆盖」的合并写，
+  // 直接 delete 字段不会删掉磁盘上的旧值（失败标记会一直残留）。
+  _initState.discoverError = null; // 新一轮开始：清掉上一次失败态（历史留档在 discoverRunHistory）
+  _initState.discoverEmpty = null; // 空市场标记只属于上一次成功运行，本轮重新判定
   _initState.intent = _initState.intent || {};
   _initState.intent.platforms = resolvePlatforms({
     platforms: (intent && intent.platforms) || _initState.intent.platforms,
     regions: _initState.intent.regions,
   });
-  _initState.tenantId = resolveTenantId();
+  _initState.tenantId = _tenantId;
   // 业务事件显式携带 tenantId（后台队列可能脱离请求上下文；sse-hub 据此按租户投递）
-  const emitT = (t, p) => (typeof emit === 'function') ? emit(t, Object.assign({}, p, { tenantId: _initState.tenantId })) : undefined;
-  setCurrentId(pid, _initState.tenantId);
+  const emitT = (t, p) => (typeof emit === 'function') ? emit(t, Object.assign({}, p, { tenantId: _tenantId })) : undefined;
+  setCurrentId(pid, _tenantId);
   saveState(_initState);                                  // ← 关键：首个外部 await 之前落盘
   // Phase 1 可观测性：调研起点（request_received + runs 起始时间戳），运行上下文供深层
   // searchProvider/LLM 调用零签名归因。审核整改 §一：runId 与 projectId 严格分离——
@@ -213,7 +243,8 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
     Telemetry.recordStage(Object.assign({}, _runCtx, { stage: 'translate', durationMs: Date.now() - _tR1, status: 'ok' }));
   }
   // 承接上一轮的学习信号（用户反馈）：按名字×赛道记的 suppressed / 用户补的对手，跨次 discover 保留
-  const prevState = loadState() || {};
+  // r2：复用同一项目时以该项目档案为源（不依赖当前指针，避免重试非当前项目时读错）
+  const prevState = (reuse && prev) ? prev : (loadState() || {});
   const carrySuppressed = Array.isArray(prevState.suppressed) ? prevState.suppressed : [];
   const carryAdded = Array.isArray(prevState.addedCompetitors) ? prevState.addedCompetitors : [];
   const carryRules = prevState.ruleDecisions && typeof prevState.ruleDecisions === 'object' ? prevState.ruleDecisions : {};
@@ -270,16 +301,8 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
 
   // 合并三路候选：SERP harvest + LLM 枚举；用全部原始结果交叉验证（LLM 候选无搜索痕迹则黜落）
   let candidates = mergeCandidates([h1.candidates, llmCands]);
-  // 渐进式发现：先以 lead 线索卡广播，让用户尽早看到“在找”（最终被滤掉的线索卡会在收尾时 brand_removed）
-  const _leadIds = [];
-  for (const c of candidates.slice(0, 24)) {
-    const _id = slug(c.name, _leadIds.length);
-    _leadIds.push(_id);
-    if (_leadIds.length === 1) Telemetry.milestone(_runId, 'milestone_first_brand'); // 里程碑：运行创建 → 首个品牌卡
-    if (emit) emitT('brand_found', { projectId: pid, tier: 'lead', card: {
-      id: _id, name: c.name || ('线索' + (_leadIds.length)), url: c.url || '', tier: c.tier || 'unknown',
-      matchScore: 0, why: c.why || '全网/维度命中线索', status: 'lead', evidenceCount: c.evidenceCount || 0, confidence: 'low' } });
-  }
+  // r2 §四.7：搜索结果只作内部候选——不再把未核验线索当竞品卡片广播给用户
+  // （旧实现把 24 条 search snippet 作为 tier:'lead' 卡片直出，用户会误读为已确认竞品）。
   const afterHarvest = candidates.slice();
   candidates = crossValidate(candidates, allFanout);
   // LLM 枚举且无任何搜索证据的候选 → 剔除（知识可能过时/幻觉，验证是铁律）
@@ -372,21 +395,24 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
     domainOf(c.url) || String(c.name || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
   competitors = _dedup.kept;
   const _droppedDup = _dedup.dropped;
-  // 渐进式发现：把被最终过滤掉的 lead 线索卡移除，再逐张广播确认卡（skeleton）
-  const finalIds = new Set(competitors.map(c => c.id));
-  for (const lid of _leadIds) {
-    if (!finalIds.has(lid)) { if (emit) emitT('brand_removed', { projectId: pid, id: lid, reason: 'filtered' }); }
-  }
-  // B-6：被去重的候选显式广播（前端据此移除对应线索/骨架卡，不做静默丢弃）
+  // B-6：被去重的候选显式广播（前端据此移除对应骨架卡，不做静默丢弃）
   if (emit) for (const d of _droppedDup) emitT('brand_removed', { projectId: pid, id: d.id, reason: 'duplicate', name: d.name });
   if (emit) emitT('discover_stage', { projectId: pid, stage: 'ranking', label: '已确认竞争品牌，正在汇总…', pct: 90, found: competitors.length });
-  for (const c of competitors) {
-    state.competitors.push(c);
-    state.progress.total = state.competitors.length;
-    saveState(state); // 增量落盘（关键：刷新/轮询可恢复）
-    if (emit) emitT('brand_found', { projectId: pid, tier: 'skeleton', card: {
-      id: c.id, name: c.name, url: c.url, tier: c.tier, matchScore: c.matchScore,
-      why: c.why, status: 'skeleton', evidenceCount: c.evidenceCount, confidence: c.confidence } });
+  if (competitors.length) Telemetry.milestone(_runId, 'milestone_first_brand'); // 里程碑：首个已核验品牌
+  let atomicNext = null;
+  if (atomic) {
+    // r2 §四：已有旧结果 → 新结果先留在内存，不触碰 state.competitors、不广播骨架卡
+    // （旧品牌继续可见；本次失败时旧结果一行不动；成功时在收尾处一次性原子替换）
+    atomicNext = competitors;
+  } else {
+    for (const c of competitors) {
+      state.competitors.push(c);
+      state.progress.total = state.competitors.length;
+      saveState(state); // 增量落盘（关键：刷新/轮询可恢复）
+      if (emit) emitT('brand_found', { projectId: pid, tier: 'skeleton', card: {
+        id: c.id, name: c.name, url: c.url, tier: c.tier, matchScore: c.matchScore,
+        why: c.why, status: 'skeleton', evidenceCount: c.evidenceCount, confidence: c.confidence } });
+    }
   }
   mirrorProjectToDb(pid, requestScope.getStore() || state.tenantId, state.track); // T3-1：镜像进 db 项目清单
   // ▶ 市场热度（T0·Google Trends，抓取需求 §2.6 / 算法规格 §5.6）：赛道词+头部品牌词一次对比，
@@ -415,9 +441,18 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
   }
   // P0 整改（2026-11）：只有完整流程成功结束、且确实没有品牌通过交叉核验时，
   // 才允许以「未找到已核验品牌」收尾——显式标记，绝不与"模型故障导致的空"混淆。
-  if (!state.competitors.length) state.discoverEmpty = true;
-  state.discoverDone = true; saveState(state); // 标记发现完成（供前端 SSE 断开时的轮询兜底判定收尾）
-  if (emit) emitT('discover_complete', { projectId: pid, total: state.competitors.length });
+  // r2 §四：全链路成功后才原子替换项目品牌列表（旧结果在此之前一行未动）。
+  if (atomicNext) {
+    const before = state.competitors.length;
+    state.competitors = atomicNext;
+    state.discoverReplace = { runId: _runId, attemptNo, at: new Date().toISOString(), brandsBefore: before, brandsAfter: atomicNext.length };
+  }
+  state.progress = { total: state.competitors.length, done: state.competitors.filter(c => c && c.status === 'done').length };
+  if (!state.competitors.length) state.discoverEmpty = true; else state.discoverEmpty = null;
+  state.discovering = false;
+  state.discoverRun = { runId: _runId, attemptNo, status: 'success', startedAt: (state.discoverRun && state.discoverRun.startedAt) || null, finishedAt: new Date().toISOString() };
+  state.discoverDone = true; saveState(state, { replaceCompetitors: !!atomicNext }); // 标记发现完成（供前端 SSE 断开时的轮询兜底判定收尾）
+  if (emit) emitT('discover_complete', { projectId: pid, total: state.competitors.length, updated: !!atomicNext, attemptNo });
   // 后台逐家深研（不阻塞返回）
   enqueueResearch(state, config);
   return state;
@@ -463,14 +498,23 @@ function discoverErrorCode(e) {
 
 // 异步启动发现（不阻塞 HTTP 响应）：同步返回 projectId 给 handler 组成 202；
 // 管线在 setImmediate 里异步跑，结束（成功/失败）时释放并发闸与幂等登记。
-// 返回 { projectId, reused }：reused=true 表示同租户已有进行中任务，本次为幂等复用
-// （调用方不得重复扣每日额度、不得重复入并发闸）。
-function discoverLaunch(track, intent, config, gate) {
+// 返回 { projectId, reused, runId, attemptNo }：
+//   reused=true 表示「同一目标已有进行中任务」，本次幂等复用（调用方不得重复扣额/重复入闸）。
+// opts.reuseProjectId（r2 §三）：同一租户、同一项目、同一查询条件下「重新识别」必须复用
+// 原 projectId——用户可见项目永远只有一个，历史失败靠 runId/attemptNo 在档案内区分。
+function discoverLaunch(track, intent, config, gate, opts) {
+  const o = opts || {};
   const tid = resolveTenantId();
-  // 幂等：同租户已有进行中的发现 → 复用同一 projectId（不重复 spawn/扣额）
-  if (discoverInflight.has(tid)) return { projectId: discoverInflight.get(tid), reused: true };
-  const projectId = newProjectId(track);
-  discoverInflight.set(tid, projectId);
+  const reuseProjectId = o.reuseProjectId ? String(o.reuseProjectId) : null;
+  // 幂等键：重试按「租户 + 项目」分桶（同一项目的双击只跑一次）；首次发现仍按租户分桶。
+  const inflightKey = reuseProjectId ? (tid + '|' + reuseProjectId) : tid;
+  if (discoverInflight.has(inflightKey)) return { projectId: discoverInflight.get(inflightKey), reused: true };
+  const reuse = !!reuseProjectId;
+  const projectId = reuse ? reuseProjectId : newProjectId(track);
+  // 复用前先确认档案确属本租户（handler 已校验，这里再兜一道：拿不到就退回新建）
+  const prevState = reuse ? readProject(projectId, tid) : null;
+  const attemptNo = ((prevState && prevState.discoverRun && Number(prevState.discoverRun.attemptNo)) || 0) + 1;
+  discoverInflight.set(inflightKey, projectId);
   // 上一次成功结果指针：失败面板用它引导用户回到旧结果（旧项目档案永不覆盖）
   let prevPointer = null;
   try { prevPointer = getCurrentId(tid); } catch { prevPointer = null; }
@@ -481,35 +525,51 @@ function discoverLaunch(track, intent, config, gate) {
   let _settleDone = null;
   const done = new Promise((r) => { _settleDone = r; });
   setImmediate(() => {
-    runDiscover(track, intent, config, emitSSE, projectId, runId)
+    runDiscover(track, intent, config, emitSSE, projectId, runId, { reuse })
       .catch(e => {
         const code = discoverErrorCode(e);
         const msg = discoverUserMessage(code, e);
         Telemetry.endRun(runId, 'error', code); // 失败终态：total.status=error + 受控 code，绝不产生 milestone_all_done
         try { Logger.error('discover-failed', { projectId, code, message: String(e.message || e), stack: String(e.stack || '').slice(0, 600) }); } catch {}
-        // 持久失败态：写进本次项目档案（当前指针仍指向本次项目），保留审计；绝不伪成功
+        // 持久失败态：写进本次项目档案，保留审计；绝不伪成功。
+        // r2 §四.5：复用同一项目且已有成功结果 → 旧品牌原样保留（keptPrevious），
+        // 失败只叠加错误说明；绝不把旧结果清零，也绝不把失败说成「没有品牌」。
         try {
-          const s = loadState();
+          const s = readProject(projectId, tid) || loadState();
           if (s && s.projectId === projectId) {
+            const kept = Array.isArray(s.competitors) && s.competitors.length > 0;
             s.discoverError = {
               errorCode: code,
               errorMessage: msg,
               failedAt: new Date().toISOString(),
-              previousProjectId: prevPointer || null,
+              previousProjectId: kept ? null : ((prevPointer && prevPointer !== projectId) ? prevPointer : null),
+              keptPrevious: kept,
+              attemptNo,
             };
-            s.discoverDone = false; // 失败≠完成：不得让轮询兜底把失败当收尾
+            s.discovering = false;
+            s.discoverRun = {
+              runId, attemptNo, status: 'failed',
+              startedAt: (s.discoverRun && s.discoverRun.startedAt) || null,
+              finishedAt: new Date().toISOString(), errorCode: code,
+            };
+            s.discoverRunHistory = (Array.isArray(s.discoverRunHistory) ? s.discoverRunHistory : [])
+              .concat([{ runId, attemptNo, status: 'failed', errorCode: code, finishedAt: s.discoverRun.finishedAt, brandsBefore: (s.competitors || []).length }])
+              .slice(-10);
+            // 有旧结果 → 旧结果仍是完整成功结果（discoverDone 保持 true）；无旧结果 → 未完成
+            s.discoverDone = kept ? true : false;
+            if (!kept) s.discoverEmpty = null;
             saveState(s);
           }
         } catch (e2) { /* 持久化失败不影响错误上报 */ }
-        emitSSE('discover_error', { projectId, code, message: msg, tenantId: tid });
+        emitSSE('discover_error', { projectId, code, message: msg, keptPrevious: !!(prevState && (prevState.competitors || []).length), tenantId: tid });
       })
       .finally(() => {
-        if (discoverInflight.get(tid) === projectId) discoverInflight.delete(tid);
+        if (discoverInflight.get(inflightKey) === projectId) discoverInflight.delete(inflightKey);
         if (gate) gate.leave();
         if (_settleDone) _settleDone(null);
       });
   });
-  return { projectId, reused: false, done };
+  return { projectId, reused: false, reuse, runId, attemptNo, done };
 }
 
 

@@ -8,7 +8,8 @@
 //   routes/   声明式路由（ctx 依赖注入）；lib/ 纯函数领域模块（可单测）
 const { buildVersionInfo } = require('./core/version.js');
 const { activeSearchKey, ensureData, loadConfig, migrateConfigSecrets, saveConfig } = require('./core/config.js');
-const { getCurrentId, listProjects, loadState, migrateResearchNamespaces, projFile, reportsFile, resolveTenantId, saveState, setCurrentId } = require('./core/state-store.js');
+const { getCurrentId, listProjects, loadState, migrateResearchNamespaces, projFile, readProject, reportsFile, resolveTenantId, saveState, setCurrentId } = require('./core/state-store.js');
+const { sameDiscoveryConditions } = require('./services/discover-state.js');
 const { CATEGORIES, CHANNELS, marketCurrency, normalizeIntent } = require('./research/vocab.js');
 const { decorateState } = require('./research/decorate.js');
 const { attemptStateOf } = require('./research/attempts.js');
@@ -196,6 +197,8 @@ async function handleRequestInner(req, res) {
       loadConfig, saveConfig, ensureData, getSerperPool, activeSearchKey,
       tavilySearch, serperSearchWithFailover, braveSearch, bochaSearch,
       setCurrentId, getCurrentId, listProjects, resolveTenantId, projFile, reportsFile, safeWrite,
+      // r2 §三：重新识别复用原 projectId —— handler 需要按 id 读旧档案并核对查询条件
+      readProject, sameDiscoveryConditions,
       fs,
     };
     const handled = await Routes.dispatch(routeCtx, req, res, url, p);

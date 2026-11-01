@@ -245,5 +245,37 @@ export interface ZhibiState {
   briefError?: string;
   /** brief 任务受理时刻（ms）。前端据此判僵尸态：running 超 15 分钟无终态视为中断，提示重试 */
   briefStartedAt?: number;
+  /** r2：品牌识别运行状态（后端 services/discover-state.js 统一口径投影） */
+  discoverDone?: boolean;
+  discoverEmpty?: boolean;
+  discoverPhase?: DiscoverPhase;
+  discoverState?: DiscoverStateView;
+  discoverError?: {
+    errorCode?: string;
+    errorMessage?: string;
+    failedAt?: string;
+    previousProjectId?: string | null;
+    /** 本次更新失败但上一次成功结果仍在（同一项目内保留） */
+    keptPrevious?: boolean;
+  };
+  discoverRun?: { runId?: string; attemptNo?: number; status?: string; startedAt?: string | null; finishedAt?: string | null };
   [key: string]: unknown;
+}
+
+/** 品牌识别状态口径：failed/running/done/empty/incomplete；no_track = 还没赛道 */
+export type DiscoverPhase = 'no_track' | 'running' | 'done' | 'empty' | 'incomplete' | 'failed';
+
+export interface DiscoverStateView {
+  phase: DiscoverPhase;
+  hasBrands: boolean;
+  brandCount: number;
+  incomplete: boolean;
+  running: boolean;
+  keptPrevious: boolean;
+  message: string | null;
+  runId: string | null;
+  attemptNo: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  previousProjectId: string | null;
 }

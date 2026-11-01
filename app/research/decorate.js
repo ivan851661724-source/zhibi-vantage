@@ -20,9 +20,19 @@ const { enrichFieldProvenance, provenanceGate } = require('../lib/field-confiden
 const { computeOpportunityMap } = require('../lib/opportunity.js');
 const { computeBlueOceanCurve, computeSeedingPercentiles } = require('../lib/blue-ocean.js');
 const { computeTrendView } = require('../lib/trend.js');
+const { describeDiscover } = require('../services/discover-state.js');
 
 function decorateState(s) {
-  if (!s || !Array.isArray(s.competitors)) return s;
+  if (!s || typeof s !== 'object') return s;
+  // r2 §五：识别状态口径统一投影（failed/running/done/empty/incomplete）——
+  // 历史伪空记录（discoverDone=true + 空品牌 + 无 discoverEmpty）在此被如实标为 incomplete，
+  // 前端据此说「上一次品牌识别未完整完成」，绝不说「市场没有品牌」。只读投影，不改写档案。
+  try {
+    const d = describeDiscover(s);
+    s.discoverPhase = d.phase;
+    s.discoverState = d;
+  } catch (e) { /* 投影失败不影响其他派生字段 */ }
+  if (!Array.isArray(s.competitors)) return s;
   // R1：价格快照历史（仅本轮派生用；返回前剥离，不落盘不下发）
   s.__priceHist = null;
   try { if (s.projectId) s.__priceHist = priceStore.load(s.tenantId, s.projectId); } catch (e) {}

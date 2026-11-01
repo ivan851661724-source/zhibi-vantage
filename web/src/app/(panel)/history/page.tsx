@@ -19,10 +19,18 @@ interface ProjectItem {
   total?: number | null;
   done?: number | null;
   hasBrief?: boolean;
+  /** r2 §五：后端统一口径（done/empty/failed/incomplete/running/no_track） */
+  phase?: string;
+  incomplete?: boolean;
+  failed?: boolean;
 }
 
 function fmtMeta(p: ProjectItem): string {
   const when = p.discoveredAt ? new Date(p.discoveredAt).toLocaleString('zh-CN') : '时间未知';
+  // 历史伪空 / 失败档案不得显示成「0 个品牌」——那是「市场没品牌」的误读
+  if (p.phase === 'incomplete' || p.incomplete) return `${when} · 上次识别未完整完成（可重新识别）`;
+  if (p.phase === 'failed' || p.failed) return `${when} · 上次识别失败（可重新识别）`;
+  if (p.phase === 'running') return `${when} · 正在识别…`;
   const counts = `${p.total != null ? p.total : '—'} 个品牌（${p.done != null ? p.done : '—'} 家已深研）`;
   return `${when} · ${counts}${p.hasBrief ? ' · 已生成分析报告' : ''}`;
 }

@@ -411,38 +411,50 @@ function WorkbenchInner() {
     }
   }
 
-  // —— P0 整改（2026-11）：品牌识别失败显式化 ——
-  // 失败终态来源两路合并：state.discoverError（后端持久化，刷新后仍在）优先；
-  // 瞬态 discover.error（本会话 SSE/HTTP 错误）兜底。失败绝不渲染成空品牌列表。
+  // —— 品牌识别状态（r2 §五/§七）——
+  // 统一走后端投影 state.discoverState（与 /api/projects、切换档案同一口径），
+  // 前端不再自己拼 discoverDone/discoverEmpty 组合，避免「历史伪空」被读成「市场没品牌」。
+  const view = (state && (state as Record<string, unknown>).discoverState) as
+    | { phase?: string; keptPrevious?: boolean; message?: string | null; incomplete?: boolean }
+    | undefined;
   const taskError = (state && (state as Record<string, unknown>).discoverError) as
-    | { errorCode: string; errorMessage: string; failedAt: string; previousProjectId?: string | null }
+    | { errorCode: string; errorMessage: string; failedAt: string; previousProjectId?: string | null; keptPrevious?: boolean }
     | null
     | undefined;
-  const taskEmpty = !!(state && (state as Record<string, unknown>).discoverEmpty) && !taskError;
+  // 兜底：后端缺投影（旧部署/局部响应）时按 raw 标记推导，口径与 discover-state.js 一致
+  const phase: string = view?.phase || (taskError ? 'failed'
+    : (state && (state as Record<string, unknown>).discoverEmpty) ? 'empty'
+      : state?.track ? 'done' : 'no_track');
+  const taskEmpty = phase === 'empty';
+  const taskIncomplete = phase === 'incomplete';
   const bannerError = taskError
-    ? { code: taskError.errorCode, message: taskError.errorMessage }
+    ? { code: taskError.errorCode, message: taskError.errorMessage, keptPrevious: !!taskError.keptPrevious }
     : discover.error && !discover.running
       ? discover.error
       : null;
   const retryDiscover = () => {
     if (!state?.track || discover.running) return;
     const intent = (state.intent as Record<string, unknown>) || {};
-    void discover.start(state.track, intent);
+    // r2 §三：带 retryProjectId → 后端在同一项目内新起一次运行（不产生第二个项目）
+    void discover.start(state.track, intent, { retryProjectId: state.projectId });
   };
   const errorBanner = bannerError && !discover.running ? (
-    <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="alert">
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="alert" data-testid="discover-error">
       <p className="hint">
         {bannerError.code === 'DISCOVER_QUOTA'
           ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
           : bannerError.code === 'NO_KEYS'
             ? '品牌识别服务尚未配置，请联系平台管理员完成配置。'
-            : '⚠ ' + (bannerError.message || '本次品牌识别未完成，请稍后重新识别。')}
+            : bannerError.keptPrevious
+              // 旧结果仍在本项目内保留：先安抚再给原因，绝不说「没有品牌」
+              ? '本次更新失败，上一次成功结果仍可查看。原因：' + (bannerError.message || '服务暂时不可用。')
+              : '⚠ ' + (bannerError.message || '本次品牌识别未完成，请稍后重新识别。')}
       </p>
       {bannerError.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
       {state?.track && bannerError.code !== 'DISCOVER_QUOTA' && bannerError.code !== 'NO_KEYS' && (
         <p style={{ margin: '8px 0 0' }}>
           <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
-          {taskError?.previousProjectId ? (
+          {!bannerError.keptPrevious && taskError?.previousProjectId ? (
             <button
               className="btn-ghost"
               type="button"
@@ -456,15 +468,34 @@ function WorkbenchInner() {
       )}
     </div>
   ) : null;
-  // 识别成功但确无已核验品牌（区别于失败/空列表的显式说明）
+  // 历史伪空记录（完成标记 + 空品牌 + 无空市场标记）：统一口径，不说「市场没有品牌」
+  const incompleteBanner = taskIncomplete && !discover.running && !bannerError ? (
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="status" data-testid="discover-incomplete">
+      <p className="hint">上一次品牌识别未完整完成，请重新识别。</p>
+      <p className="hint">这不是「这个市场没有品牌」——只是上一次运行没有跑完，重新识别会覆盖本项目的品牌结果。</p>
+      {state?.track && (
+        <p style={{ margin: '8px 0 0' }}>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+        </p>
+      )}
+    </div>
+  ) : null;
+  // 识别成功但确无已核验品牌（区别于失败/未完成/空列表的显式说明）
   const emptyVerifiedBanner = taskEmpty && !discover.running ? (
-    <div className="discover-error-box" style={{ margin: '0 0 12px' }}>
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="status" data-testid="discover-empty">
       <p className="hint">识别已完成：本次未找到通过交叉核验的竞争品牌（可能是极小众赛道或线索不足）。你可以换个更具体的赛道描述重新识别。</p>
       {state?.track && (
         <p style={{ margin: '8px 0 0' }}>
           <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
         </p>
       )}
+    </div>
+  ) : null;
+  // 非阻塞更新态：重新识别期间旧结果继续可见，只加一条说明（不清空、不遮挡）
+  const hasExistingBrands = msAll.length > 0 || ((state?.competitors as unknown[] | undefined)?.length || 0) > 0;
+  const updatingStrip = discover.running && hasExistingBrands ? (
+    <div className="discover-updating" role="status" data-testid="discover-updating">
+      正在更新品牌结果，旧结果在新结果确认前仍然有效、可正常查看。
     </div>
   ) : null;
 
@@ -480,7 +511,9 @@ function WorkbenchInner() {
   return (
     <div className="wb-page">
       {errorBanner}
+      {incompleteBanner}
       {emptyVerifiedBanner}
+      {updatingStrip}
       {/* 首页 Hero —— 黑底卡片 + 纯白渐变文本 + 白底主操作 */}
       {state?.track ? (
         <section className="wb-hero">
@@ -604,10 +637,12 @@ function WorkbenchInner() {
       <div className="workbench-wrap" id="workbenchWrap">
         {msAll.length === 0 ? (
           bannerError && !discover.running ? null : ( /* 失败态由上方失败面板表达，不叠加误导性空列表 */
-            <div className="empty">
-              <div className="big">{discover.running ? '正在调研…' : '暂无材料'}</div>
-              <div className="sub">完成一次调研后，Agent 会在这里推送跟价 / 上新 / 新渠道 / 口碑材料。</div>
-            </div>
+            taskIncomplete && !discover.running ? null : ( /* 历史未完成同样由上方说明承担，不写「暂无材料」 */
+              <div className="empty">
+                <div className="big">{discover.running ? '正在调研…' : '暂无材料'}</div>
+                <div className="sub">完成一次调研后，Agent 会在这里推送跟价 / 上新 / 新渠道 / 口碑材料。</div>
+              </div>
+            )
           )
         ) : ms.length === 0 ? (
           <div className="empty">

@@ -61,3 +61,13 @@
 - 未接入维度（社媒/广告/评论/搜索/流量/经营估算）一律「未接入」，零 mock、零估算填充；机会样本不足不输出结论。
 - 测试：新增 app/test/core-product.test.js（C1–C8：品牌档案/未接入/采集贯通/情报筛选/机会样本/报告冻结与恢复/两租户隔离/零 mock）8/8 通过；后端全量零失败。
 - 本分支第一项包含 robots.txt 路径 P0 SSRF 修复（robots 与正文共用受控安全请求路径）。
+
+## v0.4.0-SC07 修订（2026-11-01，品牌发现 r2，未合并——随 review/brand-discovery-llm-resilience-r2 分支）
+
+- 新增 SC-07（品牌识别的「运行 / 尝试 / 状态」契约）：`POST /api/discover` 增 `retryProjectId`（同项目重识别复用原 projectId）；响应增 `reused/retry/runId/attemptNo`。
+- 项目档案增内部运行字段：`discoverRun`（runId/attemptNo/status）、`discoverRunHistory`（≤10）、`discoverReplace`（原子替换审计）、`discovering`；`discoverError` 增 `keptPrevious/attemptNo`。不新增任何业务枚举。
+- 状态口径收敛到 `app/services/discover-state.js`：`failed/running/done/empty/incomplete/no_track`；历史伪空（discoverDone=true + 0 品牌 + 无 discoverEmpty）读态投影为 `incomplete`，文案「上一次品牌识别未完整完成」，绝不等于「市场没有品牌」；磁盘零改写。
+- 结果原子替换：旧结果存在时，新结果全链路成功后一次性替换（不再经 saveState 的按 id 并集合并）；失败则旧结果一行不动。
+- 额度：同项目重新识别不计每日额度；新建项目照旧。
+- llm-health：配置指纹（Key/BaseURL/Model/ModelDeep）变化即失效；`operational` 要求 HTTP 成功 + 返回可解析 + 结构合规（`{"ok":true}`）；200 非 JSON → `LLM_INVALID_RESPONSE`；配置保存后显式 invalidate。
+- 测试：新增 `app/test/brand-discovery-r2.test.js`（14 项）。

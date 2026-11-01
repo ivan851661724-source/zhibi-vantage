@@ -126,13 +126,31 @@ async function discover(ctx, req, res, url, p) {
   // 并发闸在 discoverLaunch 的 setImmediate 链末端 .finally 释放（成功/失败都释放）。
   // P0 整改（2026-11）：同租户已有进行中的发现 → 幂等复用同一 projectId：
   // 不重复 spawn 任务、不重复扣每日额度、立即释放本次占用的并发闸。
-  const launched = ctx.discoverLaunch(track, body.intent || {}, config, ctx.discoverGate);
+  // r2 §三：重新识别复用原 projectId——只有「同一租户 + 同一项目 + 同一查询条件」才复用；
+  // 用户明确改了赛道/地区/核心诉求，或档案不属于本租户 → 按新项目处理（不泄露他人项目存在性）。
+  const retryOf = String(body.retryProjectId || '').trim();
+  let reuseProjectId = null;
+  if (retryOf) {
+    try {
+      const prev = ctx.readProject ? ctx.readProject(retryOf, _tid) : null;
+      const sameTenant = !prev || !prev.tenantId || ctx.resolveTenantId(prev.tenantId) === ctx.resolveTenantId(_tid);
+      if (prev && sameTenant && ctx.sameDiscoveryConditions(prev, track, body.intent || {})) reuseProjectId = prev.projectId || retryOf;
+    } catch (e) { /* 读档失败：按新项目处理，不阻塞用户 */ }
+  }
+  const launched = ctx.discoverLaunch(track, body.intent || {}, config, ctx.discoverGate, reuseProjectId ? { reuseProjectId } : undefined);
   if (launched.reused) {
     ctx.discoverGate.leave();
-    return ctx.sendJSON(res, 202, { projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted', reused: true });
+    return ctx.sendJSON(res, 202, {
+      projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted',
+      reused: true, runId: launched.runId || null, attemptNo: launched.attemptNo || null,
+    });
   }
-  metering.recordDailyDiscover(_tid); // R5.1：占用一次每日额度（幂等复用不计）
-  return ctx.sendJSON(res, 202, { projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted' });
+  // 每日额度：只在「新建项目」时占用；同项目重新识别是失败恢复，不额外扣用户额度
+  if (!launched.reuse) metering.recordDailyDiscover(_tid); // R5.1：占用一次每日额度（幂等复用/重试不计）
+  return ctx.sendJSON(res, 202, {
+    projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted',
+    reused: false, retry: !!launched.reuse, runId: launched.runId || null, attemptNo: launched.attemptNo || null,
+  });
 }
 
 // ---------- /api/enrich（POST：单对手富集） ----------

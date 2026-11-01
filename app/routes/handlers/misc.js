@@ -97,6 +97,8 @@ async function configPost(ctx, req, res, url, p) {
       : String((body.ownBrands) || '').split(/[\n,;]+/).map(s => s.trim()).filter(Boolean)
   };
   await ctx.saveConfig(next);
+  // r2 §六.1：Key/BaseURL/Model 任一变化 → 立即清除健康缓存（旧结论不得冒充当前配置的状态）
+  try { LLMHealth.invalidate(); } catch { /* 缓存失效失败不阻塞保存 */ }
   return ctx.sendJSON(res, 200, { ok: true, hasKeys: !!(ctx.activeSearchKey(next) && next.llm.apiKey), serperKeyCount: next.search.serperKeys.length });
 }
 

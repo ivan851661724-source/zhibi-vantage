@@ -2468,6 +2468,9 @@ border-radius: 8px; padding: 9px 12px; margin: 8px 0 12px; font-size: 13px; line
 .discover-error-box .btn.primary:hover{background:var(--brand-hi)}
 .discover-error-box .btn.ghost{background:transparent;color:var(--ink2);border:1px solid var(--line2)}
 .discover-error-box .btn.ghost:hover{border-color:var(--brand);color:var(--brand-hi)}
+/* r2 §四：重新识别期间的非阻塞更新提示（旧结果继续可见，不清空、不遮挡） */
+.discover-updating{margin:0 0 12px;padding:9px 12px;border-radius:var(--r-md);background:var(--bg3);border:1px dashed var(--line2);color:var(--ink2);font-size:12.5px;line-height:1.5}
+.discover-updating::before{content:'↻ ';color:var(--brand);font-weight:700}
 
 /* ===== F-03 异动提醒中心（铃铛 + 下拉面板） ===== */
 .btn-bell{position:relative}

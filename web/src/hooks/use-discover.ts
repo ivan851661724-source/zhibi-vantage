@@ -26,6 +26,8 @@ export interface DiscoverCard {
 export interface DiscoverError {
   code?: string;
   message: string;
+  /** r2 §四.5：本次更新失败，但上一次成功结果仍可查看（旧结果未被覆盖） */
+  keptPrevious?: boolean;
 }
 
 /** 后端持久化的任务失败态（/api/state.discoverError；成功重试后不再出现） */
@@ -34,6 +36,19 @@ export interface DiscoverTaskError {
   errorMessage: string;
   failedAt: string;
   previousProjectId?: string | null;
+  /** r2 §四.5：本次更新失败，但上一次成功结果仍保留在同一项目内 */
+  keptPrevious?: boolean;
+  attemptNo?: number;
+}
+
+/** r2：一次运行的内部标识（用户可见项目仍是同一个） */
+export interface DiscoverRunInfo {
+  runId?: string | null;
+  attemptNo?: number | null;
+  /** true = 同项目重新识别（复用原 projectId，不新建项目） */
+  retry?: boolean;
+  /** true = 本次请求命中了进行中的运行（双击/双开页幂等复用） */
+  reused?: boolean;
 }
 
 // 归一错误码 → 用户可读文案（与后端 discoverUserMessage 保持一致；仅作后端缺省时的兜底）
@@ -70,6 +85,7 @@ export function useDiscover() {
   const [progress, setProgress] = useState<{ pct: number; label: string; found: number } | null>(null);
   const [cards, setCards] = useState<Record<string, DiscoverCard>>({});
   const [error, setError] = useState<DiscoverError | null>(null);
+  const [runInfo, setRunInfo] = useState<DiscoverRunInfo | null>(null);
   const pollStopRef = useRef(false);
 
   // —— 持久失败态恢复：state.discoverError → 本地 error（刷新后依然可见） ——
@@ -79,7 +95,7 @@ export function useDiscover() {
   const stProjectId = typeof state?.projectId === 'string' ? state.projectId : '';
   useEffect(() => {
     if (running) return;
-    if (stError) setError({ code: stError.errorCode, message: stError.errorMessage });
+    if (stError) setError({ code: stError.errorCode, message: stError.errorMessage, keptPrevious: !!stError.keptPrevious });
   }, [stError?.failedAt, stError?.errorCode, running, stProjectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // —— SSE 丢失兜底：发现进行中 → 周期轮询状态查询，拿到最终成功/失败 ——
@@ -136,7 +152,11 @@ export function useDiscover() {
             // 后端已持久化失败态并附用户可读文案（不含内部细节/供应商原始错误）
             setRunning(false);
             const code = evt.code as string | undefined;
-            setError({ code, message: (evt.message as string | undefined) || discoverErrorMessage(code) });
+            setError({
+              code,
+              message: (evt.message as string | undefined) || discoverErrorMessage(code),
+              keptPrevious: evt.keptPrevious === true,
+            });
             break;
           }
           default:
@@ -147,13 +167,23 @@ export function useDiscover() {
   );
 
   const start = useCallback(
-    async (track: string, intent: Record<string, unknown>) => {
+    async (track: string, intent: Record<string, unknown>, opts?: { retryProjectId?: string }) => {
       setRunning(true);
       setError(null);
       setCards({});
-      setProgress({ pct: 5, label: '正在理解你的赛道…', found: 0 });
+      setRunInfo(null);
+      setProgress({ pct: 5, label: opts?.retryProjectId ? '正在重新识别（旧结果仍可查看）…' : '正在理解你的赛道…', found: 0 });
       try {
-        await apiPost('/api/discover', { track, intent });
+        // r2 §三：重新识别必须复用原 projectId —— 携带 retryProjectId，后端在同项目内新起一次运行
+        // （不新建用户可见项目；赛道/地区/核心条件变化时后端自动改走新项目）。
+        const res = await apiPost('/api/discover', { track, intent, retryProjectId: opts?.retryProjectId });
+        const body = (res || {}) as Record<string, unknown>;
+        setRunInfo({
+          runId: typeof body.runId === 'string' ? body.runId : null,
+          attemptNo: typeof body.attemptNo === 'number' ? body.attemptNo : null,
+          retry: body.retry === true,
+          reused: body.reused === true,
+        });
         // 发现启动即拉一次空状态（对齐 F1 加固：用户立即看到「赛道 + 研究中」而非空白）
         await refresh();
       } catch (e) {
@@ -186,7 +216,8 @@ export function useDiscover() {
     setError(null);
     setProgress(null);
     setCards({});
+    setRunInfo(null);
   }, []);
 
-  return { running, progress, cards, error, start, reset };
+  return { running, progress, cards, error, runInfo, start, reset };
 }

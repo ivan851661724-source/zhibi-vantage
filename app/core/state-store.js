@@ -123,6 +123,22 @@ function loadState(tenantId) {
   if (!id) return null;
   try { return JSON.parse(fs.readFileSync(projFile(id, tid), 'utf8')); } catch { return null; }
 }
+// 按 projectId 直读档案（r2：重试复用原项目时必须能读「非当前指针」的档案；
+// 只在本租户命名空间内查找，天然隔离跨租户）。
+function readProject(id, tenantId) {
+  if (!id) return null;
+  const tid = resolveTenantId(tenantId);
+  try { return JSON.parse(fs.readFileSync(projFile(id, tid), 'utf8')); } catch { return null; }
+}
+// 原子替换合并：competitors 以本态为准整体替换（不是并集）。
+// r2 §四：品牌结果成功后原子替换——旧实现 saveState 按 id 并集合并，会与被替换的旧品牌
+// 混在一起（被淘汰的品牌永远删不掉），因此替换路径必须走本函数。
+function mergeStateReplace(cur, s) {
+  if (!s || !s.projectId) return cur;
+  const merged = Object.assign({}, cur || {}, s);
+  merged.competitors = Array.isArray(s.competitors) ? s.competitors.slice() : [];
+  return merged;
+}
 // 并发 RMW 合并（P1-1.2）：以磁盘最新为基底，本态覆盖其标量字段；competitors 按 id 合并
 // （并集，本态同 id 胜出），避免后台队列新增的竞品被请求态覆盖丢失（last-writer-wins 丢更新）。
 function mergeState(cur, s) {
@@ -143,12 +159,13 @@ function mergeState(cur, s) {
 // tenantId 解析：优先用 state.tenantId（创建时写入，后台队列脱离请求上下文也带得上），否则回退 ALS/_legacy。
 // ---------- SSE 变化推送（F12：轮询 → 变化检测推送） ----------
 // 所有状态变更都经 saveState 落盘；在此统一广播，前端免轮询。
-function saveState(s) {
+function saveState(s, opts) {
   if (!s.projectId) { s.projectId = newProjectId(s.track); if (!getCurrentId(s.tenantId)) setCurrentId(s.projectId, s.tenantId); }
   const tid = resolveTenantId(s.tenantId);
   const fp = projFile(s.projectId, tid);
+  const merge = (opts && opts.replaceCompetitors) ? mergeStateReplace : mergeState;
   try {
-    mutateFile(fp, (cur) => mergeState(cur, s), true);
+    mutateFile(fp, (cur) => merge(cur, s), true);
   } catch (e) {
     // 极端持久锁：退化为原非致命写（不抛，避免 500）；锁释放后下次写入自愈
     bestEffortWrite(fp, s, true);
@@ -170,6 +187,8 @@ function listProjects(tenantId) {
       // 不是调研档案，不得混入历史调研清单。
       if (!s || typeof s !== 'object' || Array.isArray(s) || (!Array.isArray(s.competitors) && !s.projectId)) return;
       const comps = s.competitors || [];
+      let phase = 'done';
+      try { phase = require('../services/discover-state.js').discoverPhase(s); } catch { phase = 'done'; }
       out.push({
         id: s.projectId || f.replace(/\.json$/, ''),
         track: s.track || '(未命名)',
@@ -177,6 +196,11 @@ function listProjects(tenantId) {
         total: comps.length,
         done: comps.filter(c => c.status === 'done').length,
         hasBrief: !!s.brief,
+        // r2 §五：历史伪空记录在清单层就标成未完整完成，绝不按「0 品牌 = 该市场没品牌」呈现
+        phase,
+        incomplete: phase === 'incomplete',
+        failed: phase === 'failed',
+        attemptNo: (s.discoverRun && s.discoverRun.attemptNo) || 1,
         current: (s.projectId || f.replace(/\.json$/, '')) === cur
       });
     } catch {}
@@ -215,4 +239,4 @@ function mirrorProjectToDb(projectId, tenantId, track) {
 }
 
 
-module.exports = { sanitizeNs, tenantDir, resolveTenantId, reportsFile, projFile, newProjectId, getCurrentId, setCurrentId, loadState, saveState, listProjects, mirrorProjectToDb, migrateResearchNamespaces };
+module.exports = { sanitizeNs, tenantDir, resolveTenantId, reportsFile, projFile, newProjectId, getCurrentId, setCurrentId, loadState, readProject, saveState, mergeStateReplace, listProjects, mirrorProjectToDb, migrateResearchNamespaces };
