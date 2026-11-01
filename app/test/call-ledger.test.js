@@ -289,7 +289,7 @@ await t('llm-gateway 网络失败：行必有，request_units/estimated_cost=nul
   } finally { global.fetch = realFetch; }
 });
 
-await t('llm-gateway 5xx：outcome=failed，error_code=DEEPSEEK_500，estimated=null', () => {
+await t('llm-gateway 5xx：outcome=failed，error_code=LLM_PROVIDER_UNAVAILABLE（P0 整改：供应商中立错误码），estimated=null', () => {
   stubFetch([['https://llm-5xx.example/', () => jsonResponse(500, { error: 'boom' })]]);
   try {
     return GW.call([{ role: 'user', content: 'x' }], {
@@ -299,7 +299,7 @@ await t('llm-gateway 5xx：outcome=failed，error_code=DEEPSEEK_500，estimated=
       assert.deepEqual(out, {});
       const row = CallLedger.list({ tenantId: 't-llm-5xx' }).rows[0];
       assert.equal(row.outcome, 'failed');
-      assert.equal(row.error_code, 'DEEPSEEK_500');
+      assert.equal(row.error_code, 'LLM_PROVIDER_UNAVAILABLE');
       assert.equal(row.estimated_cost, null);
       assert.equal(row.request_units, null);
     });

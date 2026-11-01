@@ -89,8 +89,16 @@ function resolveBaseUrl(key, opts) {
   if (envKeySet()) return String(process.env.LLM_BASE_URL || '').trim(); // 3) env key → env 端点
   return key ? '' : String(process.env.LLM_BASE_URL || '').trim();       // 4) 无 key：旧行为
 }
-// opts: { projectId, competitorId, fieldKey } —— 三级归因地基（1-1）；tenantId 由 curTenantId() 兜底
-async function deepseekJSON(messages, key, model, opts) {
+// opts: { projectId, competitorId, fieldKey, failureMode } —— 三级归因地基（1-1）；tenantId 由 curTenantId() 兜底
+// ============================================================
+// 供应商中立通用入口（2026-11 P0 整改）：
+//   llmJSON / llmText 是规范调用名；deepseekJSON / deepseekText 保留为兼容别名
+//   （存量调用点不破坏，逐步迁移）。名字不再绑定任何供应商——实际供应商由
+//   配置（baseUrl/model/key）决定。
+// failureMode 纪律：品牌发现/候选提取/交叉核验等关键链路必须显式传 'throw'；
+// 仅非关键文案润色、摘要补充允许缺省（degrade）。
+// ============================================================
+async function llmJSON(messages, key, model, opts) {
   const o = opts || {};
   return LLMGateway.call(messages, {
     apiKey: key, model: resolveModel(model), baseUrl: resolveBaseUrl(key, o), json: true, temperature: 0.2,
@@ -98,8 +106,8 @@ async function deepseekJSON(messages, key, model, opts) {
   });
 }
 
-// 纯文本接口（用于叙事型简报，避免 DeepSeek json_object 必须含 'json' 字样的限制）
-async function deepseekText(messages, key, model, opts) {
+// 纯文本接口（用于叙事型简报，避免 json_object 必须含 'json' 字样的供应商限制）
+async function llmText(messages, key, model, opts) {
   const o = opts || {};
   return LLMGateway.call(messages, {
     apiKey: key, model: resolveModel(model), baseUrl: resolveBaseUrl(key, o), json: false, temperature: 0.4,
@@ -107,5 +115,9 @@ async function deepseekText(messages, key, model, opts) {
   });
 }
 
+// 兼容别名：旧调用点逐步迁移到 llmJSON / llmText 后移除
+const deepseekJSON = llmJSON;
+const deepseekText = llmText;
 
-module.exports = { deepseekJSON, deepseekText, llmApiKey, resolveModel, resolveDeepModel, resolveBaseUrl };
+
+module.exports = { llmJSON, llmText, deepseekJSON, deepseekText, llmApiKey, resolveModel, resolveDeepModel, resolveBaseUrl };

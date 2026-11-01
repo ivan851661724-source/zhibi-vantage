@@ -6,6 +6,7 @@
 // ============================================================
 
 const SerperBudget = require('../../services/providers/serper-budget.js'); // Serper 总额度预算（状态回显用）
+const LLMHealth = require('../../services/llm-health.js'); // LLM 配置状态分离（configured/operational）
 
 // ---------- /api/config（GET：密钥状态速览） ----------
 // ownBrands（自有品牌清单）属平台业务敏感信息：仅超管返回；租户只见键状态布尔。
@@ -21,8 +22,18 @@ async function configGet(ctx, req, res, url, p) {
   const hasKeys = !!(ctx.activeSearchKey(c) && ((c.llm && c.llm.apiKey) || process.env.LLM_API_KEY));
   const ap = ctx.getAuthPayload(req);
   const isAdmin = !!(ap && ap.kind === 'admin');
+  // LLM 健康快照（缓存只读，GET 绝不触发付费探测）：Key 存在 ≠ 服务可用——
+  // readiness: configured（已配置未验证）/ operational（最近一次真实请求成功）/ unavailable。
+  let llmHealth;
+  try { llmHealth = await LLMHealth.getStatus({ probe: false }); } catch { llmHealth = null; }
+  const llmHealthSafe = llmHealth ? {
+    readiness: llmHealth.readiness, checkedAt: llmHealth.checkedAt, errorClass: llmHealth.errorClass || null,
+  } : null;
   return ctx.sendJSON(res, 200, {
     hasKeys, provider, hasTavily, hasSerper, hasBrave, hasBocha,
+    // 配置状态分离（P0 整改）：hasKeys=已配置；llmHealth.readiness=最近真实探测结论
+    llmConfigured: !!((c.llm && c.llm.apiKey) || process.env.LLM_API_KEY),
+    llmHealth: llmHealthSafe,
     serperKeyCount: serperPool.keys.length, serperKeysDisabled: serperPool.disabled.size,
     // Serper 总额度预算回显（key 只出掩码；total=null = 未配置预算）
     serperBudget: SerperBudget.status(c.search),
@@ -57,9 +68,18 @@ async function configPost(ctx, req, res, url, p) {
     serperKeys = curKeys;
   }
   const next = {
-    // baseUrl/model 留空 = 不锁定（走环境变量 LLM_BASE_URL/LLM_MODEL 或内置 DeepSeek 默认），
+    // baseUrl/model 留空 = 不锁定（走环境变量 LLM_BASE_URL/LLM_MODEL 或内置默认），
     // 不再硬编码回填官方地址——否则会把 .env 下发的专属接入点（如百炼 Token Plan）悄悄覆盖掉。
-    llm: { baseUrl: (body.llm && body.llm.baseUrl) || (cur.llm && cur.llm.baseUrl) || '', model: (body.llm && body.llm.model) || (cur.llm && cur.llm.model) || 'deepseek-v4-flash', apiKey: (body.llm && body.llm.apiKey) || (cur.llm && cur.llm.apiKey) || '' },
+    // P0 整改（2026-11）：保存时必须保留 modelDeep 等既有字段——曾因整对象重建丢 modelDeep，
+    // 深研裁决类调用静默回落轻模型。
+    llm: {
+      baseUrl: (body.llm && body.llm.baseUrl) || (cur.llm && cur.llm.baseUrl) || '',
+      // model 留空不再回填写死的供应商默认模型（否则会压住 env 下发的专属模型）——
+      // 留空 = 交给运行时解析链（config → env → 内置默认）决定
+      model: (body.llm && body.llm.model) || (cur.llm && cur.llm.model) || '',
+      modelDeep: (body.llm && body.llm.modelDeep) || (cur.llm && cur.llm.modelDeep) || '',
+      apiKey: (body.llm && body.llm.apiKey) || (cur.llm && cur.llm.apiKey) || '',
+    },
     search: {
       provider,
       apiKey: (body.search && body.search.apiKey) || (cur.search && cur.search.apiKey) || '',
@@ -78,6 +98,26 @@ async function configPost(ctx, req, res, url, p) {
   };
   await ctx.saveConfig(next);
   return ctx.sendJSON(res, 200, { ok: true, hasKeys: !!(ctx.activeSearchKey(next) && next.llm.apiKey), serperKeyCount: next.search.serperKeys.length });
+}
+
+// ---------- /api/llm-health（GET：LLM 配置状态与健康检查，仅平台超管） ----------
+// P0 整改（2026-11）：Key 存在 ≠ 服务可用。readiness 口径：
+//   operational（最近一次真实最小请求成功）/ configured（已配置未验证）/ 
+//   unavailable（已配置但失败，errorClass 归一分类）/ not_configured。
+// 探测缓存 6 分钟（llm-health.js 内），缓存期内零付费外呼；?probe=1 允许在缓存过期后重探。
+// 响应载荷：provider/baseHost/model/readiness/checkedAt/errorClass——绝无 Key、
+// 带查询参数的完整 URL 或供应商原始错误正文。
+async function llmHealth(ctx, req, res, url, p) {
+  if (p !== '/api/llm-health' || req.method !== 'GET') return false;
+  const ap = ctx.getAuthPayload(req);
+  const isAdmin = !!(ap && ap.kind === 'admin');
+  if (!isAdmin) return ctx.sendJSON(res, 403, { error: 'FORBIDDEN', message: '仅平台超管可查看服务健康状态。' });
+  const wantsProbe = url && url.searchParams && url.searchParams.get('probe') === '1';
+  const h = await LLMHealth.getStatus({ probe: !!wantsProbe });
+  return ctx.sendJSON(res, 200, {
+    provider: h.provider, baseHost: h.baseHost, model: h.model,
+    readiness: h.readiness, checkedAt: h.checkedAt, errorClass: h.errorClass || null,
+  });
 }
 
 // ---------- /api/searchtest（POST：搜索源交叉验证） ----------
@@ -188,4 +228,4 @@ async function report(ctx, req, res, url, p) {
   return ctx.sendJSON(res, 200, { ok: true, message: '已收到，我们会核实后留痕更新。' });
 }
 
-module.exports = { configGet, configPost, searchtest, reset, projectsList, projectsSwitch, projectsDelete, report };
+module.exports = { configGet, configPost, llmHealth, searchtest, reset, projectsList, projectsSwitch, projectsDelete, report };

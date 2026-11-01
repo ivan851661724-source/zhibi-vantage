@@ -231,10 +231,13 @@ Module._load = function (request, parent, isMain) {
   const resolved = resolveReq(request, parent);
   if (resolved.endsWith('research' + path.sep + 'llm.js')) {
     return {
-      deepseekJSON: async () => ({}),
+      llmJSON: async () => ({}),      // P0 整改后规范名（discover 关键链路走 failureMode:'throw'）
+      llmText: async () => '',
+      deepseekJSON: async () => ({}), // 兼容别名（存量调用点）
       deepseekText: async () => '',
       llmApiKey: () => 'stub-key',
       resolveModel: () => 'stub-model',
+      resolveDeepModel: () => 'stub-model',
       resolveBaseUrl: () => 'http://127.0.0.1:9',
     };
   }

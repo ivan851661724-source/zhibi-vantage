@@ -7,7 +7,9 @@
 //   · 仅网络错误/5xx/429 重试 ×2（指数退避 1s→2s）；400/401/403 等确定性 4xx 不重试
 //   · 熔断按 apiKey 分桶（连续 5 失败熔断 30s）——单个失效 key 不再拖垮全部租户
 //   · 配额类（ENRICH_QUOTA）→ 立即 throw（不该降级）
-//   · 其余失败重试耗尽 → 字段级降级：json 返回 {} / 文本返回 ''（调用方按缺失处理，不整家作废）
+//   · 其余失败重试耗尽 → 按 failureMode：'throw' 抛归一 LLMError（关键链路：品牌发现/
+//     候选提取/交叉核验）；默认 'degrade' 字段级降级——json 返回 {} / 文本返回 ''
+//     （调用方按缺失处理，不整家作废；仅限非关键文案润色/摘要类调用）
 //   · 计费在响应落地后：每次"供应商真正受理"的调用只记一次（5xx 计、网络失败不计、
 //     200 后 body 解析失败不重试——避免同一次调用双计费）
 //   · 成功路径记账：metering.enrichRuns + cost_telemetry 三级归因
@@ -25,6 +27,9 @@ const MAX_ATTEMPTS = 3;            // 首次 + 重试 2 次
 const RETRY_BASE_MS = 1000;        // 指数退避：1s → 2s
 const BREAK_THRESHOLD = 5;         // 连续 5 次失败 → 熔断（按 key 分桶）
 const BREAK_MS = 30000;            // 熔断 30s
+// 内置默认仅作「完全未配置时」的最后回落（历史遗留；生产应由 env/设置页显式注入）。
+// 纪律（2026-11 P0 整改）：运行逻辑与错误分类一律供应商中立——错误码/错误消息/账本
+// 不再出现 DeepSeek 字样，供应商差异只存在于配置值（baseUrl/model/key）本身。
 const BUILTIN_BASE_URL = 'https://api.deepseek.com/v1/chat/completions';
 const BUILTIN_MODEL = 'deepseek-v4-flash';
 // 供应商可通过环境变量整平台切换（任何 OpenAI 兼容 /chat/completions 服务均可），
@@ -52,6 +57,56 @@ function breakerOf(key) {
 }
 function circuitOpen(b) { return b.openedAt > 0 && Date.now() - b.openedAt < BREAK_MS; }
 function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
+
+// ============================================================
+// 供应商中立错误分类（2026-11 P0 整改）
+// ------------------------------------------------------------
+// 六类归一错误码（对外契约，调用方/前端按码渲染用户可读文案）：
+//   LLM_AUTH_REJECTED       401/403 —— key 无效 / 未获模型授权
+//   LLM_MODEL_UNAVAILABLE   404，或 400 且错误体指向模型名 —— 模型不存在/未开通
+//   LLM_RATE_LIMITED        429，或平台日预算熔断
+//   LLM_PROVIDER_UNAVAILABLE 5xx / 网络不可达 / 熔断开启
+//   LLM_TIMEOUT             请求超时（abort / 408）
+//   LLM_INVALID_RESPONSE    200 但正文不可解析，或 400 等确定性请求错误
+// 错误载荷纪律：绝不携带 Key、Authorization 头、供应商响应正文、带敏感查询参数的
+// URL。LLMError.message = 归一错误码（账本/日志/遥测安全）；userMessage = 用户可读
+// 中文（SSE/前端直接展示，同样不含内部细节）。
+// ============================================================
+const LLM_ERROR_MESSAGES = {
+  LLM_AUTH_REJECTED: '品牌识别服务鉴权失败（密钥无效或未获模型授权）',
+  LLM_MODEL_UNAVAILABLE: '品牌识别服务当前模型不可用',
+  LLM_RATE_LIMITED: '品牌识别服务额度受限',
+  LLM_PROVIDER_UNAVAILABLE: '品牌识别服务暂不可用',
+  LLM_TIMEOUT: '品牌识别服务响应超时',
+  LLM_INVALID_RESPONSE: '品牌识别服务返回了无法解析的结果',
+};
+class LLMError extends Error {
+  constructor(code, status, userMessage) {
+    super(code);
+    this.name = 'LLMError';
+    this.code = LLM_ERROR_MESSAGES[code] ? code : 'LLM_PROVIDER_UNAVAILABLE';
+    this.status = status || null;
+    this.userMessage = userMessage || LLM_ERROR_MESSAGES[this.code] || this.code;
+    // 重试策略：超时/限流/供应商故障可重试；鉴权/模型/解析类确定性失败重试无意义
+    this.retryable = code === 'LLM_RATE_LIMITED' || code === 'LLM_PROVIDER_UNAVAILABLE' || code === 'LLM_TIMEOUT';
+  }
+}
+// HTTP 状态 → 归一错误码（bodyHint 只用于辅助归类，绝不入错误载荷）
+function classifyLlmStatus(status, bodyHint) {
+  if (status === 401 || status === 403) return new LLMError('LLM_AUTH_REJECTED', status);
+  if (status === 404) return new LLMError('LLM_MODEL_UNAVAILABLE', status);
+  if (status === 429) return new LLMError('LLM_RATE_LIMITED', status);
+  if (status === 408) return new LLMError('LLM_TIMEOUT', status);
+  if (status >= 500) return new LLMError('LLM_PROVIDER_UNAVAILABLE', status);
+  if (status === 400 || status === 422) {
+    // 部分供应商对未知模型返回 400/422：错误体指向模型名时归类为模型不可用
+    if (bodyHint && /model/i.test(bodyHint) && /not\s+(exist|found|support)|invalid|unknown|不存在|不支持|未开通/i.test(bodyHint)) {
+      return new LLMError('LLM_MODEL_UNAVAILABLE', status);
+    }
+    return new LLMError('LLM_INVALID_RESPONSE', status);
+  }
+  return new LLMError('LLM_INVALID_RESPONSE', status);
+}
 
 // M4 任务 C（03 §20）：每次外部 LLM 尝试入账 ExternalCallLedger。旁路观测——账本校验/
 // 存储失败只留 warn 日志，绝不影响主调用（07 §17 paid calls 100% 入账是目标，但账本
@@ -95,13 +150,20 @@ function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, th
 /**
  * llm.call(messages, opts) → Promise<object|string>
  * opts: { apiKey, model, json, temperature, tenantId, projectId, competitorId, fieldKey, baseUrl,
- *         timeoutMs, maxAttempts, trigger }
+ *         timeoutMs, maxAttempts, trigger, failureMode }
  *   trigger：ExternalCallLedger 归因（M4-C，可选；缺省记 'unknown'，不伪造触发来源）
  *   json:true → 解析对象；失败字段级降级返回 {}（不 throw）
+ *   failureMode: 'throw' | 'degrade'（默认 'degrade'，保持既有行为）
+ *     · 'throw'：失败即抛 LLMError（归一错误码 + 用户可读 userMessage，无敏感载荷）。
+ *       品牌发现/候选提取/交叉核验等关键链路必须显式传 'throw'——不得把模型故障
+ *       降级成"空结果"冒充"市场上没有品牌"。
+ *     · 'degrade'：仅限非关键文案润色/摘要补充类调用。
+ *   LLM_DEGRADE=0（全局）仍优先于 failureMode='degrade'（运维总闸，失败即 throw）。
  *   timeoutMs：覆盖默认 45s（大输出调用如 discover 枚举/harvest 传 90000，避免接近阈值触发重试翻倍）
  *   maxAttempts：覆盖默认 3（大输出调用传 2，重试 1 次即可）
- * 错误分类：ENRICH_QUOTA / NO_LLM_KEY → 立即 throw；网络/5xx/429 → 重试 → 熔断 → 降级；
- *           400/401/403 → 不重试（确定性失败，重试纯浪费）→ 降级
+ * 错误分类（供应商中立）：ENRICH_QUOTA / NO_LLM_KEY → 立即 throw；LLM_RATE_LIMITED /
+ *           LLM_TIMEOUT / LLM_PROVIDER_UNAVAILABLE → 重试 → 熔断；LLM_AUTH_REJECTED /
+ *           LLM_MODEL_UNAVAILABLE / LLM_INVALID_RESPONSE → 不重试（确定性失败，重试纯浪费）
  */
 async function call(messages, opts) {
   const o = opts || {};
@@ -110,16 +172,18 @@ async function call(messages, opts) {
   const tid = o.tenantId || '';
   const timeoutMs = o.timeoutMs || TIMEOUT_MS;
   const maxAttempts = Math.max(1, o.maxAttempts || MAX_ATTEMPTS);
+  // 失败模式：显式 'throw' 优先；全局总闸 LLM_DEGRADE=0 时一律 throw（既有运维开关语义）
+  const mustThrow = o.failureMode === 'throw' || degradeDisabled();
   if (!key) throw new Error('NO_LLM_KEY');
   const br = breakerOf(key);
   if (circuitOpen(br)) {
-    if (degradeDisabled()) throw new Error('LLM_CIRCUIT_OPEN');
+    if (mustThrow) throw new LLMError('LLM_PROVIDER_UNAVAILABLE'); // 熔断开启 = 供应商不可用
     return o.json ? {} : '';            // 熔断期：字段级降级，不 throw
   }
   if (tid && !metering.withinQuota(tid, 'enrichRuns')) throw new Error('ENRICH_QUOTA'); // 配额不降级
   if (cost.overDailyBudget(tid)) {                        // 1-1 日预算熔断（独立于配额开关）
     cost.logBudgetAlert(tid);
-    if (degradeDisabled()) throw new Error('LLM_DAILY_BUDGET_EXCEEDED');
+    if (mustThrow) throw new LLMError('LLM_RATE_LIMITED'); // 平台日预算 → 额度受限
     return o.json ? {} : '';
   }
 
@@ -150,24 +214,33 @@ async function call(messages, opts) {
     try {
       const { response: r, release } = await rawCall(messages, key, model, o.json, o.temperature, o.baseUrl, timeoutMs, o.thinking);
       _headersArrived = true;
-      _attemptRows.push({
-        kind: 'header', attempt, durationMs: Date.now() - _attemptStart,
-        status: r.ok ? 'ok' : 'http_' + r.status, errorCode: r.ok ? null : 'DEEPSEEK_' + r.status,
-      });
-      try {
-        // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
+      if (!r.ok) {
+        // 非OTA OK：读取错误体仅用于辅助归类（如 400+模型名 → LLM_MODEL_UNAVAILABLE），
+        // 归类后立即丢弃——错误载荷绝不携带供应商响应正文。
+        let _hint = '';
+        try { _hint = (await r.text()).slice(0, 500); } catch { /* 正文不可读按无 hint 归类 */ }
+        const err = classifyLlmStatus(r.status, _hint);
+        _attemptRows.push({
+          kind: 'header', attempt, durationMs: Date.now() - _attemptStart,
+          status: 'http_' + r.status, errorCode: err.code,
+        });
         try {
+          // 可观测性：记录每次 LLM 调用耗时（含 HTTP 阶段），供 discover/深研耗时排查
           const logger = require('./logger.js');
           logger && logger.info('llm-call', {
             fieldKey: o.fieldKey, competitorId: o.competitorId || null, model,
             attempt: attempt + 1, status: r.status, durationMs: Date.now() - _callStart,
           });
         } catch (e) { /* 日志不可用 */ }
-        if (!r.ok) {
-          // 计费口径与 metering.shouldBill 一致：5xx 供应商已受理计费；4xx 不计
-          if (tid) metering.recordCall(tid, 'enrichRuns', metering.shouldBill(r.status) ? 1 : 0);
-          throw new Error('DEEPSEEK_' + r.status);
-        }
+        // 计费口径与 metering.shouldBill 一致：5xx 供应商已受理计费；4xx 不计
+        if (tid) metering.recordCall(tid, 'enrichRuns', metering.shouldBill(r.status) ? 1 : 0);
+        throw err;
+      }
+      _attemptRows.push({
+        kind: 'header', attempt, durationMs: Date.now() - _attemptStart,
+        status: 'ok', errorCode: null,
+      });
+      try {
         _bodyT0 = Date.now();
         const j = await r.json(); // 200 已受理：解析失败不重试（防双计费）；body 挂起由同一 deadline abort 后按超时重试
         _attemptRows.push({
@@ -179,7 +252,7 @@ async function call(messages, opts) {
           logger && logger.info('llm-body', { fieldKey: o.fieldKey, bodyMs: Date.now() - _bodyT0, totalMs: Date.now() - _callStart });
         } catch (e) { /* 日志不可用 */ }
         if (tid) metering.recordCall(tid, 'enrichRuns', 1);
-        const content = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || (o.json ? '{}' : '');
+        const content = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
         // 1-1 成本归因（usage 驱动，三级归因）
         if (j.usage && tid) {
           cost.record({
@@ -205,8 +278,16 @@ async function call(messages, opts) {
         });
         _flushObs(0);                                        // 结局=成功：落盘本次全部尝试行（degraded=0）
         if (!o.json) return content;
-        try { return JSON.parse(content); }
-        catch { try { return JSON.parse(content.replace(/```json|```/g, '').trim()); } catch { return {}; } }
+        let parsed = null;
+        try { parsed = JSON.parse(content); }
+        catch { try { parsed = JSON.parse(content.replace(/```json|```/g, '').trim()); } catch { parsed = null; } }
+        if (parsed == null || typeof parsed !== 'object') {
+          // 200 但正文不可解析：确定性失败，不重试（防双计费）。throw 模式显式失败，
+          // degrade 模式按字段缺失处理（返回空对象，行为不变）。
+          if (mustThrow) throw new LLMError('LLM_INVALID_RESPONSE', 200);
+          return {};
+        }
+        return parsed;
       } finally { release(); } // 正文读取完成/失败后统一解除 deadline（中间任何 return/throw 都会经过）
     } catch (e) {
       lastErr = e;
@@ -238,17 +319,22 @@ async function call(messages, opts) {
         errorCode: String((e && e.message) || e).slice(0, 64) || null,
       });
       if (e && (e.message === 'ENRICH_QUOTA' || e.message === 'NO_LLM_KEY')) { _flushObs(0); throw e; } // 配额/无 key 不重试
-      const m = e && /^DEEPSEEK_(\d{3})$/.exec(e.message);
-      if (m && m[1] !== '429' && m[1] !== '408' && m[1][0] === '4') {
-        // 确定性 4xx（key 失效/参数错误）：重试必然复现，直接出局
+      if (e && e.name === 'LLMError' && e.retryable === false) {
+        // 确定性失败（鉴权被拒/模型不可用/响应不可解析）：重试必然复现，直接出局
         break;
       }
-      if (m && m[1][0] !== '5' && m[1] !== '429' && m[1] !== '408') break; // 防御：未知状态码不重试
-      if (++br.failures >= BREAK_THRESHOLD) { br.openedAt = Date.now(); br.failures = 0; } // 熔断（该 key）
+      // 其余（限流/超时/供应商故障/网络错误）：退避重试 + 该 key 熔断计数
+      if (++br.failures >= BREAK_THRESHOLD) { br.openedAt = Date.now(); br.failures = 0; }
     }
   }
-  // 重试耗尽：LLM_DEGRADE=0 时还原抛错（测试/运维可用）；默认字段级降级
-  if (degradeDisabled()) { _flushObs(0); throw lastErr; }
+  // 重试耗尽：throw 模式（显式 failureMode 或全局 LLM_DEGRADE=0）→ 抛归一 LLMError；
+  // degrade 模式 → 字段级降级（既有行为不变）。
+  if (mustThrow) {
+    _flushObs(0);
+    if (lastErr && lastErr.name === 'LLMError') throw lastErr;
+    if (lastErr && lastErr.name === 'AbortError') throw new LLMError('LLM_TIMEOUT');
+    throw new LLMError('LLM_PROVIDER_UNAVAILABLE');
+  }
   _flushObs(1); // 结局=字段级降级：全部尝试行标 degraded=1
   try {
     const logger = require('./logger.js');
@@ -257,4 +343,4 @@ async function call(messages, opts) {
   return o.json ? {} : '';
 }
 
-module.exports = { call, normalizeBaseUrl, TIMEOUT_MS, MAX_ATTEMPTS, BREAK_THRESHOLD, BREAK_MS, DEFAULT_MODEL, DEFAULT_BASE_URL };
+module.exports = { call, normalizeBaseUrl, TIMEOUT_MS, MAX_ATTEMPTS, BREAK_THRESHOLD, BREAK_MS, DEFAULT_MODEL, DEFAULT_BASE_URL, LLMError, classifyLlmStatus, LLM_ERROR_MESSAGES };

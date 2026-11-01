@@ -8,11 +8,11 @@ const { activeSearchKey } = require('../core/config.js');
 const { DATA } = require('../core/paths.js');
 const { requestScope } = require('../core/als.js');
 const { emitSSE } = require('../core/sse-hub.js');
-const { loadState, mirrorProjectToDb, newProjectId, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
+const { getCurrentId, loadState, mirrorProjectToDb, newProjectId, resolveTenantId, saveState, setCurrentId } = require('../core/state-store.js');
 const { fanoutSearch } = require('./search.js');
 const { domainOf } = require('./net.js'); // B-6：域级去重用
 const { dedupeByDomain } = require('./dedupe.js'); // B-6 修订版：纯函数去重（可单测）
-const { deepseekJSON, llmApiKey } = require('./llm.js');
+const { llmJSON, deepseekJSON, llmApiKey } = require('./llm.js');
 const { normalizeIntent, resolvePlatforms } = require('./vocab.js');
 const { applyApprovedRules, applyRelevanceJudgments, applySuppression, crossValidate, mergeCandidates, normName, presenceGate, rankCandidates, rejudgeRelevance, slug } = require('./candidates.js');
 const { enqueueResearch } = require('./enrich.js');
@@ -95,6 +95,8 @@ function buildFanoutQueries(track, intent) {
 }
 // 发现渠道①：LLM 内生知识枚举（免费候选生成器；铁律：每个名字必须过搜索验证才能入库）
 // 性能（2026-08-12 诊断）：输出规模是 discover 慢的主因 → 候选 8-10、why 极简（输出 tokens 减半）
+// P0 整改（2026-11）：候选提取是关键链路 → failureMode:'throw'——模型不可用必须显式失败，
+// 绝不允许降级成空候选后把「模型故障」冒充成「市场上没有品牌」。
 async function llmEnumerate(track, intent, dsKey) {
   const regions = (intent && intent.regions && intent.regions.length) ? intent.regions.join('/') : 'us(北美为主)';
   const sys = `你是资深消费品行业分析师。基于你的既有知识，枚举"${track}"赛道（主要市场：${regions}）真实存在的品牌。
@@ -104,11 +106,9 @@ async function llmEnumerate(track, intent, dsKey) {
 - 只列你有把握真实存在的；宁缺毋滥。
 - 只列独立品牌，绝不列平台/市场（Etsy、Amazon、Amazon Custom、TikTok Shop、eBay 等都是平台，不是品牌）。
 输出 JSON：{"candidates":[{"name":"","url":"","tier":"","matchScore":0,"why":""}]}`;
-  try {
-    // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）
-    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: `赛道：${track}；意图：${JSON.stringify(intent || {})}` }], dsKey, null, { fieldKey: 'discover-enumerate', timeoutMs: 90000, maxAttempts: 2, thinking: false });
-    return (j.candidates || []).map(c => { c.src = 'llm'; return c; });
-  } catch { return []; }
+  // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）
+  const j = await llmJSON([{ role: 'system', content: sys }, { role: 'user', content: `赛道：${track}；意图：${JSON.stringify(intent || {})}` }], dsKey, null, { fieldKey: 'discover-enumerate', timeoutMs: 90000, maxAttempts: 2, thinking: false, failureMode: 'throw' });
+  return ((j && j.candidates) || []).map(c => { c.src = 'llm'; return c; });
 }
 // 阶段一：只 harvest 候选名 + URL（减编造）；同时产出第二轮追加查询（两轮迭代搜索）
 // 性能（2026-08-12 诊断）：snippets 每查询 6→4 条、截断 260→200（输入减负），候选 why 极简（输出减半）
@@ -133,9 +133,10 @@ async function harvestCandidates(track, intent, fanout, dsKey, labels) {
 - 另外：从结果里发现的【线索】（提到但信息不足的品牌名、别名、"also compare with X"），生成最多 3 条值得追加的搜索查询放入 moreQueries；没有就给空数组。
 输出 JSON：{"candidates":[{"name":"","url":"","tier":"","matchScore":0,"why":""}],"moreQueries":["",""]}`;
   const user = `搜索结果：\n${snippets.join('\n\n')}`;
-  // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）
-  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-harvest', timeoutMs: 90000, maxAttempts: 2, thinking: false });
-  return { candidates: j.candidates || [], moreQueries: Array.isArray(j.moreQueries) ? j.moreQueries.slice(0, 3) : [] };
+  // 大输出调用：超时放宽到 90s、重试 1 次（避免 45s 阈值触发重试翻倍）。
+  // P0 整改（2026-11）：候选提取关键链路 → failureMode:'throw'（模型故障不得冒充空结果）。
+  const j = await llmJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-harvest', timeoutMs: 90000, maxAttempts: 2, thinking: false, failureMode: 'throw' });
+  return { candidates: (j && j.candidates) || [], moreQueries: Array.isArray(j && j.moreQueries) ? j.moreQueries.slice(0, 3) : [] };
 }
 
 // 步骤1 主流程：知识枚举 + 两轮迭代搜索 + 合并验证，返回骨架卡（不等待深研）
@@ -412,6 +413,9 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
   } catch (e) {
     state.marketTrends = { status: 'unprobed', reason: String(e && e.message || e).slice(0, 120), track: trackWork };
   }
+  // P0 整改（2026-11）：只有完整流程成功结束、且确实没有品牌通过交叉核验时，
+  // 才允许以「未找到已核验品牌」收尾——显式标记，绝不与"模型故障导致的空"混淆。
+  if (!state.competitors.length) state.discoverEmpty = true;
   state.discoverDone = true; saveState(state); // 标记发现完成（供前端 SSE 断开时的轮询兜底判定收尾）
   if (emit) emitT('discover_complete', { projectId: pid, total: state.competitors.length });
   // 后台逐家深研（不阻塞返回）
@@ -419,25 +423,93 @@ async function runDiscover(track, intent, config, emit, projectId, runId) {
   return state;
 }
 
+// ============================================================
+// P0 整改（2026-11）：任务失败显式化 + 同请求幂等
+// ------------------------------------------------------------
+// · discoverInflight：同租户进行中的发现任务表（tenantId → projectId）。同一请求
+//   重试/双开页重复提交 → 返回同一 projectId，绝不产生重复项目、重复任务或重复扣额。
+//   （单进程架构下完备；多副本部署需换共享锁——与 handlers/collect.js briefInflight 同口径。）
+// · 失败终态：把 errorCode / 用户可读 errorMessage / failedAt / previousProjectId
+//   持久进项目档案（discoverError 字段），SSE 只作加速通知——前端断线后凭状态查询
+//   仍能恢复最终失败。绝不把模型故障写成 competitors:[] 的伪成功空结果。
+// · 错误载荷纪律：state/SSE 只放归一错误码与用户可读文案；原始异常只进日志。
+// ============================================================
+const discoverInflight = new Map(); // tenantId -> projectId
+// 归一错误码 → 用户可读文案（不含内部细节/原始异常文本；与前端映射保持一致）
+function discoverUserMessage(code, e) {
+  if (e && e.userMessage && e.name === 'LLMError') return e.userMessage;
+  switch (code) {
+    case 'NO_KEYS': return '品牌识别服务尚未配置，请联系平台管理员完成配置。';
+    case 'quota': return '研究额度已用尽，请明天再试或联系平台管理员。';
+    case 'SEARCH_QUOTA': return '搜索服务额度不足，请稍后再试或联系平台管理员。';
+    case 'SEARCH_FAILED': return '搜索服务暂不可用，请稍后重新识别。';
+    case 'LLM_AUTH_REJECTED': return '品牌识别服务鉴权失败（密钥无效或未获模型授权）。';
+    case 'LLM_MODEL_UNAVAILABLE': return '品牌识别服务当前模型不可用，请联系平台管理员。';
+    case 'LLM_RATE_LIMITED': return '品牌识别服务额度受限，请稍后重新识别。';
+    case 'LLM_TIMEOUT':
+    case 'LLM_PROVIDER_UNAVAILABLE':
+    case 'LLM_INVALID_RESPONSE': return '品牌识别服务暂不可用，请稍后重新识别。';
+    default: return '本次品牌识别未完成，请稍后重新识别。';
+  }
+}
+function discoverErrorCode(e) {
+  if (e && e.name === 'LLMError' && e.code) return e.code;
+  const m = e && e.message;
+  if (m === 'NO_KEYS') return 'NO_KEYS';
+  if (m === 'ENRICH_QUOTA') return 'quota'; // 用户今日研究额度
+  if (m === 'SEARCH_QUOTA') return 'SEARCH_QUOTA'; // 搜索服务额度不足（区分于用户额度）
+  return 'DISCOVER_FAILED';
+}
+
 // 异步启动发现（不阻塞 HTTP 响应）：同步返回 projectId 给 handler 组成 202；
-// 管线在 setImmediate 里异步跑，结束（成功/失败）时释放并发闸。
+// 管线在 setImmediate 里异步跑，结束（成功/失败）时释放并发闸与幂等登记。
+// 返回 { projectId, reused }：reused=true 表示同租户已有进行中任务，本次为幂等复用
+// （调用方不得重复扣每日额度、不得重复入并发闸）。
 function discoverLaunch(track, intent, config, gate) {
+  const tid = resolveTenantId();
+  // 幂等：同租户已有进行中的发现 → 复用同一 projectId（不重复 spawn/扣额）
+  if (discoverInflight.has(tid)) return { projectId: discoverInflight.get(tid), reused: true };
   const projectId = newProjectId(track);
+  discoverInflight.set(tid, projectId);
+  // 上一次成功结果指针：失败面板用它引导用户回到旧结果（旧项目档案永不覆盖）
+  let prevPointer = null;
+  try { prevPointer = getCurrentId(tid); } catch { prevPointer = null; }
   // 审核整改 §一：runId 在启动点生成并透传——成功路径与失败 catch 用同一个 runId 终结
   const runId = Telemetry.newRunId();
+  // done：本次执行（成功/失败）的完成句柄。调用方（HTTP handler）不等待——仅为
+  // 测试与运维探针提供确定性收尾观测；不改变既有异步行为。
+  let _settleDone = null;
+  const done = new Promise((r) => { _settleDone = r; });
   setImmediate(() => {
     runDiscover(track, intent, config, emitSSE, projectId, runId)
       .catch(e => {
-        const code = e.message === 'NO_KEYS' ? 'NO_KEYS'
-                   : (e.message === 'SEARCH_QUOTA' || e.message === 'ENRICH_QUOTA') ? 'quota'
-                   : 'DISCOVER_FAILED';
+        const code = discoverErrorCode(e);
+        const msg = discoverUserMessage(code, e);
         Telemetry.endRun(runId, 'error', code); // 失败终态：total.status=error + 受控 code，绝不产生 milestone_all_done
         try { Logger.error('discover-failed', { projectId, code, message: String(e.message || e), stack: String(e.stack || '').slice(0, 600) }); } catch {}
-        emitSSE('discover_error', { projectId, code, message: String(e.message || e) });
+        // 持久失败态：写进本次项目档案（当前指针仍指向本次项目），保留审计；绝不伪成功
+        try {
+          const s = loadState();
+          if (s && s.projectId === projectId) {
+            s.discoverError = {
+              errorCode: code,
+              errorMessage: msg,
+              failedAt: new Date().toISOString(),
+              previousProjectId: prevPointer || null,
+            };
+            s.discoverDone = false; // 失败≠完成：不得让轮询兜底把失败当收尾
+            saveState(s);
+          }
+        } catch (e2) { /* 持久化失败不影响错误上报 */ }
+        emitSSE('discover_error', { projectId, code, message: msg, tenantId: tid });
       })
-      .finally(() => { if (gate) gate.leave(); });
+      .finally(() => {
+        if (discoverInflight.get(tid) === projectId) discoverInflight.delete(tid);
+        if (gate) gate.leave();
+        if (_settleDone) _settleDone(null);
+      });
   });
-  return { projectId };
+  return { projectId, reused: false, done };
 }
 
 

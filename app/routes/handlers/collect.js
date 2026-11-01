@@ -108,9 +108,10 @@ async function discover(ctx, req, res, url, p) {
   if (!track) return fail(400, { error: '请填写你要做的赛道' });
   if (track.length > 200) return fail(400, { error: '赛道描述过长（上限 200 字）' });
   const config = ctx.loadConfig();
-  // 密钥缺失：同步前置拦截，立即 401（异步管线无法再回 401）
+  // 密钥缺失：同步前置拦截，立即 401（异步管线无法再回 401）。
+  // 文案供应商中立（P0 整改）：统一称「品牌识别服务」，不再绑定具体供应商名。
   if (!ctx.activeSearchKey(config) || !llmApiKey(config)) {
-    return fail(401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 LLM 密钥。' });
+    return fail(401, { error: 'NO_KEYS', message: '品牌识别服务尚未配置，请联系平台管理员完成配置。' });
   }
   // R5.1：单免费档·每租户每日 N 次全景调研（防滥用上限；值 ZB_FREE_DAILY_DISCOVERS 可配）
   const _tid = ctx.curTenantId ? ctx.curTenantId() : '_legacy';
@@ -123,9 +124,15 @@ async function discover(ctx, req, res, url, p) {
   }
   // 渐进式发现：异步启动管线，立即 202 返回 projectId；后续进度经 SSE /api/stream 推送。
   // 并发闸在 discoverLaunch 的 setImmediate 链末端 .finally 释放（成功/失败都释放）。
-  const { projectId } = ctx.discoverLaunch(track, body.intent || {}, config, ctx.discoverGate);
-  metering.recordDailyDiscover(_tid); // R5.1：占用一次每日额度
-  return ctx.sendJSON(res, 202, { projectId, sessionId: projectId, status: 'accepted' });
+  // P0 整改（2026-11）：同租户已有进行中的发现 → 幂等复用同一 projectId：
+  // 不重复 spawn 任务、不重复扣每日额度、立即释放本次占用的并发闸。
+  const launched = ctx.discoverLaunch(track, body.intent || {}, config, ctx.discoverGate);
+  if (launched.reused) {
+    ctx.discoverGate.leave();
+    return ctx.sendJSON(res, 202, { projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted', reused: true });
+  }
+  metering.recordDailyDiscover(_tid); // R5.1：占用一次每日额度（幂等复用不计）
+  return ctx.sendJSON(res, 202, { projectId: launched.projectId, sessionId: launched.projectId, status: 'accepted' });
 }
 
 // ---------- /api/enrich（POST：单对手富集） ----------
@@ -148,7 +155,7 @@ async function lookup(ctx, req, res, url, p) {
   if (!name) return ctx.sendJSON(res, 400, { error: 'EMPTY', message: '请填写品牌名' });
   const config = ctx.loadConfig();
   if (!config || !ctx.activeSearchKey(config) || !llmApiKey(config))
-    return ctx.sendJSON(res, 401, { error: 'NO_KEYS', message: '未配置 API 密钥，请在设置中填入搜索源与 LLM 密钥。' });
+    return ctx.sendJSON(res, 401, { error: 'NO_KEYS', message: '品牌识别服务尚未配置，请联系平台管理员完成配置。' });
   try {
     const s = await ctx.lookupBrand(name, body.url || '', config, body.intent);
     // 正向信号：用户手工补的"真对手"——算法漏了谁，比删了谁更有信息量

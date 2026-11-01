@@ -20,6 +20,12 @@ interface Overview {
   global?: { tenantCount: number; suspended: number; totalBilledSearchCalls: number };
   tenants?: { id: string; name: string; email: string; plan: string; status: string; projects: number; billed: { search_calls: number; enrich_runs: number } }[];
 }
+// P0 整改（2026-11）：LLM 配置状态分离——Key 存在 ≠ 服务可用
+interface LlmHealth {
+  provider: string; baseHost: string; model: string;
+  readiness: 'operational' | 'configured' | 'unavailable' | 'not_configured';
+  checkedAt: string; errorClass: string | null;
+}
 
 async function adminGet<T>(url: string, token: string): Promise<T> {
   const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
@@ -37,6 +43,8 @@ export default function AdminPage() {
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState<SourceHealth | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [llmHealth, setLlmHealth] = useState<LlmHealth | null>(null);
+  const [llmProbing, setLlmProbing] = useState(false);
   const [loadErr, setLoadErr] = useState('');
 
   const loadData = useCallback(async (t: string) => {
@@ -51,7 +59,22 @@ export default function AdminPage() {
     } catch (e) {
       setLoadErr(e instanceof Error ? e.message : String(e));
     }
+    // LLM 健康快照（缓存只读，失败不阻塞其他面板数据）
+    try {
+      setLlmHealth(await adminGet<LlmHealth>('/api/llm-health', t));
+    } catch { /* 403（租户 token）/网络失败 → 面板显示未获取 */ }
   }, []);
+
+  // 显式重探（?probe=1：缓存过期后发起一次真实最小请求）
+  const probeLlm = useCallback(async () => {
+    if (!token || llmProbing) return;
+    setLlmProbing(true);
+    try {
+      setLlmHealth(await adminGet<LlmHealth>('/api/llm-health?probe=1', token));
+    } catch { /* 保留上一次快照 */ } finally {
+      setLlmProbing(false);
+    }
+  }, [token, llmProbing]);
 
   useEffect(() => {
     const t = sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
@@ -119,6 +142,28 @@ export default function AdminPage() {
         <button className="btn-ghost" type="button" onClick={logout}>退出</button>
       </div>
       {loadErr && <p className="hint">⚠ 加载失败：{loadErr}</p>}
+
+      <section className="admin-sec">
+        <h3>品牌识别服务健康（LLM）</h3>
+        {!llmHealth && <p className="hint">未获取（需要超管凭证）…</p>}
+        {llmHealth && (
+          <p className="hint">
+            状态：{llmHealth.readiness === 'operational'
+              ? <span className="badge-ok">可用（最近真实请求成功）</span>
+              : llmHealth.readiness === 'configured'
+                ? <span className="badge-warn">已配置（尚未验证）</span>
+                : llmHealth.readiness === 'not_configured'
+                  ? <span className="badge-warn">未配置</span>
+                  : <span className="badge-warn">不可用{llmHealth.errorClass ? '（' + llmHealth.errorClass + '）' : ''}</span>}
+            {' '}· 供应商 {llmHealth.provider || '—'} · 模型 {llmHealth.model || '—'}
+            {llmHealth.checkedAt ? ' · 检查于 ' + new Date(llmHealth.checkedAt).toLocaleString() : ''}
+            {' '}
+            <button className="btn-ghost" type="button" onClick={() => void probeLlm()} disabled={llmProbing}>
+              {llmProbing ? '探测中…' : '立即检测'}
+            </button>
+          </p>
+        )}
+      </section>
 
       <section className="admin-sec">
         <h3>搜索源健康（R5.4）</h3>

@@ -98,6 +98,7 @@ function registerAll() {
   // —— 配置/搜索测试/档案管理/报错组 ——
   registry.register('GET', '/api/config', 'tenant', MiscH.configGet);
   registry.register('POST', '/api/config', 'tenant', MiscH.configPost);
+  registry.register('GET', '/api/llm-health', 'tenant', MiscH.llmHealth); // P0 整改：LLM 配置状态分离（handler 内校验超管）
   registry.register('POST', '/api/searchtest', 'tenant', MiscH.searchtest);
   registry.register('POST', '/api/reset', 'tenant', MiscH.reset);
   registry.register('GET', '/api/projects', 'tenant', MiscH.projectsList);

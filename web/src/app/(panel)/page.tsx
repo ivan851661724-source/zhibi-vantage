@@ -307,7 +307,7 @@ export default function WorkbenchPage() {
 }
 
 function WorkbenchInner() {
-  const { state, loading, refresh } = useZhibiState();
+  const { state, loading, refresh, switchProject } = useZhibiState();
   const discover = useDiscover();
   const [decisions, setDecision] = useWbDecisions();
   const [stFilter, setStFilter] = useState<(typeof STATE_FILTERS)[number]>('all');
@@ -411,17 +411,60 @@ function WorkbenchInner() {
     }
   }
 
-  // 发现失败横幅（同步错误如 NO_KEYS/每日配额；独立于进度条渲染，修复错误被吞）
-  const errorBanner = discover.error && !discover.running ? (
-    <div className="discover-error-box" style={{ margin: '0 0 12px' }}>
+  // —— P0 整改（2026-11）：品牌识别失败显式化 ——
+  // 失败终态来源两路合并：state.discoverError（后端持久化，刷新后仍在）优先；
+  // 瞬态 discover.error（本会话 SSE/HTTP 错误）兜底。失败绝不渲染成空品牌列表。
+  const taskError = (state && (state as Record<string, unknown>).discoverError) as
+    | { errorCode: string; errorMessage: string; failedAt: string; previousProjectId?: string | null }
+    | null
+    | undefined;
+  const taskEmpty = !!(state && (state as Record<string, unknown>).discoverEmpty) && !taskError;
+  const bannerError = taskError
+    ? { code: taskError.errorCode, message: taskError.errorMessage }
+    : discover.error && !discover.running
+      ? discover.error
+      : null;
+  const retryDiscover = () => {
+    if (!state?.track || discover.running) return;
+    const intent = (state.intent as Record<string, unknown>) || {};
+    void discover.start(state.track, intent);
+  };
+  const errorBanner = bannerError && !discover.running ? (
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="alert">
       <p className="hint">
-        {discover.error.code === 'DISCOVER_QUOTA'
+        {bannerError.code === 'DISCOVER_QUOTA'
           ? '今日免费调研次数已用完。明天再来，或加入候补名单优先解锁。'
-          : discover.error.code === 'NO_KEYS'
-            ? '尚未配置 API 密钥：请到「设置」填写搜索源与 LLM 密钥后重试。'
-            : '⚠ 本次发现未完成，系统将在后续监测中重新确认。'}
+          : bannerError.code === 'NO_KEYS'
+            ? '品牌识别服务尚未配置，请联系平台管理员完成配置。'
+            : '⚠ ' + (bannerError.message || '本次品牌识别未完成，请稍后重新识别。')}
       </p>
-      {discover.error.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
+      {bannerError.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
+      {state?.track && bannerError.code !== 'DISCOVER_QUOTA' && bannerError.code !== 'NO_KEYS' && (
+        <p style={{ margin: '8px 0 0' }}>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+          {taskError?.previousProjectId ? (
+            <button
+              className="btn-ghost"
+              type="button"
+              style={{ marginLeft: 8 }}
+              onClick={() => { const pid = taskError.previousProjectId as string; void switchProject(pid, () => true); }}
+            >
+              查看上一次结果
+            </button>
+          ) : null}
+        </p>
+      )}
+    </div>
+  ) : null;
+  // 识别成功但确无已核验品牌（区别于失败/空列表的显式说明）
+  const emptyVerifiedBanner = taskEmpty && !discover.running ? (
+    <div className="discover-error-box" style={{ margin: '0 0 12px' }}>
+      <p className="hint">识别已完成：本次未找到通过交叉核验的竞争品牌（可能是极小众赛道或线索不足）。你可以换个更具体的赛道描述重新识别。</p>
+      {state?.track && (
+        <p style={{ margin: '8px 0 0' }}>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+        </p>
+      )}
     </div>
   ) : null;
 
@@ -437,6 +480,7 @@ function WorkbenchInner() {
   return (
     <div className="wb-page">
       {errorBanner}
+      {emptyVerifiedBanner}
       {/* 首页 Hero —— 黑底卡片 + 纯白渐变文本 + 白底主操作 */}
       {state?.track ? (
         <section className="wb-hero">
@@ -559,10 +603,12 @@ function WorkbenchInner() {
       {/* 材料流 */}
       <div className="workbench-wrap" id="workbenchWrap">
         {msAll.length === 0 ? (
-          <div className="empty">
-            <div className="big">{discover.running ? '正在调研…' : '暂无材料'}</div>
-            <div className="sub">完成一次调研后，Agent 会在这里推送跟价 / 上新 / 新渠道 / 口碑材料。</div>
-          </div>
+          bannerError && !discover.running ? null : ( /* 失败态由上方失败面板表达，不叠加误导性空列表 */
+            <div className="empty">
+              <div className="big">{discover.running ? '正在调研…' : '暂无材料'}</div>
+              <div className="sub">完成一次调研后，Agent 会在这里推送跟价 / 上新 / 新渠道 / 口碑材料。</div>
+            </div>
+          )
         ) : ms.length === 0 ? (
           <div className="empty">
             <div className="big">没有符合条件的材料</div>

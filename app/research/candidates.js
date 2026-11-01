@@ -280,10 +280,11 @@ async function rejudgeRelevance(track, candidates, fanout, dsKey) {
 - 只数"真正面向终端消费者售卖该品类产品"的品牌为 relevant=true。
 输出 JSON：{"judgments":[{"name":"","relevant":true|false,"categoryFit":0-100,"reason":"一句话"}]}`;
   const user = `候选清单：\n` + items.map((it, i) => `[${i + 1}] ${it.name} | tier=${it.tier} | ${it.url || '(无官网)'} | ${it.why || ''} | 摘录：${it.snippet || ''}`).join('\n');
-  try {
-    const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-crossvalidate', thinking: false });
-    return j.judgments || [];
-  } catch { return []; }
+  // P0 整改（2026-11）：交叉核验是关键链路 → failureMode:'throw'——模型不可用必须
+  // 显式失败上抛（runDiscover 记录 stage 错误后终结任务），不得静默返回空裁决冒充
+  // "没有候选通过核验"。
+  const j = await deepseekJSON([{ role: 'system', content: sys }, { role: 'user', content: user }], dsKey, null, { fieldKey: 'discover-crossvalidate', thinking: false, failureMode: 'throw' });
+  return (j && j.judgments) || [];
 }
 
 function slug(name, i) {
