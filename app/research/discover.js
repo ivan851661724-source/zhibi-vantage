@@ -481,6 +481,7 @@ function discoverUserMessage(code, e) {
     case 'SEARCH_QUOTA': return '搜索服务额度不足，请稍后再试或联系平台管理员。';
     case 'SEARCH_FAILED': return '搜索服务暂不可用，请稍后重新识别。';
     case 'LLM_AUTH_REJECTED': return '品牌识别服务鉴权失败（密钥无效或未获模型授权）。';
+    case 'LLM_NO_ENTITLEMENT': return '品牌识别服务未开通：当前账号没有可用的模型额度，请联系平台管理员。';
     case 'LLM_MODEL_UNAVAILABLE': return '品牌识别服务当前模型不可用，请联系平台管理员。';
     case 'LLM_RATE_LIMITED': return '品牌识别服务额度受限，请稍后重新识别。';
     case 'LLM_TIMEOUT':

@@ -61,8 +61,10 @@ function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
 // ============================================================
 // 供应商中立错误分类（2026-11 P0 整改）
 // ------------------------------------------------------------
-// 六类归一错误码（对外契约，调用方/前端按码渲染用户可读文案）：
-//   LLM_AUTH_REJECTED       401/403 —— key 无效 / 未获模型授权
+// 七类归一错误码（对外契约，调用方/前端按码渲染用户可读文案）：
+//   LLM_AUTH_REJECTED       401，或 403 但供应商未明说「未购买」—— key 无效 / 越权
+//   LLM_NO_ENTITLEMENT      403 且错误体明确表达未购买/无资格（如百炼 AccessDenied.Unpurchased）
+//                           ——与「Key 无效」同码不同因：前者去控制台开通额度，后者换 Key
 //   LLM_MODEL_UNAVAILABLE   404，或 400 且错误体指向模型名 —— 模型不存在/未开通
 //   LLM_RATE_LIMITED        429，或平台日预算熔断
 //   LLM_PROVIDER_UNAVAILABLE 5xx / 网络不可达 / 熔断开启
@@ -74,6 +76,7 @@ function degradeDisabled() { return process.env.LLM_DEGRADE === '0'; }
 // ============================================================
 const LLM_ERROR_MESSAGES = {
   LLM_AUTH_REJECTED: '品牌识别服务鉴权失败（密钥无效或未获模型授权）',
+  LLM_NO_ENTITLEMENT: '品牌识别服务未开通：当前账号没有可用的模型额度',
   LLM_MODEL_UNAVAILABLE: '品牌识别服务当前模型不可用',
   LLM_RATE_LIMITED: '品牌识别服务额度受限',
   LLM_PROVIDER_UNAVAILABLE: '品牌识别服务暂不可用',
@@ -92,7 +95,15 @@ class LLMError extends Error {
   }
 }
 // HTTP 状态 → 归一错误码（bodyHint 只用于辅助归类，绝不入错误载荷）
+// 供应商把「Key 没买/没资格」也塞进 403，与「Key 无效」同状态码不同因：
+// 前者是用户去控制台开通额度，后者是运维换 Key，处置动作完全不同，故按错误体掰开。
+// 只在错误体明确表达未购买/无资格时才归 LLM_NO_ENTITLEMENT——宁可保守，
+// 也不把「越权访问」误报成「没买东西」。bodyHint 只做归类，不入错误载荷。
+const UNPURCHASED_HINT = /Unpurchased|not\s+eligible\s+for\s+using|未开通|未购买/i;
 function classifyLlmStatus(status, bodyHint) {
+  if (status === 403 && bodyHint && UNPURCHASED_HINT.test(String(bodyHint))) {
+    return new LLMError('LLM_NO_ENTITLEMENT', status);
+  }
   if (status === 401 || status === 403) return new LLMError('LLM_AUTH_REJECTED', status);
   if (status === 404) return new LLMError('LLM_MODEL_UNAVAILABLE', status);
   if (status === 429) return new LLMError('LLM_RATE_LIMITED', status);
@@ -163,7 +174,7 @@ function rawCall(messages, key, model, json, temperature, baseUrl, timeoutMs, th
  *   maxAttempts：覆盖默认 3（大输出调用传 2，重试 1 次即可）
  * 错误分类（供应商中立）：ENRICH_QUOTA / NO_LLM_KEY → 立即 throw；LLM_RATE_LIMITED /
  *           LLM_TIMEOUT / LLM_PROVIDER_UNAVAILABLE → 重试 → 熔断；LLM_AUTH_REJECTED /
- *           LLM_MODEL_UNAVAILABLE / LLM_INVALID_RESPONSE → 不重试（确定性失败，重试纯浪费）
+ *           LLM_NO_ENTITLEMENT / LLM_MODEL_UNAVAILABLE / LLM_INVALID_RESPONSE → 不重试（确定性失败，重试纯浪费）
  */
 async function call(messages, opts) {
   const o = opts || {};

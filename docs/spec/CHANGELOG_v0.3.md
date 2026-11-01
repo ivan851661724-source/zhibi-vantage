@@ -80,3 +80,11 @@
 - 投影纪律：只读投影、禁止原地裁剪；`/api/evidence-detail`、`/api/brands/{id}` 不变，证据→Snapshot 溯源关系不变。
 - 前端：Provider 首屏读 `scope=summary`；工作台以状态接口优先渲染横幅；重聚合页面（资产/机会/象限）按需自取完整 state；SSE 事件增 `runId` 并按 `projectId+runId` 双过滤。
 - 测试：新增 `app/test/brand-discovery-r3.test.js`（18 项）。
+
+## v0.4.2-SC09 修订（2026-11-01，品牌发现 r4，未合并——随 review/brand-discovery-llm-resilience-r4 分支）
+
+- 新增 SC-09（LLM 错误码细分）：新增 `LLM_NO_ENTITLEMENT`，把「Key 有效但账号未购买模型」（403 `AccessDenied.Unpurchased`）与「Key 无效/越权」（401/其余 403 `LLM_AUTH_REJECTED`）分开。
+- 归类保守：仅 403 且错误体明确表达未购买/无资格才归新码；空错误体、无该语义的 403 一律保持 `LLM_AUTH_REJECTED`。`LLM_MODEL_UNAVAILABLE` / 429 / 5xx 归类不变。
+- 新码不可重试、不入熔断；错误载荷纪律不变（不含 Key/Authorization/供应商正文）。
+- 接口形状不变：`/api/llm-health` 的 `errorClass`、`/api/discover` 的 `errorCode`、`/api/discover/status` 的 `discoverError.errorCode` 取值域扩大一项；历史档案错误码不回填。
+- 测试：新增 `app/test/llm-entitlement.test.js`（12 项）。
