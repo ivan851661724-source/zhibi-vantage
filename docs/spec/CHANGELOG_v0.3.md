@@ -71,3 +71,12 @@
 - 额度：同项目重新识别不计每日额度；新建项目照旧。
 - llm-health：配置指纹（Key/BaseURL/Model/ModelDeep）变化即失效；`operational` 要求 HTTP 成功 + 返回可解析 + 结构合规（`{"ok":true}`）；200 非 JSON → `LLM_INVALID_RESPONSE`；配置保存后显式 invalidate。
 - 测试：新增 `app/test/brand-discovery-r2.test.js`（14 项）。
+
+## v0.4.1-SC08 修订（2026-11-01，品牌发现 r3，未合并——随 review/brand-discovery-llm-resilience-r3 分支）
+
+- 新增 SC-08（工作台读态契约）：`GET /api/state` 增 `scope=summary` 与 `projectId`（不带 scope 行为不变）；首屏摘要 <150KB，品牌级只保留 9 项 + `evidenceCount`。
+- 新增 `GET /api/discover/status`（<10KB、`no-store`、租户/项目隔离，跨租户与不存在同响应 404），状态口径复用 SC-07 的 `discover-state.js`。
+- 新增 `GET /api/competitor-detail`（单品牌按需详情，含 attempts/fieldSources/evidenceList），与 `/api/state` 同一 decorate 链路。
+- 投影纪律：只读投影、禁止原地裁剪；`/api/evidence-detail`、`/api/brands/{id}` 不变，证据→Snapshot 溯源关系不变。
+- 前端：Provider 首屏读 `scope=summary`；工作台以状态接口优先渲染横幅；重聚合页面（资产/机会/象限）按需自取完整 state；SSE 事件增 `runId` 并按 `projectId+runId` 双过滤。
+- 测试：新增 `app/test/brand-discovery-r3.test.js`（18 项）。

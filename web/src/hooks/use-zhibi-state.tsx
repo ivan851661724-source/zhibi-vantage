@@ -150,7 +150,9 @@ export function ZhibiStateProvider({ children }: { children: ReactNode }) {
       return () => { alive = false; };
     }
     const worker = createStateRefresh<ZhibiState>({
-      read: () => apiGet<ZhibiState>('/api/state?private_view=1'),
+      // r3 §四：首屏只取摘要投影（<150KB）。品牌级 attempts / evidenceList / fieldSources
+      // 与白空间等重聚合不再随首屏下发；需要完整真值的页面用 useProjectFullState 按需自取。
+      read: () => apiGet<ZhibiState>('/api/state?private_view=1&scope=summary'),
       apply,
       onError: failure => setError(failure ? '最新资料暂时无法读取。已显示的资料可能不是最新，请重试。' : ''),
       onSettled: () => setLoading(false),

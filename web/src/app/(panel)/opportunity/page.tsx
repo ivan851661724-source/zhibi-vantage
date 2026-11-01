@@ -7,6 +7,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useProjectFullState } from '@/hooks/use-project-full-state';
 import type { ZhibiState } from '@/types/state';
 import { fetchOpportunities, type OpportunityView, type OpportunityFoundation, type OpportunityDimensionBasis, type OpportunityEvidenceRef } from '@/lib/core-api';
 import { EvidenceDrawer } from '@/components/data-surface/evidence-drawer';
@@ -810,7 +811,12 @@ export default function OpportunityPage() {
 }
 
 function OpportunityInner() {
-  const { state, loading } = useZhibiState();
+  // r3 §四：机会图 / 市场空白需要完整真值（summary 只带首屏摘要）→ 本页按需自取
+  const { state: summaryState, loading: summaryLoading } = useZhibiState();
+  const summaryProjectId = (summaryState && typeof summaryState.projectId === 'string') ? summaryState.projectId : undefined;
+  const { state: fullState, loading: fullLoading } = useProjectFullState(summaryProjectId, { demoFallback: summaryState });
+  const state = fullState;
+  const loading = summaryLoading || (!!summaryProjectId && fullLoading);
   const searchParams = useSearchParams();
   const [hl, setHl] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);

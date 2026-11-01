@@ -4,6 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
 import { useDiscover, type DiscoverCard } from '@/hooks/use-discover';
+import { useDiscoverStatus } from '@/hooks/use-discover-status';
 import { OverviewCards } from '@/components/overview-cards';
 import { EvidenceBar, type EvidenceDist } from '@/components/evidence-bar';
 import { GuideTour, guideNeeded } from '@/components/guide-tour';
@@ -321,6 +322,15 @@ function WorkbenchInner() {
   // r3 §三：进入工作台即做一次轻量对账（补缺失首采 + 续跑卡住的来源），
   // 并把品牌级来源状态摆到台面上——用户不需要逐品牌点击才开始采集。
   const projectId = searchParams.get('projectId') || (state && state.projectId) || '';
+  // r3 §六：进入工作台立刻打轻量状态接口（<10KB、no-store），状态横幅不再等 1.1MB 的 state。
+  // URL 上没有 projectId 时也照样请求——后端按当前项目指针返回，首帧即可判定。
+  const statusView = useDiscoverStatus(searchParams.get('projectId') || '');
+  const dstatus = statusView.status;
+  // 本地启动/结束一次识别后，状态接口可能与 SSE 有时间差：running 变化时补一次刷新
+  useEffect(() => {
+    statusView.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discover.running]);
   const [health, setHealth] = useState<BrandsHealthSummary | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const [healthMsg, setHealthMsg] = useState<string | null>(null);
@@ -364,7 +374,7 @@ function WorkbenchInner() {
   }, [loading, state]);
 
   const msAll = ((state && state.materials) || []) as WbMaterial[];
-  const hasTrack = !!(state && (state.track || (state.competitors && state.competitors.length)));
+  const hasTrack = !!(dstatus?.track || (state && (state.track || (state.competitors && state.competitors.length))));
   const showOnboarding =
     !loading &&
     !discover.running &&
@@ -411,20 +421,38 @@ function WorkbenchInner() {
     }
   }
 
-  // —— 品牌识别状态（r2 §五/§七）——
-  // 统一走后端投影 state.discoverState（与 /api/projects、切换档案同一口径），
-  // 前端不再自己拼 discoverDone/discoverEmpty 组合，避免「历史伪空」被读成「市场没品牌」。
-  const view = (state && (state as Record<string, unknown>).discoverState) as
+  // —— 品牌识别状态（r3 §六：以轻量状态接口为准，state 兜底）——
+  // 状态接口 <10KB，首帧就能拿到 failed/running/done/empty/incomplete；
+  // state 里的 discoverState 是同一后端口径，仅在状态接口尚未返回时兜底。
+  const stateView = (state && (state as Record<string, unknown>).discoverState) as
     | { phase?: string; keptPrevious?: boolean; message?: string | null; incomplete?: boolean }
     | undefined;
-  const taskError = (state && (state as Record<string, unknown>).discoverError) as
+  const view = dstatus
+    ? { phase: dstatus.phase, keptPrevious: dstatus.keptPrevious, message: dstatus.message, incomplete: dstatus.incomplete }
+    : stateView;
+  const stateError = (state && (state as Record<string, unknown>).discoverError) as
     | { errorCode: string; errorMessage: string; failedAt: string; previousProjectId?: string | null; keptPrevious?: boolean }
     | null
     | undefined;
+  // 状态接口到达后以它为准（包括「确实没有错误」），避免上一次 state 的失败态残留
+  const taskError = dstatus
+    ? (dstatus.discoverError
+      ? {
+        errorCode: dstatus.discoverError.errorCode || '',
+        errorMessage: dstatus.discoverError.errorMessage || '',
+        failedAt: dstatus.discoverError.failedAt || '',
+        previousProjectId: dstatus.discoverError.previousProjectId || null,
+        keptPrevious: !!(dstatus.discoverError.keptPrevious ?? dstatus.keptPrevious),
+      }
+      : null)
+    : (stateError || null);
   // 兜底：后端缺投影（旧部署/局部响应）时按 raw 标记推导，口径与 discover-state.js 一致
   const phase: string = view?.phase || (taskError ? 'failed'
     : (state && (state as Record<string, unknown>).discoverEmpty) ? 'empty'
       : state?.track ? 'done' : 'no_track');
+  // 赛道名以状态接口优先：state 还在路上时也能立刻给出「重新识别」按钮
+  const taskTrack = (dstatus && dstatus.track) || state?.track || '';
+  const taskProjectId = (dstatus && dstatus.projectId) || state?.projectId || '';
   const taskEmpty = phase === 'empty';
   const taskIncomplete = phase === 'incomplete';
   const bannerError = taskError
@@ -433,10 +461,11 @@ function WorkbenchInner() {
       ? discover.error
       : null;
   const retryDiscover = () => {
-    if (!state?.track || discover.running) return;
-    const intent = (state.intent as Record<string, unknown>) || {};
+    if (!taskTrack || discover.running) return;
+    const intent = (state?.intent as Record<string, unknown>) || {};
     // r2 §三：带 retryProjectId → 后端在同一项目内新起一次运行（不产生第二个项目）
-    void discover.start(state.track, intent, { retryProjectId: state.projectId });
+    void discover.start(taskTrack, intent, taskProjectId ? { retryProjectId: taskProjectId } : undefined);
+    statusView.refresh();
   };
   const errorBanner = bannerError && !discover.running ? (
     <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="alert" data-testid="discover-error">
@@ -451,9 +480,9 @@ function WorkbenchInner() {
               : '⚠ ' + (bannerError.message || '本次品牌识别未完成，请稍后重新识别。')}
       </p>
       {bannerError.code === 'DISCOVER_QUOTA' && <WaitlistForm />}
-      {state?.track && bannerError.code !== 'DISCOVER_QUOTA' && bannerError.code !== 'NO_KEYS' && (
+      {taskTrack && bannerError.code !== 'DISCOVER_QUOTA' && bannerError.code !== 'NO_KEYS' && (
         <p style={{ margin: '8px 0 0' }}>
-          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{taskTrack}」</button>
           {!bannerError.keptPrevious && taskError?.previousProjectId ? (
             <button
               className="btn-ghost"
@@ -473,9 +502,9 @@ function WorkbenchInner() {
     <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="status" data-testid="discover-incomplete">
       <p className="hint">上一次品牌识别未完整完成，请重新识别。</p>
       <p className="hint">这不是「这个市场没有品牌」——只是上一次运行没有跑完，重新识别会覆盖本项目的品牌结果。</p>
-      {state?.track && (
+      {taskTrack && (
         <p style={{ margin: '8px 0 0' }}>
-          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{taskTrack}」</button>
         </p>
       )}
     </div>
@@ -484,9 +513,9 @@ function WorkbenchInner() {
   const emptyVerifiedBanner = taskEmpty && !discover.running ? (
     <div className="discover-error-box" style={{ margin: '0 0 12px' }} role="status" data-testid="discover-empty">
       <p className="hint">识别已完成：本次未找到通过交叉核验的竞争品牌（可能是极小众赛道或线索不足）。你可以换个更具体的赛道描述重新识别。</p>
-      {state?.track && (
+      {taskTrack && (
         <p style={{ margin: '8px 0 0' }}>
-          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{state.track}」</button>
+          <button className="btn-primary" type="button" onClick={retryDiscover}>重新识别「{taskTrack}」</button>
         </p>
       )}
     </div>
@@ -515,11 +544,11 @@ function WorkbenchInner() {
       {emptyVerifiedBanner}
       {updatingStrip}
       {/* 首页 Hero —— 黑底卡片 + 纯白渐变文本 + 白底主操作 */}
-      {state?.track ? (
+      {taskTrack ? (
         <section className="wb-hero">
           <div className="wbh-left">
             <div className="wbh-kicker">AI 竞争情报分析师</div>
-            <div className="wbh-title">{state.track}</div>
+            <div className="wbh-title">{taskTrack}</div>
             <div className="wbh-sub">持续监测竞争品牌动态与价格变化</div>
           </div>
           <div className="wbh-right">

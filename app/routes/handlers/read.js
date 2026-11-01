@@ -7,6 +7,7 @@
 // ============================================================
 
 const { marketCurrency } = require('../../research/vocab.js'); // B-7b：quadrant 币种过滤口径
+const { buildStateSummary } = require('../../services/state-summary.js'); // r3 §四：首屏摘要投影片
 
 // ---------- /api/version（public） ----------
 async function version(ctx, req, res, url, p) {
@@ -16,9 +17,13 @@ async function version(ctx, req, res, url, p) {
 }
 
 // ---------- /api/state（GET：全量派生状态） ----------
+// r3 §四：新增 scope=summary（首屏摘要，<150KB）与 projectId（按 id 读本租户档案）。
+// 不带 scope 的调用保持原有全量行为，旧调用零改动。
 async function state(ctx, req, res, url, p) {
   if (p !== '/api/state' || req.method !== 'GET') return false;
   const privateView = url.searchParams.get('private_view') === '1';
+  const scope = String(url.searchParams.get('scope') || '').toLowerCase();
+  const wantedId = String(url.searchParams.get('projectId') || '').trim();
   let identity = null;
   if (privateView) {
     identity = ctx.resolveIdentity(req, ctx.config0);
@@ -26,7 +31,18 @@ async function state(ctx, req, res, url, p) {
       ctx.sendJSON(res, 403, { error: 'PRIVATE_VIEW_UNAVAILABLE', message: '当前身份不支持私有视图，请重新登录。' }); return true;
     }
   }
-  const loaded = ctx.loadState();
+  // 指定 projectId 时只在本租户命名空间内读取：跨租户/不存在的 id 一律 404，
+  // 不区分「不存在」与「不属于你」，避免泄漏项目存在性（§三.3）。
+  let loaded;
+  if (wantedId) {
+    loaded = ctx.readProject(wantedId, ctx.resolveTenantId());
+    if (!loaded) {
+      ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '项目不存在。' });
+      return true;
+    }
+  } else {
+    loaded = ctx.loadState();
+  }
   // Existing field builders may mutate returned objects (e.g. soft quarantine).
   // Private projection must never share mutable references with the public state.
   const s = privateView && loaded ? JSON.parse(JSON.stringify(loaded)) : loaded;
@@ -55,7 +71,41 @@ async function state(ctx, req, res, url, p) {
       }
     }
   }
-  ctx.sendJSON(res, 200, s || { track: null });
+  if (!s) { ctx.sendJSON(res, 200, { track: null, scope: scope === 'summary' ? 'summary' : 'full' }); return true; }
+  if (scope === 'summary') {
+    // 只读投影：buildStateSummary 返回全新对象，s 本身不动（不得原地裁剪）
+    ctx.sendJSON(res, 200, buildStateSummary(s), { 'Cache-Control': 'no-store' });
+    return true;
+  }
+  ctx.sendJSON(res, 200, s);
+  return true;
+}
+
+// ---------- /api/competitor-detail（GET：单品品牌详情，按需加载） ----------
+// r3 §五：工作台首屏不再携带 attempts / evidenceList / fieldSources；
+// 用户点开某个品牌时按需取这**一个**品牌的完整对象（含证据与字段来源）。
+// 租户边界与 /api/state 完全一致：只在本租户命名空间内查，跨租户与不存在都 404。
+async function competitorDetail(ctx, req, res, url, p) {
+  if (p !== '/api/competitor-detail' || req.method !== 'GET') return false;
+  const projectId = String(url.searchParams.get('projectId') || '').trim();
+  const competitorId = String(url.searchParams.get('competitorId') || '').trim();
+  if (!competitorId) { ctx.sendJSON(res, 400, { error: 'NO_COMPETITOR_ID', message: '缺少品牌标识。' }); return true; }
+  const tid = ctx.resolveTenantId();
+  const raw = projectId ? ctx.readProject(projectId, tid) : ctx.loadState();
+  if (!raw) { ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '项目不存在。' }); return true; }
+  // 与 /api/state 走同一条派生链路，保证详情与摘要/全量同源（不另算口径）
+  const s = JSON.parse(JSON.stringify(raw));
+  if (!Array.isArray(s.excluded)) s.excluded = [];
+  s.progress = { total: (s.competitors || []).length, done: (s.competitors || []).filter(c => c.status === 'done').length };
+  ctx.decorateState(s);
+  const comp = (s.competitors || []).find(c => c && c.id === competitorId);
+  if (!comp) { ctx.sendJSON(res, 404, { error: 'NOT_FOUND', message: '品牌不存在。' }); return true; }
+  ctx.sendJSON(res, 200, {
+    projectId: s.projectId || null,
+    competitorId: comp.id,
+    competitor: comp,
+    updatedAt: comp.researchedAt || null,
+  }, { 'Cache-Control': 'no-store' });
   return true;
 }
 
@@ -167,5 +217,5 @@ async function compare(ctx, req, res, url, p) {
 }
 
 module.exports = {
-  version, state, domains, materials, heroes, radarChanges, quadrant, compare,
+  version, state, competitorDetail, domains, materials, heroes, radarChanges, quadrant, compare,
 };

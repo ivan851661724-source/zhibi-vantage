@@ -8,6 +8,7 @@
 // P1-4 纪律：任何渲染异常都不允许留下空白面板——派生计算包 try/catch 兜底空态。
 import { useEffect, useMemo, useState } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useProjectFullState } from '@/hooks/use-project-full-state';
 import { apiPost } from '@/lib/api';
 import { useIsDemoMode } from '@/lib/demo';
 import { DemoPageGuard } from '@/components/demo-page-guard';
@@ -290,7 +291,12 @@ export default function AssetsPage() {
 }
 
 function AssetsPageInner() {
-  const { state, loading } = useZhibiState();
+  // r3 §四：蓝海 / 趋势 / 白空间 / 机会都是完整真值才有的聚合 → 本页按需自取完整 state
+  const { state: summary, loading: summaryLoading } = useZhibiState();
+  const projectId = (summary && typeof summary.projectId === 'string') ? summary.projectId : undefined;
+  const { state: fullState, loading: fullLoading } = useProjectFullState(projectId, { demoFallback: summary });
+  const state = fullState;
+  const loading = summaryLoading || (!!projectId && fullLoading);
   const [r, setR] = useState<SectorResp | null>(null);
   const [fetching, setFetching] = useState(false);
 

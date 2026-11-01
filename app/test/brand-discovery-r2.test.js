@@ -456,7 +456,8 @@ function dirContains(root, needle) {
     assert.ok(/evtPid !== currentPidRef\.current|evtPid === currentPidRef\.current/.test(hook), 'SSE 事件按当前项目过滤（防跨项目串扰）');
     assert.ok(/keptPrevious/.test(hook), '失败态携带 keptPrevious（旧结果仍可查看）');
     const page = fs.readFileSync(nodePath.join(__dirname, '../../web/src/app/(panel)/page.tsx'), 'utf8');
-    assert.ok(/retryProjectId: state\.projectId/.test(page), '页面重新识别 = 同项目新起一次运行（不再新建项目）');
+    // r3：赛道/项目 id 现在优先取轻量状态接口（state 未到时也能重试），语义不变——仍是同项目新起一次运行
+    assert.ok(/retryProjectId: (taskProjectId|state\.projectId)/.test(page), '页面重新识别 = 同项目新起一次运行（不再新建项目）');
     assert.ok(/上一次品牌识别未完整完成/.test(page), '历史未完成文案在页面上');
     assert.ok(/本次更新失败，上一次成功结果仍可查看/.test(page), '更新失败但旧结果保留的文案在页面上');
   });

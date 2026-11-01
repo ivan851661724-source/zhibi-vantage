@@ -1044,3 +1044,55 @@ export function inspectAllTargets(projectId: string) {
 export function planMonitoringReconcile(projectId: string) {
   return apiPost<{ ok: boolean; totalBrands: number; createdCount: number; skippedCount: number; failed: number; message: string }>('/api/monitoring/plan-reconcile', { projectId });
 }
+
+// ============================================================
+// r3 §三/§五：首屏轻量状态 + 单品牌按需详情
+// ------------------------------------------------------------
+// 为什么要单独的状态接口：完整 /api/state 是 1.1MB，公网 10–30 秒才到前端，
+// 失败横幅因此要等十几秒。状态接口只回答「这次识别怎么样了」，<10KB、no-store。
+// ============================================================
+export type DiscoverPhase = 'failed' | 'running' | 'done' | 'empty' | 'incomplete' | 'no_track';
+
+export interface DiscoverStatus {
+  projectId: string | null;
+  track: string | null;
+  runId: string | null;
+  attemptNo: number;
+  running: boolean;
+  discoverDone: boolean;
+  discoverEmpty: boolean;
+  discoverError: {
+    errorCode: string | null;
+    errorMessage: string | null;
+    failedAt: string | null;
+    previousProjectId?: string | null;
+    keptPrevious?: boolean;
+  } | null;
+  keptPrevious: boolean;
+  phase: DiscoverPhase;
+  incomplete: boolean;
+  message: string | null;
+  competitorCount: number;
+  updatedAt: string;
+}
+
+export function fetchDiscoverStatus(projectId: string, signal?: AbortSignal) {
+  const q = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+  // _t：轮询绕过任何中间层缓存；服务端同时下发 Cache-Control: no-store
+  return apiGet<DiscoverStatus>(`/api/discover/status${q}${q ? '&' : '?'}_t=${Date.now()}`, signal);
+}
+
+export interface CompetitorDetailResponse {
+  projectId: string | null;
+  competitorId: string;
+  /** 该品牌的完整对象（含 attempts / fieldSources / evidenceList，仅供详情抽屉使用） */
+  competitor: Record<string, unknown>;
+  updatedAt: string | null;
+}
+
+export function fetchCompetitorDetail(projectId: string, competitorId: string, signal?: AbortSignal) {
+  const qs = new URLSearchParams();
+  if (projectId) qs.set('projectId', projectId);
+  qs.set('competitorId', competitorId);
+  return apiGet<CompetitorDetailResponse>(`/api/competitor-detail?${qs.toString()}`, signal);
+}

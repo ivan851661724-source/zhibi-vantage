@@ -92,6 +92,9 @@ export function useDiscover() {
   // 「当前项目」或「本次刚启动的项目」一致才消费，否则丢弃。
   const currentPidRef = useRef<string>('');
   const launchedPidRef = useRef<string>('');
+  // r3 §三.6：同一 projectId 内的重试是「新一次运行」，只按 projectId 无法区分；
+  // 事件带 runId 时再校验一次，旧运行迟到的事件不得改写本次运行的进度/结果。
+  const runIdRef = useRef<string>('');
 
   // —— 持久失败态恢复：state.discoverError → 本地 error（刷新后依然可见） ——
   // 只有当前项目就是失败项目时才显示（成功重试产生新项目后自动消失）。
@@ -107,6 +110,7 @@ export function useDiscover() {
     setCards({});
     setRunInfo(null);
     launchedPidRef.current = '';
+    runIdRef.current = '';
   }, [stProjectId]);
   useEffect(() => {
     if (running) return;
@@ -138,6 +142,9 @@ export function useDiscover() {
           const mine = evtPid === currentPidRef.current || evtPid === launchedPidRef.current;
           if (!mine) return;
         }
+        // 同项目内的旧运行事件：事件带 runId 且与本轮 runId 不同 → 丢弃
+        const evtRun = typeof evt.runId === 'string' ? evt.runId : '';
+        if (evtRun && runIdRef.current && evtRun !== runIdRef.current) return;
         switch (evt.type) {
           case 'discover_stage': {
             setProgress({
@@ -200,6 +207,7 @@ export function useDiscover() {
         const res = await apiPost('/api/discover', { track, intent, retryProjectId: opts?.retryProjectId });
         const body = (res || {}) as Record<string, unknown>;
         launchedPidRef.current = typeof body.projectId === 'string' ? body.projectId : '';
+        runIdRef.current = typeof body.runId === 'string' ? body.runId : '';
         setRunInfo({
           runId: typeof body.runId === 'string' ? body.runId : null,
           attemptNo: typeof body.attemptNo === 'number' ? body.attemptNo : null,

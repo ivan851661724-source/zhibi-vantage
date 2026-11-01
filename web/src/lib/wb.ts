@@ -128,7 +128,8 @@ function wbSyncServer(matId: string, action: WbAction | '', context: WorkbenchCo
         if (!currentQueue.pending.length) {
           const revision = currentQueue.revision;
           try {
-            const state = await apiGet<{ projectId?: string; decisions?: unknown }>('/api/state');
+            // r3 §四：这里只需要 decisions，用摘要接口即可（完整 state 是 1.1MB，白等十几秒）
+            const state = await apiGet<{ projectId?: string; decisions?: unknown }>('/api/state?scope=summary');
             if (contextCurrent(context) && revision === currentQueue.revision && state.projectId === context.projectId) projectDecisions(state.decisions, context);
           } catch { /* Cached view remains scoped; a later state refresh can reconcile. */ }
         }

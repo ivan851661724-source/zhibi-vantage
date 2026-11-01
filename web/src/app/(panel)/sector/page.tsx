@@ -4,6 +4,7 @@
 // 数据全部由前端从 state.competitors 聚合（与旧版同一份计算逻辑，非后端派生）。
 import { useMemo } from 'react';
 import { useZhibiState } from '@/hooks/use-zhibi-state';
+import { useProjectFullState } from '@/hooks/use-project-full-state';
 import { fmtPrice, lbl } from '@/lib/labels';
 
 interface DoneComp {
@@ -35,7 +36,12 @@ function Quad({ title, body }: { title: string; body: React.ReactNode }) {
 }
 
 export default function SectorPage() {
-  const { state, loading } = useZhibiState();
+  // r3 §四：首屏 state 只带摘要（不含品牌级明细），象限/分布需要完整真值 → 本页按需自取
+  const { state: summary, loading: summaryLoading } = useZhibiState();
+  const projectId = (summary && typeof summary.projectId === 'string') ? summary.projectId : undefined;
+  const { state: fullState, loading: fullLoading } = useProjectFullState(projectId, { demoFallback: summary });
+  const state = fullState;
+  const loading = summaryLoading || (!!projectId && fullLoading);
 
   const agg = useMemo(() => {
     if (!state) return null;

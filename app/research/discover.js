@@ -199,7 +199,9 @@ async function runDiscover(track, intent, config, emit, projectId, runId, opts) 
   });
   _initState.tenantId = _tenantId;
   // 业务事件显式携带 tenantId（后台队列可能脱离请求上下文；sse-hub 据此按租户投递）
-  const emitT = (t, p) => (typeof emit === 'function') ? emit(t, Object.assign({}, p, { tenantId: _tenantId })) : undefined;
+  // r3 §三.6：事件同时携带 runId —— 前端据此区分「同项目的新一次运行」与「旧运行迟到的事件」，
+  // 只靠 projectId 无法识别重试前后的两次运行（同一 projectId）。
+  const emitT = (t, p) => (typeof emit === 'function') ? emit(t, Object.assign({}, p, { tenantId: _tenantId, runId: _runId })) : undefined;
   setCurrentId(pid, _tenantId);
   saveState(_initState);                                  // ← 关键：首个外部 await 之前落盘
   // Phase 1 可观测性：调研起点（request_received + runs 起始时间戳），运行上下文供深层
@@ -561,7 +563,7 @@ function discoverLaunch(track, intent, config, gate, opts) {
             saveState(s);
           }
         } catch (e2) { /* 持久化失败不影响错误上报 */ }
-        emitSSE('discover_error', { projectId, code, message: msg, keptPrevious: !!(prevState && (prevState.competitors || []).length), tenantId: tid });
+        emitSSE('discover_error', { projectId, code, message: msg, keptPrevious: !!(prevState && (prevState.competitors || []).length), tenantId: tid, runId });
       })
       .finally(() => {
         if (discoverInflight.get(inflightKey) === projectId) discoverInflight.delete(inflightKey);

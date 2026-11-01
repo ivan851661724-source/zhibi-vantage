@@ -14,6 +14,7 @@ const MetricsH = require('./handlers/metrics.js');
 const FeedbackH = require('./handlers/feedback.js');
 const SystemH = require('./handlers/system.js');
 const CollectH = require('./handlers/collect.js');
+const DiscoverStatusH = require('./handlers/discover-status.js'); // r3 §三：轻量识别状态（<10KB，no-store）
 const CorrectionH = require('./handlers/correction.js');
 const MiscH = require('./handlers/misc.js');
 const TelemetryH = require('./handlers/telemetry.js');
@@ -47,6 +48,9 @@ function registerAll() {
   // —— 只读/派生组 ——
   registry.register('GET', '/api/version', 'public', ReadH.version);
   registry.register('GET', '/api/state', 'tenant', ReadH.state);
+  // r3 §三/§五：首屏轻量状态 + 单品牌详情按需加载
+  registry.register('GET', '/api/discover/status', 'tenant', DiscoverStatusH.discoverStatus);
+  registry.register('GET', '/api/competitor-detail', 'tenant', ReadH.competitorDetail);
   registry.register('GET', '/api/domains', 'tenant', ReadH.domains);
   registry.register('GET', '/api/materials', 'tenant', ReadH.materials);
   registry.register('GET', '/api/heroes', 'tenant', ReadH.heroes);

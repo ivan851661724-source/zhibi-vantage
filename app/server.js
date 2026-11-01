@@ -63,8 +63,10 @@ const PUBLIC_PATHS = new Set(['/api/version', '/api/public-config', '/api/login'
 // 登录/注册/超管登录：独立严格限流（防在线爆破 + scrypt 同步阻塞放大为 DoS）
 const LOGIN_PATHS = new Set(['/api/login', '/api/register', '/api/auth/login', '/api/auth/register', '/api/admin/login']);
 
-function sendJSON(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+function sendJSON(res, code, obj, headers) {
+  // r3：可选附加响应头（如 Cache-Control: no-store）——不带时行为与旧版完全一致
+  const base = { 'Content-Type': 'application/json; charset=utf-8' };
+  res.writeHead(code, headers ? Object.assign(base, headers) : base);
   res.end(JSON.stringify(obj));
   return true; // registry 契约（handled === true）：handler 'return ctx.sendJSON(...)' 即视为已处理
 }
