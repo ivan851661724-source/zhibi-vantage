@@ -87,12 +87,27 @@ export function useDiscover() {
   const [error, setError] = useState<DiscoverError | null>(null);
   const [runInfo, setRunInfo] = useState<DiscoverRunInfo | null>(null);
   const pollStopRef = useRef(false);
+  // r2 §七：SSE 是「按租户」分通道的——同租户下别的项目（或另一个标签页）的
+  // discover_* 事件绝不能改写当前项目页面的状态。事件必须带 projectId 且与
+  // 「当前项目」或「本次刚启动的项目」一致才消费，否则丢弃。
+  const currentPidRef = useRef<string>('');
+  const launchedPidRef = useRef<string>('');
 
   // —— 持久失败态恢复：state.discoverError → 本地 error（刷新后依然可见） ——
   // 只有当前项目就是失败项目时才显示（成功重试产生新项目后自动消失）。
   const st = (state || null) as (ZhibiDiscoverFields & Record<string, unknown>) | null;
   const stError = st?.discoverError || null;
   const stProjectId = typeof state?.projectId === 'string' ? state.projectId : '';
+  // 每次渲染刷新「当前项目」；启动请求返回后会写 launchedPidRef（新项目 id 可能先于 state 到达）
+  currentPidRef.current = stProjectId;
+  // 切换项目：先清空上一个项目的瞬态错误/进度，再按下方的持久失败态判定重新填充
+  useEffect(() => {
+    setError(null);
+    setProgress(null);
+    setCards({});
+    setRunInfo(null);
+    launchedPidRef.current = '';
+  }, [stProjectId]);
   useEffect(() => {
     if (running) return;
     if (stError) setError({ code: stError.errorCode, message: stError.errorMessage, keptPrevious: !!stError.keptPrevious });
@@ -117,6 +132,12 @@ export function useDiscover() {
   useEffect(
     () =>
       subscribe((evt) => {
+        // 跨项目事件隔离：只有「当前项目」或「本次刚启动的项目」的事件才消费
+        const evtPid = typeof evt.projectId === 'string' ? evt.projectId : '';
+        if (evtPid) {
+          const mine = evtPid === currentPidRef.current || evtPid === launchedPidRef.current;
+          if (!mine) return;
+        }
         switch (evt.type) {
           case 'discover_stage': {
             setProgress({
@@ -178,6 +199,7 @@ export function useDiscover() {
         // （不新建用户可见项目；赛道/地区/核心条件变化时后端自动改走新项目）。
         const res = await apiPost('/api/discover', { track, intent, retryProjectId: opts?.retryProjectId });
         const body = (res || {}) as Record<string, unknown>;
+        launchedPidRef.current = typeof body.projectId === 'string' ? body.projectId : '';
         setRunInfo({
           runId: typeof body.runId === 'string' ? body.runId : null,
           attemptNo: typeof body.attemptNo === 'number' ? body.attemptNo : null,

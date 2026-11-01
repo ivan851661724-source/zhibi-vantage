@@ -444,6 +444,21 @@ function dirContains(root, needle) {
     }
   });
 
+  // ============================================================
+  // 14：前端契约（源码级回归守卫）
+  // ============================================================
+  await t('14 前端契约：重试携带 retryProjectId；SSE 事件按 projectId 过滤（不串项目）', async () => {
+    const hook = fs.readFileSync(nodePath.join(__dirname, '../../web/src/hooks/use-discover.ts'), 'utf8');
+    assert.ok(/retryProjectId/.test(hook), '重试请求携带 retryProjectId');
+    assert.ok(/apiPost\('\/api\/discover', \{ track, intent, retryProjectId/.test(hook), 'POST /api/discover 带 retryProjectId');
+    assert.ok(/evtPid !== currentPidRef\.current|evtPid === currentPidRef\.current/.test(hook), 'SSE 事件按当前项目过滤（防跨项目串扰）');
+    assert.ok(/keptPrevious/.test(hook), '失败态携带 keptPrevious（旧结果仍可查看）');
+    const page = fs.readFileSync(nodePath.join(__dirname, '../../web/src/app/(panel)/page.tsx'), 'utf8');
+    assert.ok(/retryProjectId: state\.projectId/.test(page), '页面重新识别 = 同项目新起一次运行（不再新建项目）');
+    assert.ok(/上一次品牌识别未完整完成/.test(page), '历史未完成文案在页面上');
+    assert.ok(/本次更新失败，上一次成功结果仍可查看/.test(page), '更新失败但旧结果保留的文案在页面上');
+  });
+
   global.fetch = REAL_FETCH;
   console.log('\n----------------------------------------');
   console.log('通过 ' + passed + ' / 失败 ' + failed);
