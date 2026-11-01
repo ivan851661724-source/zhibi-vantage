@@ -103,11 +103,17 @@ function sameDiscoveryConditions(prev, track, intent) {
   if (!t2 || t1 !== t2) return false;
   const pi = prev.intent || {};
   const ni = intent || {};
-  if (JSON.stringify(_normArr(pi.regions)) !== JSON.stringify(_normArr(ni.regions))) return false;
-  if (JSON.stringify(_normArr(pi.goals)) !== JSON.stringify(_normArr(ni.goals))) return false;
+  // 未声明的维度视为「用户没改」：只比较调用方**显式提供**的维度。
+  // 反例（r2 实测踩到）：重试只传 {track}（不带 intent）时，缺 platforms 会被判成「条件变化」
+  // → 又建一个新项目，正是本轮要消除的污染。
+  const has = (a) => Array.isArray(a) && a.length > 0;
+  if (has(ni.regions) && JSON.stringify(_normArr(pi.regions)) !== JSON.stringify(_normArr(ni.regions))) return false;
+  if (has(ni.goals) && JSON.stringify(_normArr(pi.goals)) !== JSON.stringify(_normArr(ni.goals))) return false;
   // platforms 在档案里是 resolvePlatforms 后的结果；前端重试回传的是同一份 intent，正常一致
-  if (JSON.stringify(_normArr(pi.platforms)) !== JSON.stringify(_normArr(ni.platforms))) return false;
-  if (_normObj(pi.profile) !== _normObj(ni.profile)) return false;
+  if (has(ni.platforms) && JSON.stringify(_normArr(pi.platforms)) !== JSON.stringify(_normArr(ni.platforms))) return false;
+  const np = ni.profile;
+  const hasProfile = !!(np && typeof np === 'object' && Object.keys(np).length > 0);
+  if (hasProfile && _normObj(pi.profile) !== _normObj(np)) return false;
   return true;
 }
 

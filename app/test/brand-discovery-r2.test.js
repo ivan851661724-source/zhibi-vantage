@@ -260,8 +260,10 @@ function dirContains(root, needle) {
     assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['pricing'], regions: ['us'], platforms: ['amazon'], profile: { price: 'mid' } }), true, '同条件 → 复用');
     assert.equal(DState.sameDiscoveryConditions(prev, 'custom cat tags', { goals: ['pricing'], regions: ['us'], platforms: ['amazon'], profile: { price: 'mid' } }), false, '赛道变 → 新建');
     assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['pricing'], regions: ['uk'], platforms: ['amazon'], profile: { price: 'mid' } }), false, '地区变 → 新建');
-    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['launch'], regions: ['us'], platforms: ['amazon'], profile: { price: 'mid' } }), false, '核心诉求变 → 新建');
-    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['pricing'], regions: ['us'], platforms: ['amazon'], profile: { price: 'high' } }), false, '定位画像变 → 新建');
+    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['launch'], regions: ['us'], platforms: ['amazon'], profile: { price: 'mid' } }), false, '核心诉求变 → 新建');    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: ['pricing'], regions: ['us'], platforms: ['amazon'], profile: { price: 'high' } }), false, '定位画像变 → 新建');
+    // 未声明的维度 = 用户没改（实测踩过的污染源：重试只带 track，缺 platforms 被判成「条件变化」）
+    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', { goals: [], regions: [], platforms: [] }), true, '空 intent（未声明维度）→ 视为未变更，复用原项目');
+    assert.equal(DState.sameDiscoveryConditions(prev, 'custom dog tags', undefined), true, '完全不带 intent → 视为未变更');
     assert.equal(DState.sameDiscoveryConditions(null, 'x', {}), false, '无旧档案 → 新建');
   });
 
